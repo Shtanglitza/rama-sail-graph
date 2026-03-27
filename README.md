@@ -44,6 +44,9 @@ lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test
 
 # Run full test suite (~2-5min, starts in-process Rama cluster)
 lein test
+
+# Run RDF4J SAIL compliance tests only
+lein test :only rama-sail.sail.compliance-test
 ```
 
 ### SPARQL HTTP Endpoint
@@ -132,6 +135,35 @@ Deletion uses physical index removal — deleted quads are removed from all four
 | `batch-lookup` | Batch property fetching |
 | `ask-result` | Boolean ASK query support |
 | `execute-plan` | Recursive plan executor |
+
+### RDF4J SAIL Compliance
+
+RamaSail passes the RDF4J **RDFStoreTest** compliance suite (`rdf4j-sail-testsuite` 5.2.0), which validates:
+
+- Statement CRUD (add, remove, get, has) with pattern matching and wildcards
+- Value round-trips (IRIs, BNodes, typed literals, decimals, timezones, long URIs/literals)
+- Named graph / context management (add to context, list contexts, clear)
+- Transaction semantics (commit, rollback, isolation)
+- Namespace management (get, set, remove, clear)
+- Duplicate handling and statement counting
+- Concurrent add-while-querying
+- Dual connections and BNode reuse
+
+**SPARQL operators** handled server-side via Rama topologies:
+
+| Supported | Not Yet Supported (falls back to RDF4J local evaluation) |
+|-----------|----------------------------------------------------------|
+| SELECT, ASK, DESCRIBE, CONSTRUCT | SERVICE (federated queries) |
+| JOIN, LEFT JOIN (OPTIONAL), UNION | Property paths |
+| FILTER (comparisons, logic, regex, IN) | MINUS |
+| GROUP BY, HAVING, aggregates | Subqueries |
+| ORDER BY, DISTINCT, LIMIT/OFFSET | |
+| BIND, VALUES, COALESCE, IF | |
+| STR, LANG, DATATYPE, LANGMATCHES | |
+| ISIRI, ISBNODE, ISLITERAL, ISNUMERIC | |
+| SAMETERM, REGEX | |
+
+Unsupported operators are automatically handled by falling back to RDF4J's `DefaultEvaluationStrategy`, which evaluates locally via `getStatements`. This ensures correct results but without distributed execution benefits.
 
 ### Observability
 
