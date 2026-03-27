@@ -7,7 +7,7 @@
 
 ;; 1. Define a self-contained module for testing find-bgp
 (rama/defmodule FindBgpTestModule [setup topologies]
-  (rama/declare-depot setup *quad-depot (rama/hash-by core/quad-subject))
+  (rama/declare-depot setup *quad-depot (rama/hash-by core/depot-partition-key))
 
   ;; -- Indices & ETL (Same as RdfStorageModule) --
   (let [mb (rama/microbatch-topology topologies "indexer")]
@@ -15,9 +15,6 @@
     (rama/declare-pstate mb $$posc {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
     (rama/declare-pstate mb $$ospc {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
     (rama/declare-pstate mb $$cspo {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
-    ;; Tombstones PState required by find-triples for soft delete filtering
-    (rama/declare-pstate mb $$tombstones {String (rama/map-schema String (rama/map-schema String (rama/map-schema String Long {:subindex? true}) {:subindex? true}) {:subindex? true})})
-
     (rama/<<sources mb
                     (rama/source> *quad-depot :> %microbatch)
                     (%microbatch :> [_ [*s *p *o *c]])
@@ -27,7 +24,6 @@
                     (rama/|hash *c) (rama/local-transform> [(path/keypath *c *s *p) path/NIL->SET path/NONE-ELEM (path/termval *o)] $$cspo)))
 
   ;; -- Topologies under test --
-  (core/find-triples-unfiltered-query-topology topologies) ;; Dependency (find-triples delegates to it)
   (core/find-triples-query-topology topologies) ;; Dependency
   (core/find-bgp-query-topology topologies))    ;; Target
 

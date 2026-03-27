@@ -50,8 +50,8 @@
                         :dependencies [[org.eclipse.rdf4j/rdf4j-sail-testsuite "5.2.0"
                                         :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic]]
                                        [org.junit.platform/junit-platform-console-standalone "1.10.0"]]}
-             :provided {:dependencies [[com.rpl/rama "1.4.0"]
-                                       [org.clojure/clojure "1.12.2"]]}
+             :provided {:dependencies [[com.rpl/rama "1.6.0"]
+                                       [org.clojure/clojure "1.12.4"]]}
              :scale    {:jvm-opts ["-Xss8m" "-Xms12g" "-Xmx12g"]}
              :sparql-uberjar {:aot [rama-sail.server.sparql]
                               :main rama-sail.server.sparql

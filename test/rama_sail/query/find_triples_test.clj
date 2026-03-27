@@ -11,7 +11,7 @@
 ;; 1. Define a minimal module for isolation testing
 (rama/defmodule FindTriplesTestModule [setup topologies]
   ;; Depot for ingesting test quads
-  (rama/declare-depot setup *quad-depot (rama/hash-by core/quad-subject))
+  (rama/declare-depot setup *quad-depot (rama/hash-by core/depot-partition-key))
 
   ;; Declare the 4 Quad Indices required by find-triples
   (let [mb (rama/microbatch-topology topologies "indexer")]
@@ -19,8 +19,6 @@
     (rama/declare-pstate mb $$posc {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
     (rama/declare-pstate mb $$ospc {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
     (rama/declare-pstate mb $$cspo {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
-    ;; Tombstones PState required by find-triples for soft delete filtering
-    (rama/declare-pstate mb $$tombstones {String (rama/map-schema String (rama/map-schema String (rama/map-schema String Long {:subindex? true}) {:subindex? true}) {:subindex? true})})
 
     ;; Simple ETL to populate indices (Add Only)
     (rama/<<sources mb
@@ -36,9 +34,7 @@
                     (rama/|hash *c)
                     (rama/local-transform> [(path/keypath *c *s *p) path/NIL->SET path/NONE-ELEM (path/termval *o)] $$cspo)))
 
-  ;; 2. Register the topologies under test
-  ;; find-triples-unfiltered must be registered first (find-triples delegates to it)
-  (core/find-triples-unfiltered-query-topology topologies)
+  ;; 2. Register the find-triples topology
   (core/find-triples-query-topology topologies))
 
 (deftest test-find-triples-permutations
