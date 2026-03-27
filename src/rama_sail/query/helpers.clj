@@ -83,13 +83,14 @@
           false)))))
 
 (defn generate-self-join-pairs
-  "Generate all valid pairs from a group of subjects sharing the same join key.
+  "Generate valid pairs from a group of subjects sharing the same join key.
    Applies inequality filter during generation to avoid creating invalid pairs.
+   When result-limit is non-nil, stops generating after that many pairs.
 
    Optimization: For :lt or :gt filters where filter-left matches left-subject,
    we SORT the subjects first, then generate only pairs where i < j (for :lt)
    or i > j (for :gt), cutting the number of pairs in half."
-  [subjects join-value left-subject right-subject join-var filter-spec]
+  [subjects join-value left-subject right-subject join-var filter-spec result-limit]
   (let [;; Check if we can apply the half-pairs optimization
         ;; Only when filter-left matches left-subject and op is :lt or :gt
         optimized-range? (and filter-spec
@@ -99,34 +100,32 @@
         subject-vec (if optimized-range?
                       (vec (sort subjects))
                       (vec subjects))
-        n (count subject-vec)]
-    (if optimized-range?
-      ;; Optimized: subjects are sorted, generate only ordered index pairs
-      ;; For :lt filter, when subjects are sorted ascending:
-      ;;   subject-vec[i] < subject-vec[j] when i < j
-      ;; For :gt filter, when subjects are sorted ascending:
-      ;;   subject-vec[i] > subject-vec[j] when i > j
-      (let [op (:op filter-spec)]
-        (for [i (range n)
-              j (if (= op :lt)
-                  (range (inc i) n)    ;; i < j means s1 < s2 (sorted ascending)
-                  (range 0 i))         ;; i > j means s1 > s2 (sorted ascending)
-              :let [s1 (subject-vec i)
-                    s2 (subject-vec j)]]
-          ;; No need to call apply-inequality-filter - the sorted indices guarantee it
-          {left-subject s1
-           right-subject s2
-           join-var join-value}))
-      ;; Standard: generate all pairs (not= i j), apply filter
-      (for [i (range n)
-            j (range n)
-            :when (not= i j)
-            :let [s1 (subject-vec i)
-                  s2 (subject-vec j)]
-            :when (apply-inequality-filter s1 s2 filter-spec left-subject right-subject)]
-        {left-subject s1
-         right-subject s2
-         join-var join-value}))))
+        n (count subject-vec)
+        pairs (if optimized-range?
+                ;; Optimized: subjects are sorted, generate only ordered index pairs
+                (let [op (:op filter-spec)]
+                  (for [i (range n)
+                        j (if (= op :lt)
+                            (range (inc i) n)
+                            (range 0 i))
+                        :let [s1 (subject-vec i)
+                              s2 (subject-vec j)]]
+                    {left-subject s1
+                     right-subject s2
+                     join-var join-value}))
+                ;; Standard: generate all pairs (not= i j), apply filter
+                (for [i (range n)
+                      j (range n)
+                      :when (not= i j)
+                      :let [s1 (subject-vec i)
+                            s2 (subject-vec j)]
+                      :when (apply-inequality-filter s1 s2 filter-spec left-subject right-subject)]
+                  {left-subject s1
+                   right-subject s2
+                   join-var join-value}))]
+    (if result-limit
+      (take result-limit pairs)
+      pairs)))
 
 (defn build-subject-groups
   "Build a map grouping subjects by their object value.
@@ -142,14 +141,31 @@
    bgp-results))
 
 (defn process-subject-groups
-  "Process grouped subjects and generate all valid self-join pairs."
-  [groups left-subject right-subject join-var filter-spec]
-  (into #{}
-        (mapcat
-         (fn [[join-value subjects]]
-           (when (> (count subjects) 1)
-             (generate-self-join-pairs subjects join-value left-subject right-subject join-var filter-spec))))
-        groups))
+  "Process grouped subjects and generate all valid self-join pairs.
+   When result-limit is non-nil, stops after collecting that many pairs."
+  ([groups left-subject right-subject join-var filter-spec]
+   (process-subject-groups groups left-subject right-subject join-var filter-spec nil))
+  ([groups left-subject right-subject join-var filter-spec result-limit]
+   (if result-limit
+     ;; With limit: use reduce to short-circuit once we have enough
+     (reduce
+      (fn [acc [join-value subjects]]
+        (if (>= (count acc) result-limit)
+          (reduced acc)
+          (if (> (count subjects) 1)
+            (let [remaining (- result-limit (count acc))
+                  pairs (generate-self-join-pairs subjects join-value left-subject right-subject join-var filter-spec remaining)]
+              (into acc pairs))
+            acc)))
+      #{}
+      groups)
+     ;; Without limit: original behavior
+     (into #{}
+           (mapcat
+            (fn [[join-value subjects]]
+              (when (> (count subjects) 1)
+                (generate-self-join-pairs subjects join-value left-subject right-subject join-var filter-spec nil))))
+           groups))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Batch Enrich Helpers

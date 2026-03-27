@@ -204,31 +204,53 @@
             new-join
             (:remaining result))))
 
+(defn- decompose-and-filters
+  "Decompose an AND expression into independent conjuncts.
+   (AND (AND a b) c) -> [a b c]
+   Non-AND expressions return as single-element vector."
+  [expr]
+  (if (and (= :logic (:type expr)) (= :and (:op expr)))
+    (into (decompose-and-filters (:left expr))
+          (decompose-and-filters (:right expr)))
+    [expr]))
+
+(defn- compose-and-filters
+  "Compose a sequence of expressions into an AND chain.
+   Returns nil for empty seq, single expr for one element."
+  [exprs]
+  (when (seq exprs)
+    (reduce (fn [acc expr]
+              {:type :logic :op :and :left acc :right expr})
+            exprs)))
+
 (defn push-filters-down
   "Push filter expressions down into joins and sub-plans where possible.
-   This reduces the number of rows that need to be joined."
+   Decomposes AND expressions into independent conjuncts that can be
+   pushed separately, giving each join side the most selective filters."
   [plan]
   (case (:op plan)
     :filter
     (let [sub-plan (:sub-plan plan)
-          expr (:expr plan)]
+          expr (:expr plan)
+          ;; Decompose AND expressions for finer-grained pushdown
+          conjuncts (decompose-and-filters expr)]
       (case (:op sub-plan)
-        ;; Filter over Join - try to push filter into join sides
+        ;; Filter over Join - try to push each conjunct independently
         :join
-        (optimize-join-with-filters sub-plan [expr])
+        (optimize-join-with-filters sub-plan conjuncts)
 
         ;; Filter over Filter - collect and push both
         :filter
-        (let [inner-expr (:expr sub-plan)
+        (let [inner-conjuncts (decompose-and-filters (:expr sub-plan))
+              all-conjuncts (into conjuncts inner-conjuncts)
               inner-sub (:sub-plan sub-plan)]
           (if (= :join (:op inner-sub))
-            (optimize-join-with-filters inner-sub [expr inner-expr])
+            (optimize-join-with-filters inner-sub all-conjuncts)
             ;; Otherwise just optimize the inner plan
-            {:op :filter
-             :sub-plan {:op :filter
-                        :sub-plan (push-filters-down inner-sub)
-                        :expr inner-expr}
-             :expr expr}))
+            (let [optimized-inner (push-filters-down inner-sub)]
+              (reduce (fn [p e] {:op :filter :sub-plan p :expr e})
+                      optimized-inner
+                      all-conjuncts))))
 
         ;; Default: optimize sub-plan
         {:op :filter
@@ -1104,13 +1126,125 @@
     ;; Leaf nodes - return unchanged
     plan))
 
+;;; ---------------------------------------------------------------------------
+;;; LIMIT Pushdown Optimization
+;;; ---------------------------------------------------------------------------
+;;; When a :slice (LIMIT) wraps a :join or :self-join (possibly through
+;;; transparent operators like :project, :distinct, :order), propagate
+;;; :result-limit into the join/self-join node so it can stop early.
+;;; This is critical for queries like QJ1-QJ4 where unbounded joins produce
+;;; thousands of results only to LIMIT to 100.
+
+(defn- find-effective-limit
+  "Walk down from a :slice through transparent operators to find the effective limit.
+   Returns the limit value or nil if no LIMIT found."
+  [plan]
+  (when (= :slice (:op plan))
+    (let [limit (:limit plan)]
+      (when (and limit (pos? limit))
+        limit))))
+
+(defn push-limit-down
+  "Push LIMIT hints into joins and self-joins for early termination.
+   Walks the plan tree and when a :slice with a positive limit wraps
+   operators that don't change cardinality (:project, :order, :distinct),
+   propagates :result-limit to the innermost :join or :self-join."
+  [plan]
+  (letfn [(push-limit [plan limit]
+            ;; Try to push limit down through transparent operators
+            (case (:op plan)
+              ;; Target operators: annotate with :result-limit
+              :join
+              (assoc plan
+                     :result-limit limit
+                     :left (push-limit-down (:left plan))
+                     :right (push-limit-down (:right plan)))
+
+              :self-join
+              (assoc plan :result-limit limit)
+
+              ;; Transparent operators: push through
+              :project
+              (update plan :sub-plan #(push-limit % limit))
+
+              :order
+              (update plan :sub-plan #(push-limit % limit))
+
+              ;; Distinct can reduce rows, so multiply limit as safety margin
+              :distinct
+              (update plan :sub-plan #(push-limit % (* limit 2)))
+
+              ;; For other operators, stop pushing but still recurse normally
+              (push-limit-down plan)))
+
+          (push-limit-down [plan]
+            (case (:op plan)
+              :slice
+              (let [limit (find-effective-limit plan)]
+                (if limit
+                  ;; Push the limit into sub-plan, accounting for offset
+                  (let [offset (max 0 (or (:offset plan) 0))
+                        effective-limit (+ limit offset)]
+                    (update plan :sub-plan #(push-limit % effective-limit)))
+                  ;; No limit to push, just recurse
+                  (update plan :sub-plan push-limit-down)))
+
+              :join
+              (-> plan
+                  (update :left push-limit-down)
+                  (update :right push-limit-down))
+
+              :left-join
+              (-> plan
+                  (update :left push-limit-down)
+                  (update :right push-limit-down))
+
+              :union
+              (-> plan
+                  (update :left push-limit-down)
+                  (update :right push-limit-down))
+
+              :filter
+              (update plan :sub-plan push-limit-down)
+
+              :project
+              (update plan :sub-plan push-limit-down)
+
+              :distinct
+              (update plan :sub-plan push-limit-down)
+
+              :order
+              (update plan :sub-plan push-limit-down)
+
+              :bind
+              (update plan :sub-plan push-limit-down)
+
+              :group
+              (update plan :sub-plan push-limit-down)
+
+              :ask
+              (update plan :sub-plan push-limit-down)
+
+              :multi-left-join
+              (-> plan
+                  (update :base push-limit-down)
+                  (update :optionals (fn [opts] (mapv #(update % :plan push-limit-down) opts))))
+
+              :batch-enrich
+              (update plan :sub-plan push-limit-down)
+
+              ;; Leaf nodes - return unchanged
+              plan))]
+    (push-limit-down plan)))
+
 (defn optimize-plan
   "Apply all plan optimizations:
    1. Push filters down into joins
    2. Optimize multi-way join chains using DP (Selinger-style)
    3. Detect and transform self-join patterns
    4. Use materialized type views for rdf:type patterns (adaptive)
-   5. Transform property-lookup joins to batch-enrich"
+   5. Transform property-lookup joins to batch-enrich
+   6. Push LIMIT into joins and self-joins for early termination"
   [plan]
   (let [optimized (-> plan
                       push-filters-down
@@ -1118,7 +1252,8 @@
                       optimize-join-chains
                       transform-self-join
                       use-type-view
-                      apply-batch-enrich)]
+                      apply-batch-enrich
+                      push-limit-down)]
     (when (log/enabled? :debug)
       (let [self-joins-before (count-ops plan :self-join)
             self-joins-after (count-ops optimized :self-join)
@@ -1163,6 +1298,44 @@
       (if (> num-join-vars 1)
         (* base-selectivity (Math/pow 0.5 (dec num-join-vars)))
         base-selectivity))))
+
+(defn estimate-filter-selectivity
+  "Estimate selectivity of a filter expression based on operator type.
+   Returns a fraction between 0.0 and 1.0.
+   More informed than a flat 0.3 — uses operator semantics:
+   - Equality (=): very selective (0.05)
+   - Inequality (!=): passes most rows (0.8)
+   - Range (<, >, <=, >=): moderately selective (0.3)
+   - AND: product of children selectivities
+   - OR: sum minus product (union of independent events)
+   - NOT: 1 - child selectivity
+   - BOUND/ISIRI/etc: passes most rows (0.8)
+   - REGEX: low selectivity (0.1)"
+  [expr]
+  (case (:type expr)
+    :cmp (case (:op expr)
+           :eq 0.05
+           :ne 0.8
+           (:lt :le :gt :ge) 0.3
+           0.3)
+    :logic (case (:op expr)
+             :and (let [left-sel (estimate-filter-selectivity (:left expr))
+                        right-sel (estimate-filter-selectivity (:right expr))]
+                    (* left-sel right-sel))
+             :or (let [left-sel (estimate-filter-selectivity (:left expr))
+                       right-sel (estimate-filter-selectivity (:right expr))]
+                   (min 1.0 (- (+ left-sel right-sel) (* left-sel right-sel))))
+             :not (- 1.0 (estimate-filter-selectivity (:arg expr)))
+             0.3)
+    :regex 0.1
+    :bound 0.8
+    :func-call (case (:name expr)
+                 ("isIRI" "isURI" "isBlank" "isLiteral" "isNumeric") 0.8
+                 ("sameTerm") 0.05
+                 ("langMatches") 0.3
+                 0.3)
+    ;; Default
+    0.3))
 
 (defn estimate-plan-cardinality
   "Estimate the cardinality of a query plan for join ordering decisions.
@@ -1241,7 +1414,10 @@
        (estimate-plan-cardinality (:right plan)))
 
     :filter
-    (long (* (estimate-plan-cardinality (:sub-plan plan)) 0.3))
+    (let [sub-card (estimate-plan-cardinality (:sub-plan plan))
+          expr (:expr plan)
+          selectivity (estimate-filter-selectivity expr)]
+      (max 1 (long (* sub-card selectivity))))
 
     :project
     (estimate-plan-cardinality (:sub-plan plan))

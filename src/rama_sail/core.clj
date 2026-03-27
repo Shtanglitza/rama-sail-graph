@@ -206,7 +206,7 @@
 
 (defn join-query-topology [topologies]
   (<<query-topology topologies "join"
-                    [*left-plan *right-plan *join-vars :> *results]
+                    [*left-plan *right-plan *join-vars *result-limit :> *results]
 
                     ;; BUILD PHASE: Execute right plan, build hash index
                     (invoke-query "execute-plan" *right-plan :> *right-results)
@@ -214,7 +214,15 @@
 
                     ;; PROBE PHASE: Execute left plan, probe hash index
                     (invoke-query "execute-plan" *left-plan :> *left-results)
-                    (ops/explode *left-results :> *left-bind)
+                    ;; When result-limit is set, truncate left side to limit probes
+                    ;; This is safe because each left row produces at least one join result
+                    ;; so limiting probes limits results (conservative upper bound)
+                    (<<if (some? *result-limit)
+                          (vec *left-results :> *left-vec)
+                          (identity (take *result-limit *left-vec) :> *left-limited)
+                          (else>)
+                          (identity *left-results :> *left-limited))
+                    (ops/explode *left-limited :> *left-bind)
                     (qh/probe-hash-index *hash-idx *left-bind *join-vars :> *matches)
                     (filter> (some? *matches))
                     (ops/explode *matches :> *joined)
@@ -236,7 +244,7 @@
 
 (defn self-join-query-topology [topologies]
   (<<query-topology topologies "self-join"
-                    [*predicate *join-var *left-subject *right-subject *filter *context :> *results]
+                    [*predicate *join-var *left-subject *right-subject *filter *context *result-limit :> *results]
 
                     ;; Execute single BGP to get all (subject, object) pairs for this predicate
                     (identity {:s "?s" :p *predicate :o "?o" :c *context} :> *pattern)
@@ -246,7 +254,8 @@
                     (qh/build-subject-groups *bgp-results :> *groups)
 
                     ;; Generate pairs within each group, applying filter during generation
-                    (qh/process-subject-groups *groups *left-subject *right-subject *join-var *filter :> *results)
+                    ;; result-limit enables early termination when enough pairs are found
+                    (qh/process-subject-groups *groups *left-subject *right-subject *join-var *filter *result-limit :> *results)
 
                     (|origin)))
 
@@ -994,7 +1003,8 @@
 
                                 (case> :join)
                                 (identity *plan :> {*left-plan :left *right-plan :right *join-vars :join-vars})
-                                (invoke-query "join" *left-plan *right-plan *join-vars :> *results)
+                                (get *plan :result-limit nil :> *result-limit)
+                                (invoke-query "join" *left-plan *right-plan *join-vars *result-limit :> *results)
 
                                 (case> :left-join)
                                 (identity *plan :> {*left-plan :left *right-plan :right *join-vars :join-vars})
@@ -1045,7 +1055,8 @@
                                 (identity *plan :> {*predicate :predicate *join-var :join-var
                                                     *left-subject :left-subject *right-subject :right-subject
                                                     *filter :filter *context :context})
-                                (invoke-query "self-join" *predicate *join-var *left-subject *right-subject *filter *context :> *results)
+                                (get *plan :result-limit nil :> *sj-result-limit)
+                                (invoke-query "self-join" *predicate *join-var *left-subject *right-subject *filter *context *sj-result-limit :> *results)
 
                                 (case> :colocated-subject-join)
                                 (identity *plan :> {*left-pattern :left-pattern *right-pattern :right-pattern

@@ -138,7 +138,7 @@
 (defn- ->counted-closeable-iteration
   "Create CloseableIteration that counts results lazily during iteration.
    Avoids forcing full materialization of lazy sequences for logging purposes.
-   The count is logged when the iteration is closed."
+   The count is logged and exported to metrics when the iteration is closed."
   [coll]
   (let [^Iterator iter (.iterator ^java.util.Collection coll)
         result-count (atom 0)
@@ -151,6 +151,7 @@
       (remove [_] (.remove iter))
       (close [_]
         (when (compare-and-set! closed? false true)
+          (metrics/record-result-size @result-count)
           (log/debug "Query returned" @result-count "results"))))))
 
 ;; --- Statement Pattern Matching ---
@@ -202,6 +203,38 @@
               state))
           {:adds #{} :dels #{} :cleared-contexts #{}}
           pending-ops))
+
+(defn- compute-commit-ops
+  "Compute net operations to send to depot at commit time.
+   Cancels quads that are both added and deleted in the same transaction,
+   since within a single Rama microbatch, add and del of the same quad
+   cannot see each other's state changes (different DAG levels in <<cond).
+
+   Uses last-write-wins: for each quad, the LAST operation in the pending-ops wins.
+   Quads that end with the same state they started (add then del, or del then add of
+   non-existent) produce no operation."
+  [pending-ops]
+  (let [;; For each quad, determine the last operation type
+        ;; Also collect clear-context operations
+        result (reduce (fn [state [op quad]]
+                         (case op
+                           :add (update state :last-op assoc quad :add)
+                           :del (update state :last-op assoc quad :del)
+                           :clear-context
+                           (let [ctx (nth quad 3)]
+                             (-> state
+                                 ;; Remove all pending ops for this context
+                                 (update :last-op (fn [m]
+                                                    (into {} (remove (fn [[q _]] (= (nth q 3) ctx)) m))))
+                                 (update :cleared conj ctx)))
+                           state))
+                       {:last-op {} :cleared #{}}
+                       pending-ops)
+        {:keys [last-op cleared]} result]
+    (vec (concat
+          (for [[quad op] last-op :when (= op :add)] [:add quad])
+          (for [[quad op] last-op :when (= op :del)] [:del quad])
+          (map (fn [ctx] [:clear-context [nil nil nil ctx]]) cleared)))))
 
 (defn- find-matching-pending-adds
   "Find pending add operations matching a removal pattern."
@@ -330,7 +363,7 @@
         ;; RDF4J semantics: If contexts array is empty, add to Default Graph (nil).
         ;; If not empty, add statement to EVERY context specified.
         ;; Operations are buffered until commit.
-        ;; BNode IDs are preserved as-is — RDF4J generates unique IDs per connection.
+        ;; BNode IDs are preserved as-is — RDF4J generates unique IDs per ValueFactory.createBNode().
         (if (array-empty? contexts)
           (let [quad (ser/quad->tuple s p o nil)]
             (log/trace "Buffering add to default graph:" (pr-str quad))
@@ -536,8 +569,14 @@
         (reset! pending-ns-ops [])
         (reset! bnode-map {}))  ;; Fresh BNode mappings for each transaction
       (commitInternal []
-        (let [ops @pending-ops
+        (let [raw-ops @pending-ops
               ns-ops @pending-ns-ops
+              ;; Deduplicate: cancel out matching add/del pairs before sending to depot.
+              ;; Within a single Rama microbatch, a :del cannot see state changes from a
+              ;; :add in the same batch (they process at different DAG levels in <<cond).
+              ;; By computing the net effect, we avoid sending self-canceling operations
+              ;; that would leave orphaned index entries.
+              ops (compute-commit-ops raw-ops)
               op-count (count ops)
               ns-op-count (count ns-ops)
               committed-triple-ops (atom 0)
@@ -545,7 +584,7 @@
               ;; Capture transaction time once for all operations in this commit
               ;; This ensures atomicity: all ops in a transaction share the same timestamp
               tx-time (System/currentTimeMillis)]
-          (log/debug "Committing transaction with" op-count "triple ops and" ns-op-count "namespace ops at tx-time" tx-time)
+          (log/debug "Committing transaction with" op-count "net triple ops (from" (count raw-ops) "raw) and" ns-op-count "namespace ops at tx-time" tx-time)
 
           ;; Commit triple operations with tracking for partial failure diagnosis
           ;; Each operation gets an incrementing tx-time to preserve ordering within

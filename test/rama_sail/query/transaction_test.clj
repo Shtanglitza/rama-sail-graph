@@ -125,8 +125,7 @@
             (.remove conn s p o default-ctx)
             (.commit conn)
 
-            ;; Wait for 2 operations (add + del)
-            (wait-mb!)
+            ;; Wait for 1 net operation: add+del of same quad deduplicates to last-write (del)
             (wait-mb!)
 
             ;; Triple should NOT exist (delete was after add)
@@ -154,8 +153,7 @@
             (.add conn s p o default-ctx)
             (.commit conn)
 
-            ;; Wait for 2 operations (del + add)
-            (wait-mb!)
+            ;; Wait for 1 net operation: del+add of same quad deduplicates to 1 add
             (wait-mb!)
 
             ;; Triple SHOULD exist (add was after delete)

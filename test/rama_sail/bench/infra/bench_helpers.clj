@@ -246,9 +246,11 @@
   (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" expected-count))
 
 (defn load-and-wait!
-  "Load quads and wait for indexing. Returns load stats."
+  "Load quads using async fire-and-forget appends and wait for indexing.
+   Much faster than sync loading (~10x on IPC) because appends don't block
+   on individual acknowledgments."
   [ipc module-name depot quads]
-  (let [stats (load-quads! depot quads)]
+  (let [stats (load-quads-async! depot quads)]
     (wait-for-indexer! ipc module-name (:count stats))
     stats))
 

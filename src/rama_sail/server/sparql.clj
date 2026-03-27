@@ -12,6 +12,8 @@
      lein run -m rama-sail.server.sparql -- --port 7200 --mode cluster --host localhost --rama-port 1973"
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [rama-sail.metrics :as metrics]
+            [rama-sail.metrics-server :as metrics-server]
             [rama-sail.server.connection :as conn]
             [ring.adapter.jetty :as jetty]
             [ring.middleware.params :refer [wrap-params]])
@@ -331,9 +333,21 @@
   (-> (fn [request]
         (case (:uri request)
           "/sparql"  ((make-sparql-handler repo) request)
+          "/health"  {:status 200
+                      :headers {"Content-Type" "text/plain;charset=utf-8"}
+                      :body "OK"}
+          "/metrics" (try
+                       {:status 200
+                        :headers {"Content-Type" "text/plain; version=0.0.4; charset=utf-8"}
+                        :body (metrics/metrics-text)}
+                       (catch Exception e
+                         (log/error e "Error serving metrics")
+                         {:status 500
+                          :headers {"Content-Type" "text/plain;charset=utf-8"}
+                          :body "Internal error"}))
           "/"        {:status 200
                       :headers {"Content-Type" "text/plain;charset=utf-8"}
-                      :body "Rama Sail SPARQL Endpoint. Query at /sparql"}
+                      :body "Rama Sail SPARQL Endpoint. Query at /sparql\n\nEndpoints:\n  /sparql  - SPARQL Protocol\n  /health  - Health check\n  /metrics - Prometheus metrics"}
           {:status 404
            :headers {"Content-Type" "text/plain;charset=utf-8"}
            :body "Not found. SPARQL endpoint is at /sparql"}))
@@ -396,6 +410,8 @@
         server (start-sparql-server! repo (:port config))]
 
     (println (str "SPARQL endpoint ready at http://localhost:" (:port config) "/sparql"))
+    (println (str "Health check at http://localhost:" (:port config) "/health"))
+    (println (str "Prometheus metrics at http://localhost:" (:port config) "/metrics"))
     (println "Connect gdotv as 'Eclipse RDF4J' → localhost:" (:port config))
 
     ;; Shutdown hook
