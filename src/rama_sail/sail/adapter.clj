@@ -330,13 +330,13 @@
         ;; RDF4J semantics: If contexts array is empty, add to Default Graph (nil).
         ;; If not empty, add statement to EVERY context specified.
         ;; Operations are buffered until commit.
-        ;; BNode IDs are skolemized to ensure uniqueness across transactions.
+        ;; BNode IDs are preserved as-is — RDF4J generates unique IDs per connection.
         (if (array-empty? contexts)
-          (let [quad (ser/skolemized-quad->tuple s p o nil bnode-map)]
+          (let [quad (ser/quad->tuple s p o nil)]
             (log/trace "Buffering add to default graph:" (pr-str quad))
             (swap! pending-ops conj [:add quad]))
           (doseq [c contexts]
-            (let [quad (ser/skolemized-quad->tuple s p o c bnode-map)]
+            (let [quad (ser/quad->tuple s p o c)]
               (log/trace "Buffering add to context" (when c (val->str c)) ":" (pr-str quad))
               (swap! pending-ops conj [:add quad])))))
 

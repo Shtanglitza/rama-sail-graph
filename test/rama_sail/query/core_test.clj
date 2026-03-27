@@ -140,7 +140,7 @@
 ;; We mock "execute-plan" to return static data so we don't need a real depot/PState
 (defmodule FilterTestModule [setup topologies]
 	;; 1. Register the filter topology we want to test
-  (filter-query-topology topologies)
+  (filter-query-topology-parallel topologies)
 
 	;; 2. Mock 'execute-plan' to return a fixed set of bindings
   (<<query-topology topologies "execute-plan" [*plan :> *results]

@@ -11,7 +11,7 @@
 ;; 1. Define a minimal module for isolation testing
 (rama/defmodule FindTriplesTestModule [setup topologies]
   ;; Depot for ingesting test quads
-  (rama/declare-depot setup *quad-depot (rama/hash-by core/quad-subject))
+  (rama/declare-depot setup *quad-depot (rama/hash-by core/depot-partition-key))
 
   ;; Declare the 4 Quad Indices required by find-triples
   (let [mb (rama/microbatch-topology topologies "indexer")]

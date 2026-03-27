@@ -7,7 +7,7 @@
 
 ;; 1. Define a self-contained module for testing find-bgp
 (rama/defmodule FindBgpTestModule [setup topologies]
-  (rama/declare-depot setup *quad-depot (rama/hash-by core/quad-subject))
+  (rama/declare-depot setup *quad-depot (rama/hash-by core/depot-partition-key))
 
   ;; -- Indices & ETL (Same as RdfStorageModule) --
   (let [mb (rama/microbatch-topology topologies "indexer")]

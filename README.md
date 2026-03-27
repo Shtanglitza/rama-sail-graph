@@ -138,7 +138,7 @@ Deletion uses physical index removal — deleted quads are removed from all four
 
 ### RDF4J SAIL Compliance
 
-RamaSail passes the RDF4J **RDFStoreTest** compliance suite (`rdf4j-sail-testsuite` 5.2.0), which validates:
+RamaSail passes 37 of 40 tests in the RDF4J **RDFStoreTest** compliance suite (`rdf4j-sail-testsuite` 5.2.0), which validates:
 
 - Statement CRUD (add, remove, get, has) with pattern matching and wildcards
 - Value round-trips (IRIs, BNodes, typed literals, decimals, timezones, long URIs/literals)
@@ -164,6 +164,11 @@ RamaSail passes the RDF4J **RDFStoreTest** compliance suite (`rdf4j-sail-testsui
 | SAMETERM, REGEX | |
 
 Unsupported operators are automatically handled by falling back to RDF4J's `DefaultEvaluationStrategy`, which evaluates locally via `getStatements`. This ensures correct results but without distributed execution benefits.
+
+**Known compliance gaps** (3 of 40 tests):
+
+- `testBNodeReuse` / `testValueRoundTrip2` — BNode IDs are not yet skolemized across transactions, so the same `_:id` in different transactions is not guaranteed to produce distinct nodes
+- `testGetContextIDs` — Empty contexts may persist after clearing all statements from a named graph
 
 ### Observability
 
