@@ -2,12 +2,8 @@
   (:require [clojure.set :as set]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [rama-sail.query.expr :refer [eval-expr parse-numeric evaluate-filter-cond]]))
-
-;; Internal marker for default graph context. Uses a non-IRI format that cannot
-;; be created through normal RDF4J APIs, preventing user data collision.
-;; Must match the value in rama-sail.sail.serialization namespace.
-(def DEFAULT-CONTEXT-VAL "::rama-internal::default-graph")
+            [rama-sail.query.expr :refer [eval-expr parse-numeric evaluate-filter-cond]]
+            [rama-sail.sail.serialization :refer [DEFAULT-CONTEXT-VAL]]))
 
 ;; RDF type predicate IRI - used for materialized view maintenance
 (def RDF-TYPE-PREDICATE "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>")

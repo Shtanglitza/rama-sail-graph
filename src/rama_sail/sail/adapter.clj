@@ -330,13 +330,13 @@
         ;; RDF4J semantics: If contexts array is empty, add to Default Graph (nil).
         ;; If not empty, add statement to EVERY context specified.
         ;; Operations are buffered until commit.
-        ;; BNode IDs are preserved as-is (RDF4J already generates unique IDs).
+        ;; BNode IDs are skolemized to ensure uniqueness across transactions.
         (if (array-empty? contexts)
-          (let [quad (ser/quad->tuple s p o nil)]
+          (let [quad (ser/skolemized-quad->tuple s p o nil bnode-map)]
             (log/trace "Buffering add to default graph:" (pr-str quad))
             (swap! pending-ops conj [:add quad]))
           (doseq [c contexts]
-            (let [quad (ser/quad->tuple s p o c)]
+            (let [quad (ser/skolemized-quad->tuple s p o c bnode-map)]
               (log/trace "Buffering add to context" (when c (val->str c)) ":" (pr-str quad))
               (swap! pending-ops conj [:add quad])))))
 
@@ -709,7 +709,7 @@
         ;; Excludes the default graph (which has no explicit context ID in RDF4J)
         ;; Must include both committed contexts AND pending (uncommitted) operations
         (with-sail-error-handling "getContextIDsInternal" (->empty-iteration)
-          #(let [;; Get committed contexts from Rama (already filters tombstones in topology)
+          #(let [;; Get committed contexts from Rama
                  committed-contexts (or (invoke-query-with-timeout list-contexts-qt timeout-ms) #{})
                  ;; Use compute-pending-net-state for consistent net-visible model.
                  {:keys [adds dels cleared-contexts]} (compute-pending-net-state @pending-ops)

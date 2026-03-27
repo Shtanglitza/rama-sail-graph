@@ -8,18 +8,12 @@
             [com.rpl.rama.test :as rtest]
             [rama-sail.query.expr :refer [eval-expr parse-numeric evaluate-filter-cond]]
             [rama-sail.query.aggregation :as agg]
-            [rama-sail.query.helpers :as qh]))
+            [rama-sail.query.helpers :as qh]
+            [rama-sail.sail.serialization :as ser]))
 
 ;; Re-export constants for backward compatibility with tests
-(def ^{:doc "Default context value for the default graph"} DEFAULT-CONTEXT-VAL qh/DEFAULT-CONTEXT-VAL)
+(def ^{:doc "Default context value for the default graph"} DEFAULT-CONTEXT-VAL ser/DEFAULT-CONTEXT-VAL)
 (def ^{:doc "RDF type predicate IRI"} RDF-TYPE-PREDICATE qh/RDF-TYPE-PREDICATE)
-
-(def ^:dynamic *hard-delete?*
-  "When true, RdfStorageModule uses hard deletes (physical index removal).
-   When false (default), uses soft deletes (tombstones).
-   Must be bound BEFORE module launch — the value is captured at module
-   definition time and baked into topology dataflow."
-  false)
 
 (defn depot-partition-key [[op payload _tx-time-or-opts]]
   ;; Partition key extraction for different operation formats:
@@ -29,9 +23,6 @@
   (case op
     :clear-context (nth payload 3)  ;; [:clear-context [nil nil nil c] tx-time] -> partition by c
     (first payload)))               ;; [:add/:del [s p o c] tx-time] -> partition by s
-
-;; Backward-compatible alias for tests using legacy name
-(def quad-subject depot-partition-key)
 
 (defn namespace-depot-partition-key
   "Partition key for namespace depot operations.
@@ -45,6 +36,12 @@
 
 ;; DEFAULT-CONTEXT-VAL and RDF-TYPE-PREDICATE are now in rama-sail.query.helpers
 ;; and referred into this namespace via :refer
+
+(defn dec-floor-zero
+  "Decrement a value but never go below zero. Guards against negative statistics
+   under edge cases like out-of-order delivery or double-delete."
+  [n]
+  (max 0 (dec (or n 0))))
 
 ;; --- Empty Container Cleanup ---
 ;; After deleting an element from a nested map structure, empty containers
@@ -132,11 +129,8 @@
     :> [*out2 *out3 *out4])
    (:> *k1 *out2 *out3 *out4)))
 
-(defn find-triples-unfiltered-query-topology
-  "Find triples WITHOUT tombstone filtering.
-   Used internally for temporal queries that need to see deleted data."
-  [topologies]
-  (<<query-topology topologies "find-triples-unfiltered"
+(defn find-triples-query-topology [topologies]
+  (<<query-topology topologies "find-triples"
                     [*s *p *o *c :> *quads]
                     (<<cond
                      (case> (some? *s))
@@ -164,23 +158,6 @@
                                      LAST ALL
                                      (collect-one FIRST)
                                      LAST ALL] $$spoc :> [*f-s *f-p *f-o *f-c]))
-                    ;; NO tombstone filtering - return all quads including deleted ones
-                    (vector *f-s *f-p *f-o *f-c :> *quad)
-                    (|origin)
-                    (aggs/+vec-agg *quad :> *quads)))
-
-(defn find-triples-query-topology [topologies hard-delete?]
-  (<<query-topology topologies "find-triples"
-                    [*s *p *o *c :> *quads]
-                    ;; Delegate to unfiltered scan
-                    (invoke-query "find-triples-unfiltered" *s *p *o *c :> *all-quads)
-                    (ops/explode *all-quads :> [*f-s *f-p *f-o *f-c])
-                    ;; Soft delete: filter out tombstoned quads
-                    ;; Hard delete: no filtering needed (deleted quads not in index)
-                    (<<if (not (identity hard-delete?))
-                          (|hash *f-s)
-                          (local-select> [(keypath *f-s *f-p *f-o *f-c)] $$tombstones :> *tombstone)
-                          (filter> (nil? *tombstone)))
                     (vector *f-s *f-p *f-o *f-c :> *quad)
                     (|origin)
                     (aggs/+vec-agg *quad :> *quads)))
@@ -287,9 +264,8 @@
 (defn batch-lookup-query-topology
   "Query topology to fetch predicate values for multiple subjects.
    Returns vector of [subject object] pairs for ALL objects (handles multi-valued predicates).
-   Routes each subject to its partition (since $$spoc is hash-partitioned by subject).
-   Filters tombstoned quads in soft-delete mode; skips in hard-delete mode."
-  [topologies hard-delete?]
+   Routes each subject to its partition (since $$spoc is hash-partitioned by subject)."
+  [topologies]
   (<<query-topology topologies "batch-lookup"
                     [*subjects *predicate *context :> *results]
 
@@ -303,10 +279,6 @@
                           (filter> (= *ctx *context))
                           (else>)
                           (identity true :> *_pass))
-                    ;; Soft delete only: filter tombstoned quads
-                    (<<if (not (identity hard-delete?))
-                          (local-select> [(keypath *subj *predicate *obj *ctx)] $$tombstones :> *tombstone)
-                          (filter> (nil? *tombstone)))
                     ;; Collect back at origin
                     (|origin)
                     (vector *subj *obj :> *pair)
@@ -461,9 +433,10 @@
 
 (defn ask-result-query-topology [topologies]
   (<<query-topology topologies "ask-result" [*sub-plan :> *results]
-		;; 1. Execute the sub-plan (e.g., BGP)
-                    (invoke-query "execute-plan" *sub-plan :> *sub-results)
-		;; 2. Check if the result set is non-empty. Use take 1 for optimization.
+		;; 1. Wrap sub-plan with LIMIT 1 to short-circuit evaluation
+                    (hash-map :op :slice :sub-plan *sub-plan :offset 0 :limit 1 :> *limited-plan)
+                    (invoke-query "execute-plan" *limited-plan :> *sub-results)
+		;; 2. Check if the result set is non-empty
                     (select> [(view count)] *sub-results :> *count)
                     (<<if (> *count 0)
 			;; ASK is TRUE: return a set containing one empty map.
@@ -471,9 +444,7 @@
                           (else>)
 			;; ASK is FALSE: return an empty set.
                           (identity #{} :> *results))
-                    (|origin)
-		;; No aggregation needed, as the result is already determined
-                    ))
+                    (|origin)))
 
 ;; --- 9. BIND Operator (SPARQL BIND clause) ---
 (defn apply-bindings
@@ -527,23 +498,18 @@
                     (qh/extract-sorted-rows *sorted-keyed :> *results)))
 
 ;; --- 12. LIST CONTEXTS (for clearInternal support) ---
-(defn list-contexts-query-topology [topologies hard-delete?]
+(defn list-contexts-query-topology [topologies]
   (<<query-topology topologies "list-contexts" [:> *contexts]
                     (|all)
                     (local-select> [ALL (collect-one FIRST)
                                     LAST ALL (collect-one FIRST)
                                     LAST ALL (collect-one FIRST)
                                     LAST ALL] $$cspo :> [*ctx *s *p *o])
-                    ;; Soft delete only: filter tombstoned quads
-                    (<<if (not (identity hard-delete?))
-                          (|hash *s)
-                          (local-select> [(keypath *s *p *o *ctx)] $$tombstones :> *tombstone)
-                          (filter> (nil? *tombstone)))
                     (|origin)
                     (aggs/+set-agg *ctx :> *contexts)))
 
 ;; --- 12b. COUNT STATEMENTS (for sizeInternal support) ---
-(defn count-statements-query-topology [topologies hard-delete?]
+(defn count-statements-query-topology [topologies]
   (<<query-topology topologies "count-statements" [*context :> *count]
                     (|all)
                     (<<if (nil? *context)
@@ -556,11 +522,6 @@
                                           LAST ALL (collect-one FIRST)
                                           LAST ALL] $$cspo :> [*s *p *o])
                           (identity *context :> *c))
-                    ;; Soft delete only: filter tombstoned quads
-                    (<<if (not (identity hard-delete?))
-                          (|hash *s)
-                          (local-select> [(keypath *s *p *o *c)] $$tombstones :> *tombstone)
-                          (filter> (nil? *tombstone)))
                     (|origin)
                     (aggs/+count :> *count)))
 
@@ -661,8 +622,7 @@
   ;; Namespace operations depot - hash by prefix for set/remove, nil for clear (handled specially)
   (declare-depot setup *namespace-depot (hash-by namespace-depot-partition-key))
 
-  (let [hard-delete? *hard-delete?*
-        mb (microbatch-topology topologies "indexer")]
+  (let [mb (microbatch-topology topologies "indexer")]
 		;; Quads indices:
 		;; $$spoc: S -> P -> O -> Set<C>
     (declare-pstate mb $$spoc {String (map-schema String (map-schema String (set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
@@ -723,14 +683,10 @@
     ;; Used to maintain $$subject-types correctly across multi-context scenarios
     (declare-pstate mb $$subject-type-count {String (map-schema String Long {:subindex? true})})
 
-    ;; --- Temporal Tracking PStates ---
+    ;; --- Temporal Tracking PState ---
     ;; $$quad-tx-time: s -> p -> o -> c -> tx-time (epoch millis when quad was created)
-    ;; Tracks when each quad was added to the store
+    ;; Tracks when each quad was added to the store (used for idempotent add detection)
     (declare-pstate mb $$quad-tx-time {String (map-schema String (map-schema String (map-schema String Long {:subindex? true}) {:subindex? true}) {:subindex? true})})
-
-    ;; $$tombstones: s -> p -> o -> c -> deleted-at (epoch millis when quad was logically deleted)
-    ;; Enables soft delete - data remains but is filtered from default queries
-    (declare-pstate mb $$tombstones {String (map-schema String (map-schema String (map-schema String Long {:subindex? true}) {:subindex? true}) {:subindex? true})})
 
     (<<sources mb
                (source> *triple-depot :> %microbatch)
@@ -751,21 +707,11 @@
 
                 (<<cond
                  (case> (= *op :add))
-                 ;; First, check if this quad is already visible (exists and not tombstoned)
-                 ;; We need this check BEFORE updating indices to determine if stats should increment
+                 ;; Check if this quad already exists (for idempotent stats tracking)
                  (|hash *s)
                  (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *existing-tx-time)
-                 (<<if (identity hard-delete?)
-                       ;; Hard delete: quad is becoming visible iff it doesn't already exist
-                       (identity nil :> *existing-tombstone-ts)
-                       (identity (nil? *existing-tx-time) :> *becoming-visible)
-                       (else>)
-                       ;; Soft delete: also check tombstones
-                       (local-select> [(keypath *s *p *o *c)] $$tombstones :> *existing-tombstone-ts)
-                       ;; Becoming visible if new quad OR previously tombstoned and add is newer
-                       (or> (nil? *existing-tx-time)
-                            (and> (some? *existing-tombstone-ts)
-                                  (> *tx-time *existing-tombstone-ts)) :> *becoming-visible))
+                 ;; Quad is becoming visible iff it doesn't already exist
+                 (identity (nil? *existing-tx-time) :> *becoming-visible)
 
                  ;; Update indices (idempotent - set semantics)
                  (|hash *s) (local-transform> [(keypath *s *p *o) NIL->SET NONE-ELEM (termval *c)] $$spoc)
@@ -773,17 +719,10 @@
                  (|hash *o) (local-transform> [(keypath *o *s *p) NIL->SET NONE-ELEM (termval *c)] $$ospc)
                  (|hash *c) (local-transform> [(keypath *c *s *p) NIL->SET NONE-ELEM (termval *o)] $$cspo)
 
-                 ;; Store transaction time for this quad (temporal tracking)
+                 ;; Store transaction time for this quad
                  (|hash *s)
                  (<<if (nil? *existing-tx-time)
                        (local-transform> [(keypath *s *p *o *c) (termval *tx-time)] $$quad-tx-time))
-
-                 ;; Soft delete only: clear tombstone if add is newer
-                 (<<if (not (identity hard-delete?))
-                       ;; Re-read the CURRENT tombstone to handle same-batch add+del correctly
-                       (local-select> [(keypath *s *p *o *c)] $$tombstones :> *current-tombstone-ts)
-                       (<<if (and> (some? *current-tombstone-ts) (> *tx-time *current-tombstone-ts))
-                             (local-transform> [(keypath *s *p *o *c) NONE>] $$tombstones)))
 
                  ;; Only update statistics if quad is BECOMING VISIBLE (not already visible)
                  ;; This ensures idempotent adds don't inflate counts
@@ -828,62 +767,48 @@
                                    (local-transform> [(keypath *s) NIL->SET NONE-ELEM (termval *o)] $$subject-types))))
 
                  (case> (= *op :del))
-                 ;; Delete a quad. Mode-dependent:
-                 ;; - Soft delete: record tombstone, leave indices intact
-                 ;; - Hard delete: physically remove from indices
+                 ;; Delete a quad: physically remove from all indices
 
                  (|hash *s)
                  ;; Check if quad ever existed
                  (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *quad-existed)
 
-                 (<<if (identity hard-delete?)
-                       ;; --- HARD DELETE: physically remove from all indices ---
-                       (<<if (some? *quad-existed)
-                             ;; Remove from all 4 indices
-                             (|hash *s) (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
-                             (|hash *p) (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
-                             (|hash *o) (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
-                             (|hash *c) (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
-                             ;; Remove quad-tx-time entry
-                             (|hash *s) (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time))
-                       (identity nil :> *existing-del-tombstone)
-                       (else>)
-                       ;; --- SOFT DELETE: record tombstone ---
-                       (local-select> [(keypath *s *p *o *c)] $$tombstones :> *existing-del-tombstone)
-                       ;; Write tombstone unconditionally — always mark as deleted.
-                       (local-transform> [(keypath *s *p *o *c) (termval *tx-time)] $$tombstones))
+                 (<<if (some? *quad-existed)
+                       ;; Remove from all 4 indices
+                       (|hash *s) (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
+                       (|hash *p) (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
+                       (|hash *o) (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
+                       (|hash *c) (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
+                       ;; Remove quad-tx-time entry
+                       (|hash *s) (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time))
 
-                 ;; Only update statistics if:
-                 ;; 1. Quad actually existed (was added at some point), AND
-                 ;; 2. Hard mode: always decrement (no tombstone concept)
-                 ;;    Soft mode: only on FIRST delete (not already tombstoned)
-                 (<<if (and> (some? *quad-existed)
-                             (or> (identity hard-delete?) (nil? *existing-del-tombstone)))
+                 ;; Only update statistics if quad actually existed
+                 (<<if (some? *quad-existed)
 
                        ;; Update statistics - decrement counts for deleted triple
-                       ;; Statistics reflect "visible" data (excluding tombstoned)
+                       ;; Update statistics - decrement counts for deleted triple
                        (|hash *p)
-                       (local-transform> [(keypath *p :count) (nil->val 0) (term dec)] $$predicate-stats)
+                       (local-transform> [(keypath *p :count) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
 
                        ;; Decrement distinct subjects only when last triple for (pred, subject) removed
                        (local-select> [(keypath *p *s)] $$pred-subj-count :> *cur-subj-count)
-                       (local-transform> [(keypath *p *s) (nil->val 0) (term dec)] $$pred-subj-count)
+                       (local-transform> [(keypath *p *s) (nil->val 0) (term dec-floor-zero)] $$pred-subj-count)
                        (<<if (= *cur-subj-count 1)
                              ;; Last occurrence - decrement distinct count AND cleanup the mapping
-                             (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term dec)] $$predicate-stats)
+                             (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
                              (local-transform> [(keypath *p *s) NONE>] $$pred-subj-count))
 
                        ;; Decrement distinct objects only when last triple for (pred, object) removed
                        (local-select> [(keypath *p *o)] $$pred-obj-count :> *cur-obj-count)
-                       (local-transform> [(keypath *p *o) (nil->val 0) (term dec)] $$pred-obj-count)
+                       (local-transform> [(keypath *p *o) (nil->val 0) (term dec-floor-zero)] $$pred-obj-count)
                        (<<if (= *cur-obj-count 1)
                              ;; Last occurrence - decrement distinct count AND cleanup the mapping
-                             (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec)] $$predicate-stats)
+                             (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
                              (local-transform> [(keypath *p *o) NONE>] $$pred-obj-count))
 
                        ;; Update global statistics
                        (|hash "")
-                       (local-transform> [(keypath "" :total-triples) (nil->val 0) (term dec)] $$global-stats)
+                       (local-transform> [(keypath "" :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
 
                        ;; --- Materialized View Maintenance (delete) ---
                        ;; If this is an rdf:type triple, update type views with context-aware cardinality.
@@ -893,7 +818,7 @@
                              ;; Decrement type->subject occurrence count
                              (|hash *o)
                              (local-select> [(keypath *o *s)] $$type-subject-count :> *cur-ts-count)
-                             (local-transform> [(keypath *o *s) (nil->val 0) (term dec)] $$type-subject-count)
+                             (local-transform> [(keypath *o *s) (nil->val 0) (term dec-floor-zero)] $$type-subject-count)
                              ;; Only remove from type view if this was the LAST occurrence
                              (<<if (= *cur-ts-count 1)
                                    (local-transform> [(keypath *o) (set-elem *s) NONE>] $$type-subjects)
@@ -902,7 +827,7 @@
                              ;; Decrement subject->type occurrence count (symmetric)
                              (|hash *s)
                              (local-select> [(keypath *s *o)] $$subject-type-count :> *cur-st-count)
-                             (local-transform> [(keypath *s *o) (nil->val 0) (term dec)] $$subject-type-count)
+                             (local-transform> [(keypath *s *o) (nil->val 0) (term dec-floor-zero)] $$subject-type-count)
                              ;; Only remove from subject-types view if this was the LAST occurrence
                              (<<if (= *cur-st-count 1)
                                    (local-transform> [(keypath *s) (set-elem *o) NONE>] $$subject-types)
@@ -919,55 +844,42 @@
                  ;; 2. Check existing state
                  (|hash *s)
                  (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *quad-creation-time)
-                 (<<if (identity hard-delete?)
-                       ;; Hard mode: guard is quad exists and clear is not older
-                       (identity (some? *quad-creation-time) :> *should-delete)
-                       (else>)
-                       ;; Soft mode: also check tombstone
-                       (local-select> [(keypath *s *p *o *c)] $$tombstones :> *existing-tombstone)
-                       (identity (nil? *existing-tombstone) :> *should-delete))
-                 ;; 3. Apply deletion if conditions met
-                 (<<if (and> *should-delete
-                             (or> (nil? *quad-creation-time)
-                                  (>= *tx-time *quad-creation-time)))
-                       ;; Mode-dependent: tombstone or hard-delete
-                       (<<if (identity hard-delete?)
-                             ;; Hard delete: remove from all indices
-                             (|hash *s) (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
-                             (|hash *p) (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
-                             (|hash *o) (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
-                             (|hash *c) (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
-                             (|hash *s) (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time)
-                             (else>)
-                             ;; Soft delete: write tombstone
-                             (local-transform> [(keypath *s *p *o *c) (termval *tx-time)] $$tombstones))
+                 ;; 3. Apply deletion if quad exists and clear is not older than creation
+                 (<<if (and> (some? *quad-creation-time)
+                             (>= *tx-time *quad-creation-time))
+                       ;; Remove from all indices
+                       (|hash *s) (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
+                       (|hash *p) (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
+                       (|hash *o) (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
+                       (|hash *c) (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
+                       (|hash *s) (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time)
                        (|hash *p)
-                       (local-transform> [(keypath *p :count) (nil->val 0) (term dec)] $$predicate-stats)
+                       (local-transform> [(keypath *p :count) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
 
                        ;; Decrement distinct subjects only when last triple for (pred, subject) removed
                        (local-select> [(keypath *p *s)] $$pred-subj-count :> *cur-subj-count)
-                       (local-transform> [(keypath *p *s) (nil->val 0) (term dec)] $$pred-subj-count)
+                       (local-transform> [(keypath *p *s) (nil->val 0) (term dec-floor-zero)] $$pred-subj-count)
                        (<<if (= *cur-subj-count 1)
                              ;; Last occurrence - decrement distinct count AND cleanup the mapping
-                             (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term dec)] $$predicate-stats)
+                             (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
                              (local-transform> [(keypath *p *s) NONE>] $$pred-subj-count))
 
                        ;; Decrement distinct objects only when last triple for (pred, object) removed
                        (local-select> [(keypath *p *o)] $$pred-obj-count :> *cur-obj-count)
-                       (local-transform> [(keypath *p *o) (nil->val 0) (term dec)] $$pred-obj-count)
+                       (local-transform> [(keypath *p *o) (nil->val 0) (term dec-floor-zero)] $$pred-obj-count)
                        (<<if (= *cur-obj-count 1)
                              ;; Last occurrence - decrement distinct count AND cleanup the mapping
-                             (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec)] $$predicate-stats)
+                             (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
                              (local-transform> [(keypath *p *o) NONE>] $$pred-obj-count))
 
                        (|hash "")
-                       (local-transform> [(keypath "" :total-triples) (nil->val 0) (term dec)] $$global-stats)
+                       (local-transform> [(keypath "" :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
                        ;; Update type views if this is an rdf:type triple (context-aware cardinality)
                        (<<if (= *p RDF-TYPE-PREDICATE)
                              ;; Decrement type->subject occurrence count
                              (|hash *o)
                              (local-select> [(keypath *o *s)] $$type-subject-count :> *cur-ts-count)
-                             (local-transform> [(keypath *o *s) (nil->val 0) (term dec)] $$type-subject-count)
+                             (local-transform> [(keypath *o *s) (nil->val 0) (term dec-floor-zero)] $$type-subject-count)
                              ;; Only remove from type view if this was the LAST occurrence
                              (<<if (= *cur-ts-count 1)
                                    (local-transform> [(keypath *o) (set-elem *s) NONE>] $$type-subjects)
@@ -976,7 +888,7 @@
                              ;; Decrement subject->type occurrence count (symmetric)
                              (|hash *s)
                              (local-select> [(keypath *s *o)] $$subject-type-count :> *cur-st-count)
-                             (local-transform> [(keypath *s *o) (nil->val 0) (term dec)] $$subject-type-count)
+                             (local-transform> [(keypath *s *o) (nil->val 0) (term dec-floor-zero)] $$subject-type-count)
                              ;; Only remove from subject-types view if this was the LAST occurrence
                              (<<if (= *cur-st-count 1)
                                    (local-transform> [(keypath *s) (set-elem *o) NONE>] $$subject-types)
@@ -1027,9 +939,7 @@
 
 	; --- 2. Basic Pattern Finder ---
 		; Assumes the Client sends explicit nils for wildcards
-    (find-triples-unfiltered-query-topology topologies)
-    ; --- 2a. Filtered variant (delegates to unfiltered + tombstone check) ---
-    (find-triples-query-topology topologies hard-delete?)
+    (find-triples-query-topology topologies)
 		; --- 3. BGP Executor ---
     (find-bgp-query-topology topologies)
 		; --- 4. JOIN Operator ---
@@ -1055,15 +965,15 @@
     ; --- 8b. SELF-JOIN Optimizer (critical for QJ4-style queries) ---
     (self-join-query-topology topologies)
     ; --- 8c. BATCH-LOOKUP for batch property fetching ---
-    (batch-lookup-query-topology topologies hard-delete?)
+    (batch-lookup-query-topology topologies)
     ; --- 9. BIND Operator ---
     (bind-query-topology topologies)
     ; --- 10. ORDER BY Operator ---
     (order-query-topology topologies)
     ; --- 11. LIST CONTEXTS (for clearInternal support) ---
-    (list-contexts-query-topology topologies hard-delete?)
+    (list-contexts-query-topology topologies)
     ; --- 11b. COUNT STATEMENTS (for sizeInternal support) ---
-    (count-statements-query-topology topologies hard-delete?)
+    (count-statements-query-topology topologies)
     ; --- 11c. STATISTICS Query Topologies (for cardinality estimation) ---
     (get-predicate-stats-query-topology topologies)
     (get-all-predicate-stats-query-topology topologies)
@@ -1164,7 +1074,7 @@
                                 ;; 2. Extract unique subject values for batch lookup
                                 (qh/batch-enrich-extract-subjects *sub-results *subject-var :> *subjects)
                                 ;; 3. Call batch-lookup to get {subject -> object} map
-                                ;; CRITICAL: Pass context to filter by graph and tombstones
+                                ;; CRITICAL: Pass context to filter by graph
                                 (invoke-query "batch-lookup" *subjects *predicate *context :> *lookup-map)
                                 ;; 4. Merge object values into each binding
                                 (qh/batch-enrich-merge-results *sub-results *lookup-map *subject-var *object-var :> *results)

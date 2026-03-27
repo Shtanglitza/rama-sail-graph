@@ -379,14 +379,9 @@
         (foreign-append! depot [:del ["<bob>" "<age>" "30" "<g1>"] (System/currentTimeMillis)])
         (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 4)
 
-				;; Verify deletion - find-triples filters out tombstoned quads
+				;; Verify deletion - quad should be physically removed
         (let [res (foreign-invoke-query q-triples "<bob>" "<age>" "30" "<g1>")]
-          (is (empty? res) "Quad should be deleted (filtered by tombstone)"))
-
-				;; With soft delete, data remains in $$spoc but is tombstoned
-        ;; find-triples correctly filters it out
-        (is (not-empty (foreign-select [(keypath "<bob>" "<age>" "30") ALL] p-spoc))
-            "Soft delete: data remains in $$spoc but is filtered by find-triples")))))
+          (is (empty? res) "Quad should be deleted"))))))
 
 ;(deftest test-rdf-storage-module
 ;	;; Create an In-Process Cluster (IPC)

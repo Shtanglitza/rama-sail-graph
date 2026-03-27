@@ -1,5 +1,7 @@
 # rama-sail-graph
 
+> **Status: Public Preview** — This project is functional and tested but not yet production-hardened. APIs may change. Feedback and contributions welcome.
+
 A Rama-backed RDF quad store with SPARQL query evaluation and HTTP endpoint.
 
 ## Overview
@@ -9,11 +11,12 @@ rama-sail-graph integrates the [Rama](https://redplanetlabs.com/rama) distribute
 ### Features
 
 - **Quad Storage**: Four index PStates (SPOC, POSC, OSPC, CSPO) for efficient lookups across any access pattern
-- **SPARQL Query Engine**: Server-side query execution via Rama topologies — joins, filters, aggregates, ORDER BY, OPTIONAL, UNION, BIND, VALUES
+- **SPARQL Query Engine**: Server-side query execution via Rama topologies — joins, filters, aggregates, ORDER BY, OPTIONAL, UNION, BIND, VALUES, ASK
 - **Query Optimization**: Cardinality-based join ordering, self-join optimization, colocated subject joins, batch property lookups, materialized type views
 - **Statistics**: Per-predicate and global cardinality tracking for adaptive query planning
-- **Soft Deletes**: Tombstone-based deletion preserves data integrity
+- **Physical Deletes**: Idempotent add/delete with physical index removal
 - **SPARQL HTTP Endpoint**: W3C SPARQL Protocol compatible, works with tools like gdotv
+- **Observability**: Prometheus metrics (`/metrics`), health checks (`/health`), query latency histograms, connection tracking
 - **Namespace Management**: Full prefix/IRI namespace support
 
 ## Quick Start
@@ -26,9 +29,9 @@ rama-sail-graph integrates the [Rama](https://redplanetlabs.com/rama) distribute
 
 ### Open Source And Commercial Use
 
-This repository is intended to be published as open source under the Apache License 2.0.
+This project is open source under the Apache License 2.0.
 
-That means you can use, modify, and ship this code in future commercial products, subject to Apache 2.0 notice requirements. However, this project depends on Rama, and Rama has its own platform licensing terms. Per Red Planet Labs, Rama includes an embedded free license for clusters up to two Supervisor nodes; larger clusters require a separate paid license.
+You can use, modify, and ship this code in commercial products, subject to Apache 2.0 notice requirements. However, this project depends on Rama, which has its own platform licensing terms. Per Red Planet Labs, Rama includes an embedded free license for clusters up to two Supervisor nodes; larger clusters require a separate paid license.
 
 ### Build & Test
 
@@ -55,6 +58,8 @@ lein run -m rama-sail.server.sparql -- --port 7200 --mode cluster --host localho
 # Query
 curl -G http://localhost:7200/sparql --data-urlencode "query=SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 ```
+
+> **Note:** The SPARQL endpoint is intended for development and internal use. It does not currently include authentication, rate limiting, or transport security.
 
 ## Usage
 
@@ -107,11 +112,13 @@ Rama module with quad-based storage using four complementary indices:
 | `$$ospc` | O -> S -> P -> {C} | Object-based lookups |
 | `$$cspo` | C -> S -> P -> {O} | Named graph queries |
 
+Deletion uses physical index removal — deleted quads are removed from all four indices immediately. Adds and deletes are idempotent (set semantics for indices, `$$quad-tx-time` tracking for statistics correctness).
+
 ### Query Topologies
 
 | Topology | Purpose |
 |----------|---------|
-| `find-triples` | Pattern matching with tombstone filtering |
+| `find-triples` | Pattern matching across indices |
 | `find-bgp` | Basic Graph Pattern evaluation |
 | `join` / `left-join` | Hash join / left outer join |
 | `union` | UNION operator |
@@ -119,11 +126,32 @@ Rama module with quad-based storage using four complementary indices:
 | `project` / `distinct` / `slice` | Projection, dedup, pagination |
 | `order` | ORDER BY with ASC/DESC |
 | `bind` | BIND expressions |
-| `group` | GROUP BY with aggregates |
+| `group` | GROUP BY with aggregates (COUNT, SUM, AVG, MIN, MAX) |
 | `self-join` | Optimized same-predicate joins |
 | `colocated-subject-join` | Partition-local subject joins |
 | `batch-lookup` | Batch property fetching |
+| `ask-result` | Boolean ASK query support |
 | `execute-plan` | Recursive plan executor |
+
+### Observability
+
+Prometheus metrics are exposed at `/metrics` when running the SPARQL endpoint:
+
+- `ramasail_query_latency_seconds` — query execution latency histogram
+- `ramasail_queries_total` — query count by status (success, timeout, error, fallback)
+- `ramasail_active_connections` — active SAIL connections gauge
+- `ramasail_query_result_size` — result size summary (p50, p90, p99)
+- `ramasail_transactions_total` — transaction count by status
+- `ramasail_transaction_ops_total` — triple operations by type (add, del)
+
+A `/health` endpoint is also available for liveness checks.
+
+## Known Limitations
+
+- **Query fallback**: Unsupported SPARQL operators fall back to RDF4J's local evaluation strategy, which may not scale for large datasets
+- **Query timeout**: Cancellation is best-effort; Rama cluster queries may continue after client timeout
+- **SPARQL endpoint**: No authentication, rate limiting, or TLS — intended for development use
+- **No CI**: Tests are run locally; CI configuration is not yet included
 
 ## License
 
