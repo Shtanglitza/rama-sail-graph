@@ -214,7 +214,7 @@ lein test :only rama-sail.bench.bsbm.bsbm-bench/test-bsbm-small
 #### 1. Set up a local single-node Rama cluster
 
 ```bash
-cd ../rama-1.6.0
+cd $RAMA_HOME
 
 # Start ZooKeeper, conductor, and supervisor (each in background)
 ./rama devZookeeper &
@@ -232,12 +232,13 @@ sleep 10
 #### 2. Build and deploy the module
 
 ```bash
-cd ../rama-sail-graph
+# From the project directory
 lein uberjar
 
-cd ../rama-1.6.0
+# From the Rama installation directory
+cd $RAMA_HOME
 ./rama deploy --action launch \
-  --jar ../rama-sail-graph/target/rama-sail-graph-0.1.0-SNAPSHOT-standalone.jar \
+  --jar /path/to/rama-sail-graph/target/rama-sail-graph-0.1.0-SNAPSHOT-standalone.jar \
   --module "rama-sail.core/RdfStorageModule" \
   --tasks 4 --threads 2 --workers 1
 
@@ -248,7 +249,7 @@ cd ../rama-1.6.0
 #### 3. Run benchmarks
 
 ```bash
-cd ../rama-sail-graph
+# From the project directory
 
 # Load data + run all queries including joins
 lein run -m rama-sail.bench.cluster.cluster-bench :host localhost :load true :joins true
