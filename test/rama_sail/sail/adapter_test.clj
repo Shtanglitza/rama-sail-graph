@@ -718,6 +718,88 @@
       (is (empty? adds) "Net-visible adds should be empty")
       (is (empty? pending-only) "No pending-only contexts to clear"))))
 
+;;; ---------------------------------------------------------------------------
+;;; compute-commit-ops ordering tests
+;;; ---------------------------------------------------------------------------
+
+(def ^:private compute-commit-ops @#'sail/compute-commit-ops)
+
+(deftest test-compute-commit-ops-basic
+  (testing "basic adds and dels are preserved"
+    (let [q1 ["<s1>" "<p>" "<o>" "<c>"]
+          q2 ["<s2>" "<p>" "<o>" "<c>"]
+          result (compute-commit-ops [[:add q1] [:del q2]])]
+      (is (= 2 (count result)))
+      (is (some #(= [:add q1] %) result))
+      (is (some #(= [:del q2] %) result))))
+
+  (testing "add then del of same quad produces del (last-write-wins)"
+    (let [q ["<s>" "<p>" "<o>" "<c>"]
+          result (compute-commit-ops [[:add q] [:del q]])]
+      (is (= [[:del q]] result))))
+
+  (testing "del then add of same quad produces add (last-write-wins)"
+    (let [q ["<s>" "<p>" "<o>" "<c>"]
+          result (compute-commit-ops [[:del q] [:add q]])]
+      (is (= [[:add q]] result)))))
+
+(deftest test-compute-commit-ops-clear-ordering
+  (testing "clear then add: clear appears BEFORE add in output"
+    (let [ctx "<http://g1>"
+          q ["<s>" "<p>" "<o>" ctx]
+          result (compute-commit-ops [[:clear-context [nil nil nil ctx]]
+                                      [:add q]])]
+      (is (= 2 (count result)))
+      (is (= [:clear-context [nil nil nil ctx]] (first result)))
+      (is (= [:add q] (second result)))))
+
+  (testing "add then clear: add is discarded, only clear emitted"
+    (let [ctx "<http://g1>"
+          q ["<s>" "<p>" "<o>" ctx]
+          result (compute-commit-ops [[:add q]
+                                      [:clear-context [nil nil nil ctx]]])]
+      (is (= 1 (count result)))
+      (is (= [:clear-context [nil nil nil ctx]] (first result)))))
+
+  (testing "add, clear, add same quad: clear then post-clear add"
+    (let [ctx "<http://g1>"
+          q ["<s>" "<p>" "<o>" ctx]
+          result (compute-commit-ops [[:add q]
+                                      [:clear-context [nil nil nil ctx]]
+                                      [:add q]])]
+      (is (= 2 (count result)))
+      (is (= [:clear-context [nil nil nil ctx]] (first result)))
+      (is (= [:add q] (second result))))))
+
+(deftest test-compute-commit-ops-multi-context
+  (testing "clear of ctx1 discards ops for ctx1, preserves ops for ctx2"
+    (let [ctx1 "<http://g1>"
+          ctx2 "<http://g2>"
+          q1 ["<s>" "<p>" "<o>" ctx1]
+          q2 ["<s>" "<p>" "<o>" ctx2]
+          result (compute-commit-ops [[:add q1]
+                                      [:add q2]
+                                      [:clear-context [nil nil nil ctx1]]])]
+      ;; q1's add is discarded (subsumed by clear), only clear + q2 remain
+      (is (= 2 (count result)))
+      (is (some #(= [:clear-context [nil nil nil ctx1]] %) result))
+      (is (some #(= [:add q2] %) result))
+      ;; q1's add should NOT be present
+      (is (not (some #(= [:add q1] %) result)))))
+
+  (testing "double clear of same context emits both clears"
+    (let [ctx "<http://g1>"
+          result (compute-commit-ops [[:clear-context [nil nil nil ctx]]
+                                      [:clear-context [nil nil nil ctx]]])]
+      (is (= 2 (count result)))
+      (is (every? #(= [:clear-context [nil nil nil ctx]] %) result)))))
+
+(deftest test-compute-commit-ops-clear-with-no-prior-ops
+  (testing "clear with no prior ops emits just the clear"
+    (let [ctx "<http://g1>"
+          result (compute-commit-ops [[:clear-context [nil nil nil ctx]]])]
+      (is (= [[:clear-context [nil nil nil ctx]]] result)))))
+
 (comment
 
   (run-tests 'rama-sail.sail.adapter-test))

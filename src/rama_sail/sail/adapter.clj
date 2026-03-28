@@ -211,30 +211,29 @@
    cannot see each other's state changes (different DAG levels in <<cond).
 
    Uses last-write-wins: for each quad, the LAST operation in the pending-ops wins.
-   Quads that end with the same state they started (add then del, or del then add of
-   non-existent) produce no operation."
+   Emits :clear-context ops in-place (not grouped at the end) so that tx-time
+   assignment in commitInternal reflects the original transaction intent.
+   Ops before a clear for the same context are discarded (subsumed by the clear).
+   Only ops after a clear survive and follow it in the output."
   [pending-ops]
-  (let [;; For each quad, determine the last operation type
-        ;; Also collect clear-context operations
-        result (reduce (fn [state [op quad]]
-                         (case op
-                           :add (update state :last-op assoc quad :add)
-                           :del (update state :last-op assoc quad :del)
-                           :clear-context
-                           (let [ctx (nth quad 3)]
-                             (-> state
-                                 ;; Remove all pending ops for this context
-                                 (update :last-op (fn [m]
-                                                    (into {} (remove (fn [[q _]] (= (nth q 3) ctx)) m))))
-                                 (update :cleared conj ctx)))
-                           state))
-                       {:last-op {} :cleared #{}}
-                       pending-ops)
-        {:keys [last-op cleared]} result]
-    (vec (concat
-          (for [[quad op] last-op :when (= op :add)] [:add quad])
-          (for [[quad op] last-op :when (= op :del)] [:del quad])
-          (map (fn [ctx] [:clear-context [nil nil nil ctx]]) cleared)))))
+  (let [{:keys [pending output]}
+        (reduce
+         (fn [{:keys [pending output]} [op quad]]
+           (case op
+             :add {:pending (assoc pending quad :add)
+                   :output output}
+             :del {:pending (assoc pending quad :del)
+                   :output output}
+             :clear-context
+             (let [ctx (nth quad 3)
+                   ;; Discard all pending ops for this context (subsumed by clear)
+                   remaining (into {} (remove (fn [[q _]] (= (nth q 3) ctx))) pending)]
+               {:pending remaining
+                :output (conj output [:clear-context [nil nil nil ctx]])})))
+         {:pending {} :output []}
+         pending-ops)]
+    ;; Flush remaining pending ops (these are post-clear or uncleared ops)
+    (into output (map (fn [[q op]] [op q])) pending)))
 
 (defn- find-matching-pending-adds
   "Find pending add operations matching a removal pattern."
