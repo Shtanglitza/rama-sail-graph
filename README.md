@@ -182,7 +182,7 @@ A `/health` endpoint is also available for liveness checks.
 
 ### BSBM Benchmark Suite
 
-The project includes a [Berlin SPARQL Benchmark (BSBM)](http://wifo5-03.informatik.uni-mannheim.de/bizer/berlinsparqlbenchmark/)-compatible benchmark suite with synthetic data generation. Benchmarks can run against an in-process cluster (IPC) for development or a real Rama cluster for production-like numbers.
+The project includes a Berlin SPARQL Benchmark (BSBM)-compatible benchmark suite with synthetic data generation. Benchmarks can run against an in-process cluster (IPC) for development or a real Rama cluster for production-like numbers.
 
 ### Generate Datasets
 
