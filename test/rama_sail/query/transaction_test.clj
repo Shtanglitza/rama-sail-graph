@@ -525,3 +525,106 @@
               (.close conn))))
         (finally
           (.shutDown repo))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Post-Commit Persistence Tests for Clear + Add Ordering
+;;; ---------------------------------------------------------------------------
+
+(deftest test-clear-then-add-persists
+  (testing "clear(ctx) then add(quad) in same transaction: quad must exist after commit"
+    (let [sail (rsail/create-rama-sail *ipc* module-name)
+          repo (SailRepository. sail)]
+      (.init repo)
+      (try
+        (let [conn (.getConnection repo)
+              ctx (.createIRI VF (unique-iri "clear-add-ctx"))
+              s (.createIRI VF (unique-iri "clear-add-s"))
+              p (.createIRI VF "http://ex/p")
+              o (.createLiteral VF "survives-clear")]
+          (try
+            ;; First: commit an existing quad in the context
+            (.begin conn)
+            (.add conn s p o (into-array Resource [ctx]))
+            (.commit conn)
+            (wait-mb!)
+
+            ;; Second: clear the context, then add a new quad, in one transaction
+            (let [s2 (.createIRI VF (unique-iri "clear-add-s2"))
+                  o2 (.createLiteral VF "post-clear-value")]
+              (.begin conn)
+              (.clear conn (into-array Resource [ctx]))
+              (.add conn s2 p o2 (into-array Resource [ctx]))
+              (.commit conn)
+
+              ;; 2 ops committed: clear-context + add
+              (wait-mb!)
+              (wait-mb!)
+
+              ;; The original quad should be gone (cleared)
+              (is (= 0 (count-statements conn s p o [ctx]))
+                  "Original quad should be removed by clear")
+              ;; The post-clear add should survive
+              (is (= 1 (count-statements conn s2 p o2 [ctx]))
+                  "Quad added after clear must exist after commit"))
+            (finally
+              (.close conn))))
+        (finally
+          (.shutDown repo))))))
+
+(deftest test-add-clear-add-persists
+  (testing "add(q) then clear(ctx) then add(q) in same transaction: quad must exist after commit"
+    (let [sail (rsail/create-rama-sail *ipc* module-name)
+          repo (SailRepository. sail)]
+      (.init repo)
+      (try
+        (let [conn (.getConnection repo)
+              ctx (.createIRI VF (unique-iri "add-clear-add-ctx"))
+              s (.createIRI VF (unique-iri "aca-s"))
+              p (.createIRI VF "http://ex/p")
+              o (.createLiteral VF "aca-value")]
+          (try
+            (.begin conn)
+            (.add conn s p o (into-array Resource [ctx]))
+            (.clear conn (into-array Resource [ctx]))
+            (.add conn s p o (into-array Resource [ctx]))
+            (.commit conn)
+
+            ;; 2 ops committed: clear-context + add (pre-clear add is discarded)
+            (wait-mb!)
+            (wait-mb!)
+
+            ;; The post-clear re-add should survive
+            (is (= 1 (count-statements conn s p o [ctx]))
+                "Quad re-added after clear must exist after commit")
+            (finally
+              (.close conn))))
+        (finally
+          (.shutDown repo))))))
+
+(deftest test-add-then-clear-removes
+  (testing "add(q) then clear(ctx) in same transaction: quad must NOT exist after commit"
+    (let [sail (rsail/create-rama-sail *ipc* module-name)
+          repo (SailRepository. sail)]
+      (.init repo)
+      (try
+        (let [conn (.getConnection repo)
+              ctx (.createIRI VF (unique-iri "add-clear-ctx"))
+              s (.createIRI VF (unique-iri "ac-s"))
+              p (.createIRI VF "http://ex/p")
+              o (.createLiteral VF "ac-value")]
+          (try
+            (.begin conn)
+            (.add conn s p o (into-array Resource [ctx]))
+            (.clear conn (into-array Resource [ctx]))
+            (.commit conn)
+
+            ;; 1 op committed: clear-context (add is discarded, subsumed by clear)
+            (wait-mb!)
+
+            ;; The quad should be gone (clear came after add)
+            (is (= 0 (count-statements conn s p o [ctx]))
+                "Quad added before clear must NOT exist after commit")
+            (finally
+              (.close conn))))
+        (finally
+          (.shutDown repo))))))
