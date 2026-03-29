@@ -355,7 +355,7 @@
           (when (instance? Triple c)
             (throw (SailException.
                     (str "context argument can not be of type Triple: " c)))))
-        ;; Call parent implementation
+        ;; proxy-super cannot resolve overloaded methods (Clojure limitation CLJ-1433)
         (proxy-super addStatement op s p o contexts))
 
       (addStatementInternal [^Resource s ^IRI p ^Value o ^"[Lorg.eclipse.rdf4j.model.Resource;" contexts]

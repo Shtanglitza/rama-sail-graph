@@ -274,9 +274,12 @@
    :right (value-expr->plan (.getRightArg expr))})
 
 (defmethod value-expr->plan In [^In expr]
-  {:type :in
+  ;; In is a subquery-based IN operator (not list-based).
+  ;; SPARQL's FILTER(?x IN (...)) is parsed as ListMemberOperator, not In.
+  ;; Delegate to getArg + getSubQuery for the subquery form.
+  {:type :in-subquery
    :arg (value-expr->plan (.getArg expr))
-   :set (mapv value-expr->plan (.getArgList ^In expr))})
+   :sub-query (.getSubQuery expr)})
 
 (defmethod value-expr->plan ListMemberOperator [^ListMemberOperator expr]
   (let [args (.getArguments expr)]
