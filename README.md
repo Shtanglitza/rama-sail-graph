@@ -152,19 +152,21 @@ RamaSail passes 40 of 40 tests in the RDF4J **RDFStoreTest** compliance suite (`
 
 **SPARQL operators** handled server-side via Rama topologies:
 
-| Supported | Not Yet Supported (falls back to RDF4J local evaluation) |
-|-----------|----------------------------------------------------------|
-| SELECT, ASK, DESCRIBE, CONSTRUCT | SERVICE (federated queries) |
-| JOIN, LEFT JOIN (OPTIONAL), UNION | Property paths |
-| FILTER (comparisons, logic, regex, IN) | MINUS |
-| GROUP BY, HAVING, aggregates | Subqueries |
+| Supported | Falls Back To RDF4J Local Evaluation | Explicitly Unsupported / Not Yet Working |
+|-----------|--------------------------------------|------------------------------------------|
+| SELECT, ASK, DESCRIBE, CONSTRUCT | MINUS | SERVICE (federated queries) |
+| JOIN, LEFT JOIN (OPTIONAL), UNION | | Property paths (for example `+` / `*`) |
+| FILTER (comparisons, logic, regex, IN) | | |
+| GROUP BY, HAVING, aggregates | | |
 | ORDER BY, DISTINCT, LIMIT/OFFSET | |
 | BIND, VALUES, COALESCE, IF | |
 | STR, LANG, DATATYPE, LANGMATCHES | |
 | ISIRI, ISBNODE, ISLITERAL, ISNUMERIC | |
 | SAMETERM, REGEX | |
 
-Unsupported operators are automatically handled by falling back to RDF4J's `DefaultEvaluationStrategy`, which evaluates locally via `getStatements`. This ensures correct results but without distributed execution benefits.
+Some unsupported operators are automatically handled by falling back to RDF4J's `DefaultEvaluationStrategy`, which evaluates locally via `getStatements`. This ensures correct results but without distributed execution benefits. `SERVICE` is a special case and is currently rejected explicitly rather than evaluated through fallback, and property-path operators are not yet a reliable fallback path.
+
+REPL verification showed that basic nested `SELECT` subqueries can compile into Rama plans and run server-side, so subquery support is at least partial and should not be described as fallback-only.
 
 ### Observability
 
@@ -292,7 +294,15 @@ The suite includes 9 BSBM queries and 4 join-focused queries:
 
 ### Reference Results
 
-Environment: Rama 1.6.0, single-node cluster, macOS, 6GB heap, 4 tasks, 2 threads, 50 iterations, 5 warmup.
+These benchmark results were recorded on this development machine:
+
+- Host: MacBook Pro
+- Chip: Apple M5
+- CPU: 10 cores (4 performance, 6 efficiency)
+- Memory: 24 GB
+- OS: macOS 26.4 
+- Runtime/config: Rama 1.6.0, single-node cluster, 6 GB heap, 4 tasks, 2 threads
+- Benchmark settings: 50 iterations, 5 warmup
 
 #### 6K Triples (100 products)
 
@@ -369,7 +379,7 @@ The following optimizations are applied automatically during query planning:
 
 ## Known Limitations
 
-- **Query fallback**: Unsupported SPARQL operators fall back to RDF4J's local evaluation strategy, which may not scale for large datasets
+- **Query fallback**: Some unsupported SPARQL operators fall back to RDF4J's local evaluation strategy, which may not scale for large datasets; `SERVICE` is explicitly unsupported and property paths are not yet a reliable fallback path
 - **Query timeout**: Cancellation is best-effort; Rama cluster queries may continue after client timeout
 - **SPARQL endpoint**: No authentication, rate limiting, or TLS — intended for development use
 - **No CI**: Tests are run locally; CI configuration is not yet included
