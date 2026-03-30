@@ -147,7 +147,8 @@ RamaSail passes 40 of 40 tests in the RDF4J **RDFStoreTest** compliance suite (`
 - Namespace management (get, set, remove, clear)
 - Duplicate handling and statement counting
 - Concurrent add-while-querying
-- Dual connections and BNode reuse
+- Dual connections — two separate `SailConnection` instances operating concurrently on the same store, each maintaining independent transaction state
+- BNode reuse — blank node identity preserved when the same BNode is used across multiple statements within a connection
 
 **SPARQL operators** handled server-side via Rama topologies:
 

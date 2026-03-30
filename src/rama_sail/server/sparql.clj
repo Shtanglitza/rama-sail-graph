@@ -366,7 +366,7 @@
 
 (defn stop-sparql-server!
   "Stop the Jetty server."
-  [server]
+  [^org.eclipse.jetty.server.Server server]
   (when server
     (.stop server)
     (log/info "SPARQL endpoint stopped.")))
