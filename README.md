@@ -322,8 +322,6 @@ These benchmark results were recorded on this development machine:
 | QJ3 | 132.12 | 175.09 | 277.64 | 144.08 | 100.0 |
 | QJ4 | 77.62 | 98.08 | 98.95 | 81.24 | 100.0 |
 
-**Load: 6,033 triples in 57ms (106K triples/sec) | Mix Time: 1,053ms | 3,418 QMpH**
-
 #### 59K Triples (1,000 products)
 
 | Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
@@ -341,8 +339,6 @@ These benchmark results were recorded on this development machine:
 | QJ2 | 46.44 | 99.90 | 223.75 | 55.61 | 2.8 |
 | QJ3 | 132.94 | 180.43 | 276.93 | 147.07 | 100.0 |
 | QJ4 | 77.79 | 100.58 | 152.55 | 83.41 | 100.0 |
-
-**Load: 59,328 triples in 289ms (205K triples/sec) | Mix Time: 1,209ms | 2,978 QMpH**
 
 #### Scaling: p50 Comparison (6K → 59K)
 
