@@ -115,11 +115,12 @@
                                                 {:count Long
                                                  :distinct-subjects Long
                                                  :distinct-objects Long})})
-  ;; Global statistics for overall cardinality estimation
-  (declare-pstate mb $$global-stats {String (fixed-keys-schema
-                                             {:total-triples Long
-                                              :total-predicates Long
-                                              :total-subjects Long})})
+  ;; Global statistics for overall cardinality estimation (single partition on task 0)
+  (declare-pstate mb $$global-stats (fixed-keys-schema
+                                     {:total-triples Long
+                                      :total-predicates Long
+                                      :total-subjects Long})
+                  {:global? true})
   ;; Accurate distinct tracking: pred -> subject/object -> count
   (declare-pstate mb $$pred-subj-count {String (map-schema String Long {:subindex? true})})
   (declare-pstate mb $$pred-obj-count {String (map-schema String Long {:subindex? true})})
@@ -192,9 +193,9 @@
                      (<<if (nil? *prev-obj-count)
                            (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term inc)] $$predicate-stats))
 
-                     ;; Update global statistics (partition by empty string for single location)
-                     (|hash "")
-                     (local-transform> [(keypath "" :total-triples) (nil->val 0) (term inc)] $$global-stats)
+                     ;; Update global statistics (single global partition)
+                     (|global)
+                     (local-transform> [(keypath :total-triples) (nil->val 0) (term inc)] $$global-stats)
 
                      ;; --- Materialized View Maintenance (add) ---
                      ;; If this is an rdf:type triple, update type views with context-aware cardinality.
@@ -255,8 +256,8 @@
                            (local-transform> [(keypath *p *o) NONE>] $$pred-obj-count))
 
                      ;; Update global statistics
-                     (|hash "")
-                     (local-transform> [(keypath "" :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
+                     (|global)
+                     (local-transform> [(keypath :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
 
                      ;; --- Materialized View Maintenance (delete) ---
                      ;; If this is an rdf:type triple, update type views with context-aware cardinality.
@@ -320,8 +321,8 @@
                            (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
                            (local-transform> [(keypath *p *o) NONE>] $$pred-obj-count))
 
-                     (|hash "")
-                     (local-transform> [(keypath "" :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
+                     (|global)
+                     (local-transform> [(keypath :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
                      ;; Update type views if this is an rdf:type triple (context-aware cardinality)
                      (<<if (= *p RDF-TYPE-PREDICATE)
                            ;; Decrement type->subject occurrence count

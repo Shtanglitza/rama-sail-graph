@@ -317,8 +317,13 @@
 
 (defn get-global-stats-query-topology [topologies]
   (<<query-topology topologies "get-global-stats" [:> *stats]
-                    (|hash "")
-                    (local-select> [(keypath "")] $$global-stats :> *stats)
+                    (|global)
+                    (local-select> [(keypath :total-triples)] $$global-stats :> *total-triples)
+                    (local-select> [(keypath :total-predicates)] $$global-stats :> *total-predicates)
+                    (local-select> [(keypath :total-subjects)] $$global-stats :> *total-subjects)
+                    (hash-map :total-triples *total-triples
+                              :total-predicates *total-predicates
+                              :total-subjects *total-subjects :> *stats)
                     (|origin)))
 
 ;; --- Materialized View Query Topologies ---
