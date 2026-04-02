@@ -5,7 +5,7 @@
    - Combiners for distributed aggregation
    - Rama dataflow patterns
 
-   Tests the group-query-topology implementation in core.clj"
+   Tests the group-query-topology implementation in module/queries.clj"
   (:require [clojure.test :refer :all]
             [com.rpl.rama :as rama]
             [com.rpl.rama.aggs :as aggs]
