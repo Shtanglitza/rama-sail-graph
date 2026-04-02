@@ -6,7 +6,8 @@
             [com.rpl.rama.path :as path]
             [com.rpl.rama.test :as rtest]
             [com.rpl.rama.ops :as ops]
-            [rama-sail.core :as core]))
+            [rama-sail.core :as core]
+            [rama-sail.module.queries :as queries]))
 
 ;; 1. Define a minimal module for isolation testing
 (rama/defmodule FindTriplesTestModule [setup topologies]
@@ -35,7 +36,7 @@
                     (rama/local-transform> [(path/keypath *c *s *p) path/NIL->SET path/NONE-ELEM (path/termval *o)] $$cspo)))
 
   ;; 2. Register the find-triples topology
-  (core/find-triples-query-topology topologies))
+  (queries/find-triples-query-topology topologies))
 
 (deftest test-find-triples-permutations
   (with-open [ipc (rtest/create-ipc)]

@@ -104,9 +104,9 @@ curl -G http://localhost:7200/sparql --data-urlencode "query=SELECT * WHERE { ?s
 
 ## Architecture
 
-### Storage Layer (`core.clj`)
+### Storage Layer (`core.clj`, `module/`)
 
-Rama module with quad-based storage using four complementary indices:
+Rama module with quad-based storage using four complementary indices. The module is defined in `core.clj` and assembled from composable building blocks in `module/indexer.clj` (PStates, ETL), `module/namespaces.clj` (prefix management), and `module/queries.clj` (query topologies):
 
 | Index | Structure | Optimized For |
 |-------|-----------|---------------|

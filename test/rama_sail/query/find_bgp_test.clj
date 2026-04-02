@@ -3,7 +3,8 @@
             [com.rpl.rama :as rama]
             [com.rpl.rama.path :as path]
             [com.rpl.rama.test :as rtest]
-            [rama-sail.core :as core]))
+            [rama-sail.core :as core]
+            [rama-sail.module.queries :as queries]))
 
 ;; 1. Define a self-contained module for testing find-bgp
 (rama/defmodule FindBgpTestModule [setup topologies]
@@ -24,8 +25,8 @@
                     (rama/|hash *c) (rama/local-transform> [(path/keypath *c *s *p) path/NIL->SET path/NONE-ELEM (path/termval *o)] $$cspo)))
 
   ;; -- Topologies under test --
-  (core/find-triples-query-topology topologies) ;; Dependency
-  (core/find-bgp-query-topology topologies))    ;; Target
+  (queries/find-triples-query-topology topologies) ;; Dependency
+  (queries/find-bgp-query-topology topologies))    ;; Target
 
 (deftest test-find-bgp-bindings
   (with-open [ipc (rtest/create-ipc)]

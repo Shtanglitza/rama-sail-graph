@@ -4,6 +4,7 @@
             [com.rpl.rama.ops :as ops]
             [com.rpl.rama.test :as rtest]
             [rama-sail.core :refer :all]
+            [rama-sail.module.queries :as queries]
             [rama-sail.query.expr :as expr])
   (:use [com.rpl.rama]
         [com.rpl.rama.path]))
@@ -140,7 +141,7 @@
 ;; We mock "execute-plan" to return static data so we don't need a real depot/PState
 (defmodule FilterTestModule [setup topologies]
 	;; 1. Register the filter topology we want to test
-  (filter-query-topology-parallel topologies)
+  (queries/filter-query-topology-parallel topologies)
 
 	;; 2. Mock 'execute-plan' to return a fixed set of bindings
   (<<query-topology topologies "execute-plan" [*plan :> *results]
@@ -191,7 +192,7 @@
 ;; Test module for slice topology with mocked execute-plan
 (defmodule SliceTestModule [setup topologies]
   ;; Register the slice topology we want to test
-  (slice-query-topology topologies)
+  (queries/slice-query-topology topologies)
 
   ;; Mock 'execute-plan' to return a fixed set of 5 bindings
   (<<query-topology topologies "execute-plan" [*plan :> *results]
