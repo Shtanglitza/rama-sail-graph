@@ -75,11 +75,22 @@
   [conn query-string expected-resource-path]
   (try
     (let [actual-result (.evaluate (.prepareTupleQuery conn query-string))
-          actual-mutable (MutableTupleQueryResult. actual-result)
+          ;; Collect actual results for debug before consuming
+          actual-list (vec (iterator-seq actual-result))
+          actual-mutable (MutableTupleQueryResult. (.getBindingNames actual-result) actual-list)
           expected-mutable (parse-expected-select-results expected-resource-path)
-          equal? (QueryResults/equals actual-mutable expected-mutable)]
+          ;; Collect expected for debug
+          expected-list (vec (iterator-seq expected-mutable))
+          expected-mutable2 (MutableTupleQueryResult.
+                             (.getBindingNames expected-mutable) expected-list)
+          equal? (QueryResults/equals actual-mutable expected-mutable2)]
       {:pass? equal?
-       :message (when-not equal? "SELECT results do not match expected")})
+       :message (when-not equal?
+                  (str "SELECT results do not match.\n"
+                       "  Actual (" (count actual-list) " rows): "
+                       (pr-str (mapv str (take 5 actual-list))) "\n"
+                       "  Expected (" (count expected-list) " rows): "
+                       (pr-str (mapv str (take 5 expected-list)))))})
     (catch Exception e
       {:pass? false
        :message (str "Exception: " (.getMessage e))

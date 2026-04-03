@@ -71,8 +71,8 @@
    "Reified triples - match constant reified triple"           :rdf12-reifies-semantics
    "Reified triples - match reified triple, var subject"       :rdf12-reifies-semantics
    ;; basic-4, basic-5: PASS — single-match queries work with current RDF-star storage
-   "Reified triples - no match of reified triple"              :rdf12-reifies-semantics
-   "Reified triples - Pattern - Same variable"                 :rdf12-reifies-semantics
+   ;; basic-6: empty result expected, should work — testing now
+   ;; pattern-9: no rdf:reifies in expected output — testing now
    "Reified triples - GRAPH"                                   :rdf12-reifies-semantics
    "Reified triples - GRAPHs with blank node"                  :rdf12-reifies-semantics
    "Reified triples - Embedded triple - sameTerm"              :rdf12-reifies-semantics
