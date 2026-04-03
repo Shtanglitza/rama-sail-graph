@@ -8,7 +8,8 @@
    - Functions: :str, :coalesce, :bound
 
    All values use N-Triples canonical format (e.g., \"\\\"value\\\"^^<datatype>\")."
-  (:require [clojure.string :as str])
+  (:require [clojure.string :as str]
+            [clojure.tools.logging :as log])
   (:import [org.eclipse.rdf4j.model Triple]))
 
 (declare sparql-ebv)
@@ -357,8 +358,10 @@
       (when (and s p o)
         (str "<< " s " " p " " o " >>")))
 
-    ;; Default: return nil for unknown expressions
-    nil))
+    ;; Default: log warning and return nil for unknown expressions
+    (do
+      (log/warn "Unhandled expression type:" (:type expr) "- returning nil. Expression:" (pr-str expr))
+      nil)))
 
 (defn sparql-ebv
   "Convert a value to SPARQL Effective Boolean Value (EBV).

@@ -127,6 +127,22 @@
           (filter is-variable?)
           [(:subject-var plan) (:predicate-var plan) (:object-var plan) (:expr-var plan)])
 
+    :singleton
+    #{}
+
+    :empty
+    #{}
+
+    :zero-length-path
+    (into #{}
+          (filter is-variable?)
+          [(:subject plan) (:object plan)])
+
+    :arbitrary-length-path
+    (into #{}
+          (filter is-variable?)
+          [(:subject plan) (:object plan)])
+
     ;; Default
     #{}))
 
@@ -851,6 +867,10 @@
     :triple-ref (set (filter is-variable?
                              [(:subject-var plan) (:predicate-var plan)
                               (:object-var plan) (:expr-var plan)]))
+    :singleton #{}
+    :empty #{}
+    :zero-length-path (set (filter is-variable? [(:subject plan) (:object plan)]))
+    :arbitrary-length-path (set (filter is-variable? [(:subject plan) (:object plan)]))
     ;; Default: recursively collect from sub-plan
     (if (:sub-plan plan)
       (get-plan-vars (:sub-plan plan))
@@ -1374,8 +1394,8 @@
           pred-stats (when (and p-bound? *predicate-stats*)
                        (get *predicate-stats* p))
           pred-count (or (:count pred-stats) 10000)
-          distinct-subj (or (:distinct-subjects pred-stats) (max 1 (quot pred-count 10)))
-          distinct-obj (or (:distinct-objects pred-stats) (max 1 (quot pred-count 10)))]
+          distinct-subj (max 1 (or (:distinct-subjects pred-stats) (max 1 (quot pred-count 10))))
+          distinct-obj (max 1 (or (:distinct-objects pred-stats) (max 1 (quot pred-count 10))))]
       (cond
         ;; All three bound - exact match
         (and s-bound? p-bound? o-bound?) 1
@@ -1480,6 +1500,21 @@
     ;; TripleRef is always joined with a StatementPattern; on its own it's unbounded.
     ;; Use a high estimate to ensure the StatementPattern side drives the join.
     (or (:total-triples *global-stats*) 100000)
+
+    :singleton
+    1  ;; Exactly one empty row
+
+    :empty
+    0  ;; No rows
+
+    :zero-length-path
+    ;; Subject=object identity bindings — bounded by number of distinct subjects
+    (or (:total-subjects *global-stats*) 1000)
+
+    :arbitrary-length-path
+    ;; Transitive closure can be large — use a high estimate
+    (let [step-card (estimate-plan-cardinality (:step-plan plan))]
+      (* step-card 10))
 
     ;; Default: return a moderate estimate
     1000))

@@ -54,6 +54,9 @@ lein test :only rama-sail.sail.rdf-star-test
 
 # Run W3C SPARQL 1.2 eval-triple-terms conformance suite
 lein test :only rama-sail.sail.w3c.sparql12-test
+
+# Run W3C SPARQL 1.1 property path conformance suite
+lein test :only rama-sail.sail.w3c.sparql11-property-path-test
 ```
 
 ### SPARQL HTTP Endpoint
@@ -169,6 +172,8 @@ Deletion uses physical index removal — deleted quads are removed from all four
 | `colocated-subject-join` | Partition-local subject joins |
 | `batch-lookup` | Batch property fetching |
 | `ask-result` | Boolean ASK query support |
+| `arbitrary-length-path` | Property path `+`/`*` (transitive closure) |
+| `zero-length-path` | Property path `?` (zero-or-one) |
 | `execute-plan` | Recursive plan executor |
 
 ### Triple Term Support
@@ -201,18 +206,19 @@ RamaSail passes 40 of 40 tests in the RDF4J **RDFStoreTest** compliance suite (`
 | Supported | Falls Back To RDF4J Local Evaluation | Explicitly Unsupported / Not Yet Working |
 |-----------|--------------------------------------|------------------------------------------|
 | SELECT, ASK, DESCRIBE, CONSTRUCT | MINUS | SERVICE (federated queries) |
-| JOIN, LEFT JOIN (OPTIONAL), UNION | | Property paths (for example `+` / `*`) |
-| FILTER (comparisons, logic, regex, IN) | | RDF 1.2 `rdf:reifies` semantics |
-| GROUP BY, HAVING, aggregates | | RDF 1.2 `<<( )>>` syntax (needs RDF4J upgrade) |
-| ORDER BY, DISTINCT, REDUCED, LIMIT/OFFSET | | SPARQL 1.2 `{| |}` annotation syntax |
+| JOIN, LEFT JOIN (OPTIONAL), UNION | | RDF 1.2 `rdf:reifies` semantics |
+| FILTER (comparisons, logic, regex, IN) | | RDF 1.2 `<<( )>>` syntax (needs RDF4J upgrade) |
+| GROUP BY, HAVING, aggregates | | SPARQL 1.2 `{| |}` annotation syntax |
+| ORDER BY, DISTINCT, REDUCED, LIMIT/OFFSET | | |
 | BIND, VALUES, COALESCE, IF | | |
 | STR, LANG, DATATYPE, LANGMATCHES | | |
 | ISIRI, ISBNODE, ISLITERAL, ISNUMERIC | | |
 | SAMETERM, REGEX | | |
+| Property paths (`+`, `*`, `?`, `/`, `\|`, `^`) | | |
 | Triple term patterns (`<< s p o >> ?p ?o`) | | |
 | TripleRef decomposition (`<< ?s ?p ?o >>`) | | |
 
-Some unsupported operators are automatically handled by falling back to RDF4J's `DefaultEvaluationStrategy`, which evaluates locally via `getStatements`. This ensures correct results but without distributed execution benefits. `SERVICE` is a special case and is currently rejected explicitly rather than evaluated through fallback, and property-path operators are not yet a reliable fallback path.
+Some unsupported operators are automatically handled by falling back to RDF4J's `DefaultEvaluationStrategy`, which evaluates locally via `getStatements`. This ensures correct results but without distributed execution benefits. `SERVICE` is a special case and is currently rejected explicitly rather than evaluated through fallback.
 
 REPL verification showed that basic nested `SELECT` subqueries can compile into Rama plans and run server-side, so subquery support is at least partial and should not be described as fallback-only.
 
@@ -237,6 +243,16 @@ Quarantine breakdown:
 | `rdf:reifies` semantics | 6 | Not yet implemented in RamaSail |
 
 The quarantined tests will become unblocked as RDF4J ships RDF 1.2 parser support (no released version exists as of April 2026) and as `rdf:reifies` semantics are implemented.
+
+### W3C SPARQL 1.1 Property Path Conformance
+
+The project includes a vendored copy of the W3C [property-path](https://github.com/w3c/rdf-tests/tree/main/sparql/sparql11/property-path) test suite (33 tests) in `test/resources/w3c/sparql11/property-path/`.
+
+| Result | Count | Details |
+|--------|-------|---------|
+| **Pass** | 29 | Sequence, alternative, inverse, transitive (`+`/`*`), zero-or-one (`?`), cycles, diamonds, negated property sets, operator precedence |
+| **Quarantined** | 4 | 3 named graph tests, 1 nested star `(*)*` |
+| **Unexpected failures** | 0 | |
 
 ### Observability
 
@@ -445,7 +461,7 @@ The following optimizations are applied automatically during query planning:
 
 ## Known Limitations
 
-- **Query fallback**: Some unsupported SPARQL operators fall back to RDF4J's local evaluation strategy, which may not scale for large datasets; `SERVICE` is explicitly unsupported and property paths are not yet a reliable fallback path
+- **Query fallback**: Some unsupported SPARQL operators fall back to RDF4J's local evaluation strategy, which may not scale for large datasets; `SERVICE` is explicitly unsupported
 - **RDF 1.2 partial**: Triple terms work via RDF-star (`<< s p o >>`), but RDF 1.2 `<<( s p o )>>` syntax, `~ :reifier` syntax, `{| |}` annotations, and `rdf:reifies` semantics are not yet supported. 5/41 W3C SPARQL 1.2 conformance tests pass; 36 are quarantined
 - **Triple term decomposition is client-side**: Extracting subject/predicate/object from triple terms uses string parsing on the SAIL client, not distributed Rama topologies. Constant triple-term lookups are O(1) distributed, but variable decomposition and component filtering are post-fetch
 - **Query timeout**: Cancellation is best-effort; Rama cluster queries may continue after client timeout
