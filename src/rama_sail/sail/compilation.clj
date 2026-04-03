@@ -3,7 +3,7 @@
             [clojure.string :as str]
             [rama-sail.sail.serialization :refer [val->str DEFAULT-CONTEXT-VAL]]
             [rama-sail.sail.optimization :refer [is-variable? extract-plan-vars extract-expr-vars estimate-plan-cardinality optimize-plan get-plan-vars]])
-  (:import [org.eclipse.rdf4j.query.algebra And BindingSetAssignment Compare Compare$CompareOp Distinct Filter LeftJoin Not Or TupleExpr StatementPattern Join Projection Union ValueConstant ValueExpr Var QueryRoot Slice
+  (:import [org.eclipse.rdf4j.query.algebra And BindingSetAssignment Compare Compare$CompareOp Distinct Reduced Filter LeftJoin Not Or TupleExpr StatementPattern Join Projection Union ValueConstant ValueExpr Var QueryRoot Slice
             Extension ExtensionElem MathExpr MathExpr$MathOp Str Coalesce Bound FunctionCall
             Order OrderElem
             Group GroupElem Count Sum Avg Min Max
@@ -199,6 +199,11 @@
 (defmethod tuple-expr->plan Distinct [^Distinct d]
   {:op :distinct
    :sub-plan (tuple-expr->plan (.getArg d))})
+
+(defmethod tuple-expr->plan Reduced [^Reduced r]
+  ;; Reduced is a weaker form of Distinct — treat identically
+  {:op :distinct
+   :sub-plan (tuple-expr->plan (.getArg r))})
 
 (defmethod tuple-expr->plan BindingSetAssignment [^BindingSetAssignment bsa]
   (let [var-names (vec (.getBindingNames bsa))
