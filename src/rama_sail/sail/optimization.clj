@@ -122,6 +122,11 @@
             (extract-plan-vars (:base plan))
             (:optionals plan))
 
+    :triple-ref
+    (into #{}
+          (filter is-variable?)
+          [(:subject-var plan) (:predicate-var plan) (:object-var plan) (:expr-var plan)])
+
     ;; Default
     #{}))
 
@@ -843,6 +848,9 @@
                                (set/union vars (get-plan-vars (:plan opt))))
                              (get-plan-vars (:base plan))
                              (:optionals plan))
+    :triple-ref (set (filter is-variable?
+                             [(:subject-var plan) (:predicate-var plan)
+                              (:object-var plan) (:expr-var plan)]))
     ;; Default: recursively collect from sub-plan
     (if (:sub-plan plan)
       (get-plan-vars (:sub-plan plan))
@@ -1467,6 +1475,11 @@
     :multi-left-join
     ;; Multi-left-join preserves at least base cardinality (optionals don't reduce rows)
     (estimate-plan-cardinality (:base plan))
+
+    :triple-ref
+    ;; TripleRef is always joined with a StatementPattern; on its own it's unbounded.
+    ;; Use a high estimate to ensure the StatementPattern side drives the join.
+    (or (:total-triples *global-stats*) 100000)
 
     ;; Default: return a moderate estimate
     1000))

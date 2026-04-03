@@ -8,7 +8,8 @@
    - Functions: :str, :coalesce, :bound
 
    All values use N-Triples canonical format (e.g., \"\\\"value\\\"^^<datatype>\")."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str])
+  (:import [org.eclipse.rdf4j.model Triple]))
 
 (declare sparql-ebv)
 
@@ -30,6 +31,80 @@
                     s)]
         (Double/parseDouble clean))
       (catch NumberFormatException _ nil))))
+
+(defn triple-term?
+  "Check if a serialized N-Triples string represents a triple term (<< ... >>)."
+  [^String s]
+  (and s (.startsWith s "<< ") (.endsWith s " >>")))
+
+(defn- extract-triple-term-part
+  "Extract subject (0), predicate (1), or object (2) from a serialized triple term.
+   Returns the N-Triples string for the requested component, or nil on failure."
+  [^String s ^long index]
+  (when (triple-term? s)
+    (let [inner (subs s 3 (- (count s) 3))  ;; strip "<< " and " >>"
+          len (count inner)]
+      ;; Parse terms one at a time, stop when we reach the requested index
+      (loop [pos 0
+             part-idx 0]
+        (when (< pos len)
+          (let [ch (.charAt inner pos)]
+            (cond
+              (Character/isWhitespace ch)
+              (recur (inc pos) part-idx)
+
+              ;; Nested triple term
+              (and (< (inc pos) len) (= ch \<) (= (.charAt inner (inc pos)) \<))
+              (let [end (loop [i (+ pos 2) depth 1]
+                          (cond
+                            (>= i (dec len)) (inc len)
+                            (and (= (.charAt inner i) \<) (< (inc i) len) (= (.charAt inner (inc i)) \<))
+                            (recur (+ i 2) (inc depth))
+                            (and (= (.charAt inner i) \>) (< (inc i) len) (= (.charAt inner (inc i)) \>))
+                            (if (= depth 1) (+ i 2) (recur (+ i 2) (dec depth)))
+                            :else (recur (inc i) depth)))]
+                (if (= part-idx index)
+                  (subs inner pos end)
+                  (recur end (inc part-idx))))
+
+              ;; IRI
+              (= ch \<)
+              (let [end (inc (.indexOf inner ">" (int pos)))]
+                (if (= part-idx index)
+                  (subs inner pos end)
+                  (recur end (inc part-idx))))
+
+              ;; Literal
+              (= ch \")
+              (let [close-quote (loop [i (inc pos)]
+                                  (cond
+                                    (>= i len) i
+                                    (= (.charAt inner i) \\) (recur (+ i 2))
+                                    (= (.charAt inner i) \") i
+                                    :else (recur (inc i))))
+                    end (if (>= (inc close-quote) len)
+                          (inc close-quote)
+                          (let [next-ch (.charAt inner (inc close-quote))]
+                            (cond
+                              (= next-ch \@) (let [sp (.indexOf inner " " (int (inc close-quote)))]
+                                               (if (neg? sp) len sp))
+                              (= next-ch \^) (let [gt (.indexOf inner ">" (int (inc close-quote)))]
+                                               (if (neg? gt) len (inc gt)))
+                              :else (inc close-quote))))]
+                (if (= part-idx index)
+                  (subs inner pos end)
+                  (recur end (inc part-idx))))
+
+              ;; Blank node
+              (and (= ch \_) (< (inc pos) len) (= (.charAt inner (inc pos)) \:))
+              (let [end (loop [i (+ pos 2)]
+                          (if (or (>= i len) (Character/isWhitespace (.charAt inner i)))
+                            i (recur (inc i))))]
+                (if (= part-idx index)
+                  (subs inner pos end)
+                  (recur end (inc part-idx))))
+
+              :else (recur (inc pos) part-idx))))))))
 
 (defn eval-expr
   "Evaluate an expression tree against a map of variable bindings.
@@ -152,10 +227,11 @@
     (let [v (eval-expr (:arg expr) bindings)]
       (when v
         (case (:check expr)
-          :is-iri (str/starts-with? v "<")
+          :is-iri (and (str/starts-with? v "<") (not (str/starts-with? v "<< ")))
           :is-bnode (str/starts-with? v "_:")
           :is-literal (str/starts-with? v "\"")
-          :is-numeric (some? (parse-numeric v)))))
+          :is-numeric (some? (parse-numeric v))
+          :is-triple (triple-term? v))))
 
     :lang
     (let [v (eval-expr (:arg expr) bindings)]
@@ -255,6 +331,31 @@
                            (= v-num m-num))
                          (= v m)))))
                  (:set expr))))))
+
+    ;; --- RDF-star Triple Term Functions ---
+
+    :is-triple
+    (let [v (eval-expr (:arg expr) bindings)]
+      (triple-term? v))
+
+    :triple-subject
+    (let [v (eval-expr (:arg expr) bindings)]
+      (extract-triple-term-part v 0))
+
+    :triple-predicate
+    (let [v (eval-expr (:arg expr) bindings)]
+      (extract-triple-term-part v 1))
+
+    :triple-object
+    (let [v (eval-expr (:arg expr) bindings)]
+      (extract-triple-term-part v 2))
+
+    :triple-constructor
+    (let [s (eval-expr (:subject expr) bindings)
+          p (eval-expr (:predicate expr) bindings)
+          o (eval-expr (:object expr) bindings)]
+      (when (and s p o)
+        (str "<< " s " " p " " o " >>")))
 
     ;; Default: return nil for unknown expressions
     nil))

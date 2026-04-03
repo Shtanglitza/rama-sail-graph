@@ -3,11 +3,12 @@
             [clojure.string :as str]
             [rama-sail.sail.serialization :refer [val->str DEFAULT-CONTEXT-VAL]]
             [rama-sail.sail.optimization :refer [is-variable? extract-plan-vars extract-expr-vars estimate-plan-cardinality optimize-plan get-plan-vars]])
-  (:import [org.eclipse.rdf4j.query.algebra And BindingSetAssignment Compare Compare$CompareOp Distinct Filter LeftJoin Not Or TupleExpr StatementPattern Join Projection Union ValueConstant ValueExpr Var QueryRoot Slice
+  (:import [org.eclipse.rdf4j.query.algebra And BindingSetAssignment Compare Compare$CompareOp Distinct Reduced Filter LeftJoin Not Or TupleExpr StatementPattern Join Projection Union ValueConstant ValueExpr Var QueryRoot Slice
             Extension ExtensionElem MathExpr MathExpr$MathOp Str Coalesce Bound FunctionCall
             Order OrderElem
             Group GroupElem Count Sum Avg Min Max
-            If Regex In ListMemberOperator IsURI IsBNode IsLiteral IsNumeric Lang LangMatches Datatype SameTerm]
+            If Regex In ListMemberOperator IsURI IsBNode IsLiteral IsNumeric Lang LangMatches Datatype SameTerm
+            TripleRef ValueExprTripleRef]
            [org.eclipse.rdf4j.query BindingSet]))
 
 ;;; -----------------------------------------------------------------------------
@@ -67,26 +68,116 @@
                :o o-val
                :c c-val}}))
 
+(defn- rewrite-triple-ref-join
+  "Rewrite Join(TripleRef, Plan) into an efficient plan.
+
+   Two cases:
+   1. All s/p/o are constants: Construct the triple term string and substitute
+      it as a constant into the other plan's pattern, eliminating the join entirely.
+      Example: << <alice> <knows> <bob> >> ?pred ?val
+              → BGP('<< <alice> <knows> <bob> >>', ?pred, ?val)
+
+   2. Some s/p/o are variables: Keep the other plan as-is (it returns the triple
+      term string as a binding), then add bind expressions to decompose it.
+      Example: << ?s ?p ?o >> <confidence> ?val
+              → Bind(BGP(?_anon, <confidence>, ?val), [?s=SUBJECT(?_anon), ...])"
+  [triple-ref other-plan]
+  (let [{:keys [subject-var predicate-var object-var expr-var]} triple-ref
+        s-const? (not (is-variable? subject-var))
+        p-const? (not (is-variable? predicate-var))
+        o-const? (not (is-variable? object-var))]
+    (if (and s-const? p-const? o-const?)
+      ;; Case 1: Construct triple term and substitute into other plan as constant
+      (let [constructed (str "<< " subject-var " " predicate-var " " object-var " >>")]
+        ;; Replace the expr-var in the other plan's pattern with the constructed value
+        (if (and (= :bgp (:op other-plan)) (is-variable? expr-var))
+          ;; Direct pattern substitution for BGP
+          (let [pattern (:pattern other-plan)
+                new-pattern (into {}
+                                  (for [[k v] pattern]
+                                    (if (= v expr-var)
+                                      [k constructed]
+                                      [k v])))]
+            {:op :bgp :pattern new-pattern})
+          ;; General case: wrap in bind that sets expr-var = constructed value
+          ;; This shouldn't normally happen but handles edge cases
+          other-plan))
+      ;; Case 2: Decompose triple term variable into s/p/o components.
+      ;; For shared variables (already in other-plan), add filter BEFORE bind.
+      ;; For new variables, add bind to extract the component.
+      ;; For constants, add filter to verify the component matches.
+      (let [make-extract (fn [part-type]
+                           {:type part-type :arg {:type :var :name expr-var}})
+
+            ;; Detect which variables the other plan already provides
+            other-vars (cond
+                         (= :bgp (:op other-plan))
+                         (set (filter is-variable? (vals (:pattern other-plan))))
+                         :else #{})
+
+            components [{:var subject-var :extract (make-extract :triple-subject)}
+                        {:var predicate-var :extract (make-extract :triple-predicate)}
+                        {:var object-var :extract (make-extract :triple-object)}]
+
+            ;; Pre-filters: for shared variables and constants, applied BEFORE bind
+            ;; This ensures we filter using the original bound value before bind overwrites
+            pre-filters (vec (for [{:keys [var extract]} components
+                                   :when (some? var)
+                                   :when (or (not (is-variable? var))
+                                             (contains? other-vars var))]
+                               (if (is-variable? var)
+                                 {:type :cmp :op :eq
+                                  :left extract
+                                  :right {:type :var :name var}}
+                                 {:type :cmp :op :eq
+                                  :left extract
+                                  :right {:type :const :val var}})))
+
+            ;; Bind only NEW variables (not already in other-plan)
+            bindings (vec (for [{:keys [var extract]} components
+                                :when (and (is-variable? var)
+                                           (not (contains? other-vars var)))]
+                            {:var var :expr extract}))
+
+            combined-pre-filter (when (seq pre-filters)
+                                  (reduce (fn [acc f]
+                                            {:type :logic :op :and :left acc :right f})
+                                          (first pre-filters)
+                                          (rest pre-filters)))
+
+            ;; Apply filter first, then bind new variables
+            plan (cond-> other-plan
+                   combined-pre-filter (as-> p {:op :filter :sub-plan p :expr combined-pre-filter})
+                   (seq bindings) (as-> p {:op :bind :sub-plan p :bindings bindings}))]
+        plan))))
+
 (defmethod tuple-expr->plan Join [^Join j]
   (let [left-plan (tuple-expr->plan (.getLeftArg j))
         right-plan (tuple-expr->plan (.getRightArg j))
-        join-vars (compute-join-vars (.getLeftArg j) (.getRightArg j))
-        ;; Cardinality-based ordering: smaller side should be the hash table (right)
-        ;; In hash join, right side builds the index, left side probes
-        ;; We want the smaller side as the hash table for memory efficiency
-        left-card (estimate-plan-cardinality left-plan)
-        right-card (estimate-plan-cardinality right-plan)
-        ;; Swap if left is smaller than right (we want smaller on right for hash table)
-        should-swap? (< left-card right-card)]
-    (if should-swap?
-      {:op :join
-       :left right-plan
-       :right left-plan
-       :join-vars join-vars}
-      {:op :join
-       :left left-plan
-       :right right-plan
-       :join-vars join-vars})))
+        ;; Detect TripleRef + other plan joins and rewrite.
+        ;; TripleRef can't produce rows standalone — it decomposes/constructs triple term strings.
+        triple-ref (cond
+                     (= :triple-ref (:op left-plan)) left-plan
+                     (= :triple-ref (:op right-plan)) right-plan
+                     :else nil)
+        other-plan (when triple-ref
+                     (if (= :triple-ref (:op left-plan)) right-plan left-plan))]
+    (if triple-ref
+      (rewrite-triple-ref-join triple-ref other-plan)
+      ;; Normal join
+      (let [join-vars (compute-join-vars (.getLeftArg j) (.getRightArg j))
+            left-card (estimate-plan-cardinality left-plan)
+            right-card (estimate-plan-cardinality right-plan)
+            should-swap? (< left-card right-card)]
+        (if should-swap?
+          {:op :join
+           :left right-plan
+           :right left-plan
+           :join-vars join-vars}
+          {:op :join
+           :left left-plan
+           :right right-plan
+           :join-vars join-vars})))))
 
 (defmethod tuple-expr->plan LeftJoin [^LeftJoin j]
   (cond-> {:op :left-join
@@ -109,6 +200,11 @@
   {:op :distinct
    :sub-plan (tuple-expr->plan (.getArg d))})
 
+(defmethod tuple-expr->plan Reduced [^Reduced r]
+  ;; Reduced is a weaker form of Distinct — treat identically
+  {:op :distinct
+   :sub-plan (tuple-expr->plan (.getArg r))})
+
 (defmethod tuple-expr->plan BindingSetAssignment [^BindingSetAssignment bsa]
   (let [var-names (vec (.getBindingNames bsa))
         bindings  (vec (for [^BindingSet bs (.getBindingSets bsa)]
@@ -120,6 +216,21 @@
     {:op :values
      :vars (mapv #(str "?" %) var-names)
      :bindings bindings}))
+
+(defmethod tuple-expr->plan TripleRef [^TripleRef tr]
+  ;; TripleRef decomposes/constructs a triple term << s p o >> ↔ exprVar.
+  ;; In SPARQL-star, << ?s ?p ?o >> :annPred ?annVal is parsed as:
+  ;;   Join(TripleRef(?s, ?p, ?o, ?exprVar), StatementPattern(?exprVar, :annPred, ?annVal))
+  ;; At execution time, this plan decomposes ?exprVar into ?s/?p/?o (or constructs it).
+  (let [get-val (fn [^Var v]
+                  (if (.hasValue v)
+                    (val->str (.getValue v))
+                    (str "?" (.getName v))))]
+    {:op :triple-ref
+     :subject-var (get-val (.getSubjectVar tr))
+     :predicate-var (get-val (.getPredicateVar tr))
+     :object-var (get-val (.getObjectVar tr))
+     :expr-var (get-val (.getExprVar tr))}))
 
 (defmethod tuple-expr->plan :default [expr]
   (throw (UnsupportedOperationException.
@@ -287,6 +398,15 @@
      :arg (value-expr->plan (first args))
      :set (mapv value-expr->plan (rest args))}))
 
+;;; --- RDF-star Triple Term Support ---
+
+(defmethod value-expr->plan ValueExprTripleRef [^ValueExprTripleRef expr]
+  ;; TRIPLE(?s, ?p, ?o) constructor — builds a triple term from components
+  {:type :triple-constructor
+   :subject (value-expr->plan (.getSubjectVar expr))
+   :predicate (value-expr->plan (.getPredicateVar expr))
+   :object (value-expr->plan (.getObjectVar expr))})
+
 ;; Fallback for unhandled expressions
 (defmethod value-expr->plan :default [expr]
   (throw (UnsupportedOperationException.
@@ -393,6 +513,10 @@
     :same-term (assoc expr
                       :left (substitute-in-expr (:left expr) bindings-map)
                       :right (substitute-in-expr (:right expr) bindings-map))
+    :triple-constructor (assoc expr
+                               :subject (substitute-in-expr (:subject expr) bindings-map)
+                               :predicate (substitute-in-expr (:predicate expr) bindings-map)
+                               :object (substitute-in-expr (:object expr) bindings-map))
     expr))
 
 (declare substitute-in-plan)
@@ -453,6 +577,11 @@
                          :subject-var (substitute-var (:subject-var plan) bindings-map)
                          :object-var (substitute-var (:object-var plan) bindings-map)
                          :context (substitute-var (:context plan) bindings-map))
+    :triple-ref (assoc plan
+                       :subject-var (substitute-var (:subject-var plan) bindings-map)
+                       :predicate-var (substitute-var (:predicate-var plan) bindings-map)
+                       :object-var (substitute-var (:object-var plan) bindings-map)
+                       :expr-var (substitute-var (:expr-var plan) bindings-map))
     plan))
 
 (defn apply-initial-bindings

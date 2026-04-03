@@ -6,7 +6,8 @@
             [taoensso.nippy :as nippy])
   (:import [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.model.vocabulary XSD]
-           [org.eclipse.rdf4j.query.algebra Join LeftJoin Projection ProjectionElem ProjectionElemList Slice StatementPattern Var]))
+           [org.eclipse.rdf4j.model Triple]
+           [org.eclipse.rdf4j.query.algebra Join LeftJoin Projection ProjectionElem ProjectionElemList Slice StatementPattern TripleRef Var]))
 
 (def VF (SimpleValueFactory/getInstance))
 
@@ -799,6 +800,202 @@
     (let [ctx "<http://g1>"
           result (compute-commit-ops [[:clear-context [nil nil nil ctx]]])]
       (is (= [[:clear-context [nil nil nil ctx]]] result)))))
+
+;;; ---------------------------------------------------------------------------
+;;; RDF-star Triple Term Serialization Tests
+;;; ---------------------------------------------------------------------------
+
+(deftest test-triple-term-serialization
+  (testing "Simple triple term roundtrip"
+    (let [s (.createIRI VF "http://ex/alice")
+          p (.createIRI VF "http://ex/knows")
+          o (.createIRI VF "http://ex/bob")
+          triple (.createTriple VF s p o)
+          serialized (val->str triple)]
+      (is (= "<< <http://ex/alice> <http://ex/knows> <http://ex/bob> >>" serialized))
+      (let [parsed (str->val serialized)]
+        (is (instance? Triple parsed))
+        (is (= s (.getSubject ^Triple parsed)))
+        (is (= p (.getPredicate ^Triple parsed)))
+        (is (= o (.getObject ^Triple parsed))))))
+
+  (testing "Triple term with literal object"
+    (let [s (.createIRI VF "http://ex/alice")
+          p (.createIRI VF "http://ex/age")
+          o (.createLiteral VF "30" XSD/INTEGER)
+          triple (.createTriple VF s p o)
+          serialized (val->str triple)]
+      (is (= "<< <http://ex/alice> <http://ex/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> >>" serialized))
+      (let [parsed (str->val serialized)]
+        (is (instance? Triple parsed))
+        (is (= o (.getObject ^Triple parsed))))))
+
+  (testing "Triple term with language-tagged literal"
+    (let [s (.createIRI VF "http://ex/alice")
+          p (.createIRI VF "http://ex/name")
+          o (.createLiteral VF "Alice" "en")
+          triple (.createTriple VF s p o)
+          serialized (val->str triple)]
+      (is (= "<< <http://ex/alice> <http://ex/name> \"Alice\"@en >>" serialized))
+      (let [parsed (str->val serialized)]
+        (is (instance? Triple parsed))
+        (is (= o (.getObject ^Triple parsed))))))
+
+  (testing "Triple term with BNode subject"
+    (let [s (.createBNode VF "node1")
+          p (.createIRI VF "http://ex/knows")
+          o (.createIRI VF "http://ex/bob")
+          triple (.createTriple VF s p o)
+          serialized (val->str triple)]
+      (is (= "<< _:node1 <http://ex/knows> <http://ex/bob> >>" serialized))
+      (let [parsed (str->val serialized)]
+        (is (instance? Triple parsed))
+        (is (= s (.getSubject ^Triple parsed))))))
+
+  (testing "Nested triple term"
+    (let [inner-s (.createIRI VF "http://ex/alice")
+          inner-p (.createIRI VF "http://ex/knows")
+          inner-o (.createIRI VF "http://ex/bob")
+          inner (.createTriple VF inner-s inner-p inner-o)
+          outer-p (.createIRI VF "http://ex/confidence")
+          outer-o (.createLiteral VF "0.95" XSD/DOUBLE)
+          outer (.createTriple VF inner outer-p outer-o)
+          serialized (val->str outer)]
+      (is (= "<< << <http://ex/alice> <http://ex/knows> <http://ex/bob> >> <http://ex/confidence> \"0.95\"^^<http://www.w3.org/2001/XMLSchema#double> >>" serialized))
+      (let [parsed (str->val serialized)]
+        (is (instance? Triple parsed))
+        (is (instance? Triple (.getSubject ^Triple parsed)))
+        (let [inner-parsed (.getSubject ^Triple parsed)]
+          (is (= inner-s (.getSubject ^Triple inner-parsed)))
+          (is (= inner-o (.getObject ^Triple inner-parsed))))))))
+
+(deftest test-triple-term-as-quad-value
+  (testing "Triple term can be used as object in a quad tuple"
+    (let [s (.createIRI VF "http://ex/alice")
+          p (.createIRI VF "http://ex/knows")
+          o (.createIRI VF "http://ex/bob")
+          triple (.createTriple VF s p o)
+          serialized (val->str triple)]
+      ;; The serialized triple term is just a string — it can go into any position
+      (is (string? serialized))
+      (is (.startsWith ^String serialized "<< "))
+      (is (.endsWith ^String serialized " >>")))))
+
+;;; ---------------------------------------------------------------------------
+;;; TripleRef Compilation Tests
+;;; ---------------------------------------------------------------------------
+
+(deftest test-triple-ref-compilation
+  (testing "TripleRef compiles to triple-ref plan"
+    (let [s-var (Var. "s")
+          p-var (Var. "p")
+          o-var (Var. "o")
+          expr-var (Var. "__tt1")
+          tr (TripleRef. s-var p-var o-var expr-var)
+          plan (tuple-expr->plan tr)]
+      (is (= :triple-ref (:op plan)))
+      (is (= "?s" (:subject-var plan)))
+      (is (= "?p" (:predicate-var plan)))
+      (is (= "?o" (:object-var plan)))
+      (is (= "?__tt1" (:expr-var plan)))))
+
+  (testing "Join(TripleRef, StatementPattern) rewrites to bind decomposition"
+    ;; Simulates: << ?s ?p ?o >> :confidence ?val
+    (let [s-var (Var. "s")
+          p-var (Var. "p")
+          o-var (Var. "o")
+          expr-var (Var. "__tt1")
+          tr (TripleRef. s-var p-var o-var expr-var)
+          ;; StatementPattern: ?__tt1 :confidence ?val
+          sp-s (Var. "__tt1")
+          sp-p (Var. "_const_confidence" (.createIRI VF "http://ex/confidence") true true)
+          sp-o (Var. "val")
+          sp (StatementPattern. sp-s sp-p sp-o)
+          join (Join. tr sp)
+          plan (tuple-expr->plan join)]
+      ;; Should be rewritten from Join(TripleRef, SP) to Bind(SP, decompose)
+      (is (= :bind (:op plan)))
+      ;; Sub-plan should be the StatementPattern
+      (is (= :bgp (:op (:sub-plan plan))))
+      ;; Bindings should decompose ?__tt1 into ?s, ?p, ?o
+      (is (= 3 (count (:bindings plan))))
+      (let [binding-vars (set (map :var (:bindings plan)))]
+        (is (contains? binding-vars "?s"))
+        (is (contains? binding-vars "?p"))
+        (is (contains? binding-vars "?o"))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Triple Term Expression Evaluation Tests
+;;; ---------------------------------------------------------------------------
+
+(deftest test-triple-term-expression-eval
+  (let [eval-expr (requiring-resolve 'rama-sail.query.expr/eval-expr)
+        triple-term? (requiring-resolve 'rama-sail.query.expr/triple-term?)]
+
+    (testing "triple-term? detection"
+      (is (triple-term? "<< <http://ex/a> <http://ex/b> <http://ex/c> >>"))
+      (is (not (triple-term? "<http://ex/a>")))
+      (is (not (triple-term? "\"hello\"")))
+      (is (not (triple-term? nil))))
+
+    (testing "isTRIPLE type check via :type-check"
+      (let [bindings {"?x" "<< <http://ex/a> <http://ex/b> <http://ex/c> >>"
+                      "?y" "<http://ex/a>"}]
+        (is (true? (eval-expr {:type :type-check :check :is-triple
+                               :arg {:type :var :name "?x"}} bindings)))
+        (is (false? (eval-expr {:type :type-check :check :is-triple
+                                :arg {:type :var :name "?y"}} bindings)))))
+
+    (testing "isIRI correctly excludes triple terms"
+      (let [bindings {"?x" "<< <http://ex/a> <http://ex/b> <http://ex/c> >>"
+                      "?y" "<http://ex/a>"}]
+        (is (false? (eval-expr {:type :type-check :check :is-iri
+                                :arg {:type :var :name "?x"}} bindings)))
+        (is (true? (eval-expr {:type :type-check :check :is-iri
+                               :arg {:type :var :name "?y"}} bindings)))))
+
+    (testing "SUBJECT() extraction"
+      (let [tt "<< <http://ex/alice> <http://ex/knows> <http://ex/bob> >>"
+            bindings {"?tt" tt}]
+        (is (= "<http://ex/alice>"
+               (eval-expr {:type :triple-subject :arg {:type :var :name "?tt"}} bindings)))))
+
+    (testing "PREDICATE() extraction"
+      (let [tt "<< <http://ex/alice> <http://ex/knows> <http://ex/bob> >>"
+            bindings {"?tt" tt}]
+        (is (= "<http://ex/knows>"
+               (eval-expr {:type :triple-predicate :arg {:type :var :name "?tt"}} bindings)))))
+
+    (testing "OBJECT() extraction"
+      (let [tt "<< <http://ex/alice> <http://ex/knows> <http://ex/bob> >>"
+            bindings {"?tt" tt}]
+        (is (= "<http://ex/bob>"
+               (eval-expr {:type :triple-object :arg {:type :var :name "?tt"}} bindings)))))
+
+    (testing "OBJECT() with typed literal"
+      (let [tt "<< <http://ex/alice> <http://ex/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> >>"
+            bindings {"?tt" tt}]
+        (is (= "\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+               (eval-expr {:type :triple-object :arg {:type :var :name "?tt"}} bindings)))))
+
+    (testing "TRIPLE() constructor"
+      (let [bindings {"?s" "<http://ex/alice>" "?p" "<http://ex/knows>" "?o" "<http://ex/bob>"}]
+        (is (= "<< <http://ex/alice> <http://ex/knows> <http://ex/bob> >>"
+               (eval-expr {:type :triple-constructor
+                           :subject {:type :var :name "?s"}
+                           :predicate {:type :var :name "?p"}
+                           :object {:type :var :name "?o"}} bindings)))))
+
+    (testing "Extraction from nested triple term"
+      (let [tt "<< << <http://ex/a> <http://ex/b> <http://ex/c> >> <http://ex/p> \"val\" >>"
+            bindings {"?tt" tt}]
+        ;; Subject is itself a triple term
+        (is (= "<< <http://ex/a> <http://ex/b> <http://ex/c> >>"
+               (eval-expr {:type :triple-subject :arg {:type :var :name "?tt"}} bindings)))
+        (is (= "<http://ex/p>"
+               (eval-expr {:type :triple-predicate :arg {:type :var :name "?tt"}} bindings)))
+        (is (= "\"val\""
+               (eval-expr {:type :triple-object :arg {:type :var :name "?tt"}} bindings)))))))
 
 (comment
 

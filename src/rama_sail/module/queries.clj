@@ -487,6 +487,11 @@
                               (case> :values)
                               (get *plan :bindings :> *results)
 
+                              ;; TripleRef should be rewritten to :bind during compilation.
+                              ;; If it reaches execution, return empty (no standalone enumeration).
+                              (case> :triple-ref)
+                              (identity [] :> *results)
+
                               (case> :batch-enrich)
                               (identity *plan :> {*sub-plan :sub-plan *predicate :predicate
                                                   *subject-var :subject-var *object-var :object-var
