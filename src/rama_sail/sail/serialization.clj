@@ -1,7 +1,7 @@
 (ns rama-sail.sail.serialization
   (:require [clojure.string :as str])
   (:import (org.eclipse.rdf4j.model.vocabulary XSD)
-           [org.eclipse.rdf4j.model Value Resource IRI Literal BNode ValueFactory]
+           [org.eclipse.rdf4j.model Value Resource IRI Literal BNode Triple ValueFactory]
            [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.query.impl MapBindingSet SimpleBinding]))
 
@@ -95,6 +95,13 @@
     (instance? BNode v)
     (str "_:" (.getID ^BNode v))
 
+    ;; Triple term (RDF-star): << s p o >>
+    (instance? Triple v)
+    (let [^Triple t v]
+      (str "<< " (val->str (.getSubject t)) " "
+           (val->str (.getPredicate t)) " "
+           (val->str (.getObject t)) " >>"))
+
     ;; Literal
     (instance? Literal v)
     (let [^Literal lit v
@@ -136,12 +143,103 @@
       (str/replace "\\r" "\r")
       (str/replace "\u0000" "\\")))
 
+(defn- parse-triple-term-parts
+  "Parse the inner content of a triple term (<< s p o >>) into three N-Triples term strings.
+   Handles nested triple terms, IRIs, literals (with escapes), and blank nodes."
+  [^String inner]
+  (let [len (count inner)]
+    (loop [pos 0
+           parts []]
+      (if (or (>= pos len) (= 3 (count parts)))
+        parts
+        (let [ch (.charAt inner pos)]
+          (cond
+            ;; Skip whitespace
+            (Character/isWhitespace ch)
+            (recur (inc pos) parts)
+
+            ;; Nested triple term: << ... >>
+            (and (< (inc pos) len)
+                 (= ch \<)
+                 (= (.charAt inner (inc pos)) \<))
+            (let [;; Find matching >> accounting for nesting
+                  end (loop [i (+ pos 2) depth 1]
+                        (cond
+                          (>= i (dec len)) (inc len) ;; malformed, return past end
+                          (and (= (.charAt inner i) \<)
+                               (< (inc i) len)
+                               (= (.charAt inner (inc i)) \<))
+                          (recur (+ i 2) (inc depth))
+                          (and (= (.charAt inner i) \>)
+                               (< (inc i) len)
+                               (= (.charAt inner (inc i)) \>))
+                          (if (= depth 1)
+                            (+ i 2) ;; found matching >>
+                            (recur (+ i 2) (dec depth)))
+                          :else (recur (inc i) depth)))]
+              (recur end (conj parts (subs inner pos end))))
+
+            ;; IRI: <...>
+            (= ch \<)
+            (let [end (inc (.indexOf inner ">" (int pos)))]
+              (recur end (conj parts (subs inner pos end))))
+
+            ;; Literal: "..."[@lang | ^^<type>]
+            (= ch \")
+            (let [;; Find closing quote, handling escapes
+                  close-quote (loop [i (inc pos)]
+                                (cond
+                                  (>= i len) i
+                                  (= (.charAt inner i) \\) (recur (+ i 2)) ;; skip escaped char
+                                  (= (.charAt inner i) \") i
+                                  :else (recur (inc i))))
+                  ;; Check for suffix after closing quote
+                  end (if (>= (inc close-quote) len)
+                        (inc close-quote)
+                        (let [next-ch (.charAt inner (inc close-quote))]
+                          (cond
+                            ;; Language tag: @en
+                            (= next-ch \@)
+                            (let [space (.indexOf inner " " (int (inc close-quote)))]
+                              (if (neg? space) len space))
+                            ;; Datatype: ^^<...>
+                            (= next-ch \^)
+                            (let [gt (.indexOf inner ">" (int (inc close-quote)))]
+                              (if (neg? gt) len (inc gt)))
+                            :else (inc close-quote))))]
+              (recur end (conj parts (subs inner pos end))))
+
+            ;; Blank node: _:...
+            (and (= ch \_)
+                 (< (inc pos) len)
+                 (= (.charAt inner (inc pos)) \:))
+            (let [end (loop [i (+ pos 2)]
+                        (if (or (>= i len) (Character/isWhitespace (.charAt inner i)))
+                          i
+                          (recur (inc i))))]
+              (recur end (conj parts (subs inner pos end))))
+
+            ;; Unexpected character — skip
+            :else (recur (inc pos) parts)))))))
+
 (defn str->val
   "Parse an N-Triples formatted string into an RDF4J Value.
    Throws IllegalArgumentException for malformed input."
   [^String s]
   (cond
     (nil? s) nil
+
+    ;; Triple term (RDF-star): << s p o >>
+    (.startsWith s "<< ")
+    (let [inner (subs s 3 (- (count s) 3))  ;; strip "<< " and " >>"
+          ;; Parse three N-Triples terms from the inner string.
+          ;; Terms are: IRI (<...>), BNode (_:...), Literal ("..."), or nested Triple (<< ... >>)
+          parts (parse-triple-term-parts inner)]
+      (when (= 3 (count parts))
+        (.createTriple VF
+                       ^Resource (str->val (nth parts 0))
+                       ^IRI (str->val (nth parts 1))
+                       (str->val (nth parts 2)))))
 
     ;; IRI: <...>
     (.startsWith s "<")
@@ -211,11 +309,20 @@
 
 (defn skolemize-value
   "Convert an RDF value to its canonical string representation with BNode skolemization.
-   For BNodes, uses the bnode-map to generate unique IDs per transaction."
+   For BNodes, uses the bnode-map to generate unique IDs per transaction.
+   For Triple terms, recursively skolemizes inner BNodes."
   [^Value v bnode-map]
-  (if (instance? BNode v)
+  (cond
+    (instance? BNode v)
     (str "_:" (skolemize-bnode v bnode-map))
-    (val->str v)))
+
+    (instance? Triple v)
+    (let [^Triple t v]
+      (str "<< " (skolemize-value (.getSubject t) bnode-map) " "
+           (val->str (.getPredicate t)) " "
+           (skolemize-value (.getObject t) bnode-map) " >>"))
+
+    :else (val->str v)))
 
 (defn skolemized-quad->tuple
   "Create a quad tuple with BNode skolemization applied."
