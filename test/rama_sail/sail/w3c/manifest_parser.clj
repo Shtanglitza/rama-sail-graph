@@ -27,6 +27,7 @@
 (def ^:private mf-UpdateEvaluationTest (iri MF-NS "UpdateEvaluationTest"))
 (def ^:private qt-query (iri QT-NS "query"))
 (def ^:private qt-data (iri QT-NS "data"))
+(def ^:private qt-graphData (iri QT-NS "graphData"))
 (def ^:private ut-request (iri UT-NS "request"))
 (def ^:private ut-data (iri UT-NS "data"))
 
@@ -67,13 +68,17 @@
 (defn- parse-query-test
   [model subject]
   (let [action (get-object model subject mf-action)
-        result (get-object model subject mf-result)]
-    {:iri (value->str subject)
-     :name (value->str (get-object model subject mf-name))
-     :type :query-evaluation
-     :query-file (when action (iri->filename (get-object model action qt-query)))
-     :data-file (when action (iri->filename (get-object model action qt-data)))
-     :result-file (iri->filename result)}))
+        result (get-object model subject mf-result)
+        ;; Collect graph data files (for named graph tests)
+        graph-data-objs (when action
+                          (seq (get-objects model action qt-graphData)))]
+    (cond-> {:iri (value->str subject)
+             :name (value->str (get-object model subject mf-name))
+             :type :query-evaluation
+             :query-file (when action (iri->filename (get-object model action qt-query)))
+             :data-file (when action (iri->filename (get-object model action qt-data)))
+             :result-file (iri->filename result)}
+      graph-data-objs (assoc :graph-data-files (mapv iri->filename graph-data-objs)))))
 
 (defn- parse-update-test
   [model subject]

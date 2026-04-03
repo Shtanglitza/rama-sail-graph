@@ -3,11 +3,12 @@
             [rama-sail.sail.adapter :as sail]
             [rama-sail.sail.serialization :as ser]
             [rama-sail.sail.compilation :as comp]
+            [rama-sail.module.queries :as queries]
             [taoensso.nippy :as nippy])
   (:import [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.model.vocabulary XSD]
            [org.eclipse.rdf4j.model Triple]
-           [org.eclipse.rdf4j.query.algebra Join LeftJoin Projection ProjectionElem ProjectionElemList Slice StatementPattern TripleRef Var]))
+           [org.eclipse.rdf4j.query.algebra ArbitraryLengthPath EmptySet Join LeftJoin Projection ProjectionElem ProjectionElemList SingletonSet Slice StatementPattern TripleRef Var ZeroLengthPath]))
 
 (def VF (SimpleValueFactory/getInstance))
 
@@ -996,6 +997,95 @@
                (eval-expr {:type :triple-predicate :arg {:type :var :name "?tt"}} bindings)))
         (is (= "\"val\""
                (eval-expr {:type :triple-object :arg {:type :var :name "?tt"}} bindings)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Property Path & Singleton/Empty Compilation Tests
+;;; ---------------------------------------------------------------------------
+
+(deftest test-singleton-set-compilation
+  (testing "SingletonSet compiles to :singleton plan"
+    (let [plan (tuple-expr->plan (SingletonSet.))]
+      (is (= :singleton (:op plan)))))
+
+  (testing "EmptySet compiles to :empty plan"
+    (let [plan (tuple-expr->plan (EmptySet.))]
+      (is (= :empty (:op plan))))))
+
+(deftest test-zero-length-path-compilation
+  (testing "ZeroLengthPath with two variables"
+    (let [s-var (Var. "x")
+          o-var (Var. "y")
+          zlp (ZeroLengthPath. s-var o-var)
+          plan (tuple-expr->plan zlp)]
+      (is (= :zero-length-path (:op plan)))
+      (is (= "?x" (:subject plan)))
+      (is (= "?y" (:object plan)))))
+
+  (testing "ZeroLengthPath with bound subject"
+    (let [s-var (Var. "x" (.createIRI VF "http://ex/alice") false true)
+          o-var (Var. "y")
+          zlp (ZeroLengthPath. s-var o-var)
+          plan (tuple-expr->plan zlp)]
+      (is (= :zero-length-path (:op plan)))
+      (is (= "<http://ex/alice>" (:subject plan)))
+      (is (= "?y" (:object plan))))))
+
+(deftest test-arbitrary-length-path-compilation
+  (testing "ArbitraryLengthPath with + (minLength=1)"
+    (let [s-var (Var. "x")
+          o-var (Var. "y")
+          p-var (Var. "_const_p" (.createIRI VF "http://ex/knows") true true)
+          sp (StatementPattern. s-var p-var o-var)
+          alp (ArbitraryLengthPath. s-var sp o-var 1)
+          plan (tuple-expr->plan alp)]
+      (is (= :arbitrary-length-path (:op plan)))
+      (is (= "?x" (:subject plan)))
+      (is (= "?y" (:object plan)))
+      (is (= 1 (:min-length plan)))
+      (is (= :bgp (:op (:step-plan plan))))
+      (is (= "<http://ex/knows>" (get-in plan [:step-plan :pattern :p])))))
+
+  (testing "ArbitraryLengthPath with * (minLength=0)"
+    (let [s-var (Var. "x")
+          o-var (Var. "y")
+          p-var (Var. "_const_p" (.createIRI VF "http://ex/knows") true true)
+          sp (StatementPattern. s-var p-var o-var)
+          alp (ArbitraryLengthPath. s-var sp o-var 0)
+          plan (tuple-expr->plan alp)]
+      (is (= :arbitrary-length-path (:op plan)))
+      (is (= 0 (:min-length plan))))))
+
+(deftest test-transitive-closure-helpers
+  (let [compute-tc queries/compute-transitive-closure
+        compute-zmc queries/compute-zero-or-more-closure]
+
+    (testing "Transitive closure on linear chain A->B->C"
+      (let [edges #{["A" "B"] ["B" "C"]}
+            tc (compute-tc edges)]
+        (is (contains? tc ["A" "B"]))
+        (is (contains? tc ["B" "C"]))
+        (is (contains? tc ["A" "C"]))  ;; transitive
+        (is (not (contains? tc ["A" "A"])))  ;; no self-loops
+        (is (not (contains? tc ["C" "A"])))))  ;; no reverse
+
+    (testing "Transitive closure with cycle A->B->C->A"
+      (let [edges #{["A" "B"] ["B" "C"] ["C" "A"]}
+            tc (compute-tc edges)]
+        ;; Every node reaches every node
+        (is (contains? tc ["A" "B"]))
+        (is (contains? tc ["A" "C"]))
+        (is (contains? tc ["B" "A"]))
+        (is (contains? tc ["C" "B"]))
+        ;; Self-loops via cycle
+        (is (contains? tc ["A" "A"]))))
+
+    (testing "Zero-or-more closure includes self-loops for all nodes"
+      (let [edges #{["A" "B"] ["B" "C"]}
+            zmc (compute-zmc edges)]
+        (is (contains? zmc ["A" "A"]))
+        (is (contains? zmc ["B" "B"]))
+        (is (contains? zmc ["C" "C"]))
+        (is (contains? zmc ["A" "C"]))))))
 
 (comment
 

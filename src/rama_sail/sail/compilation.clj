@@ -3,7 +3,7 @@
             [clojure.string :as str]
             [rama-sail.sail.serialization :refer [val->str DEFAULT-CONTEXT-VAL]]
             [rama-sail.sail.optimization :refer [is-variable? extract-plan-vars extract-expr-vars estimate-plan-cardinality optimize-plan get-plan-vars]])
-  (:import [org.eclipse.rdf4j.query.algebra And BindingSetAssignment Compare Compare$CompareOp Distinct Reduced Filter LeftJoin Not Or TupleExpr StatementPattern Join Projection Union ValueConstant ValueExpr Var QueryRoot Slice
+  (:import [org.eclipse.rdf4j.query.algebra And ArbitraryLengthPath BindingSetAssignment Compare Compare$CompareOp Distinct EmptySet Reduced Filter LeftJoin Not Or TupleExpr StatementPattern Join Projection SingletonSet Union ValueConstant ValueExpr Var QueryRoot Slice ZeroLengthPath
             Extension ExtensionElem MathExpr MathExpr$MathOp Str Coalesce Bound FunctionCall
             Order OrderElem
             Group GroupElem Count Sum Avg Min Max
@@ -231,6 +231,48 @@
      :predicate-var (get-val (.getPredicateVar tr))
      :object-var (get-val (.getObjectVar tr))
      :expr-var (get-val (.getExprVar tr))}))
+
+(defmethod tuple-expr->plan SingletonSet [^SingletonSet _]
+  ;; SingletonSet produces exactly one empty binding row — the identity for joins.
+  ;; Used internally by RDF4J (e.g., in BIND without a preceding pattern).
+  {:op :singleton})
+
+(defmethod tuple-expr->plan EmptySet [^EmptySet _]
+  ;; EmptySet produces zero rows — used for contradictions or pruned branches.
+  {:op :empty})
+
+(defmethod tuple-expr->plan ZeroLengthPath [^ZeroLengthPath zlp]
+  ;; :p? path — matches zero-length (subject = object) or one step.
+  ;; RDF4J represents :p? as Union(ZeroLengthPath, StatementPattern).
+  ;; ZeroLengthPath alone just binds subject=object for all subjects in the store.
+  (let [get-val (fn [^Var v]
+                  (if (.hasValue v)
+                    (val->str (.getValue v))
+                    (str "?" (.getName v))))
+        s-val (get-val (.getSubjectVar zlp))
+        o-val (get-val (.getObjectVar zlp))]
+    {:op :zero-length-path
+     :subject s-val
+     :object o-val}))
+
+(defmethod tuple-expr->plan ArbitraryLengthPath [^ArbitraryLengthPath alp]
+  ;; Property path :p+ (minLength=1) or :p* (minLength=0).
+  ;; The path expression is typically a StatementPattern for a single predicate.
+  (let [get-val (fn [^Var v]
+                  (if (.hasValue v)
+                    (val->str (.getValue v))
+                    (str "?" (.getName v))))
+        s-val (get-val (.getSubjectVar alp))
+        o-val (get-val (.getObjectVar alp))
+        min-length (.getMinLength alp)
+        ;; Extract the predicate from the path expression (usually a StatementPattern)
+        path-expr (.getPathExpression alp)
+        step-plan (tuple-expr->plan path-expr)]
+    {:op :arbitrary-length-path
+     :subject s-val
+     :object o-val
+     :step-plan step-plan
+     :min-length min-length}))
 
 (defmethod tuple-expr->plan :default [expr]
   (throw (UnsupportedOperationException.
@@ -582,6 +624,14 @@
                        :predicate-var (substitute-var (:predicate-var plan) bindings-map)
                        :object-var (substitute-var (:object-var plan) bindings-map)
                        :expr-var (substitute-var (:expr-var plan) bindings-map))
+    (:singleton :empty) plan
+    :zero-length-path (assoc plan
+                             :subject (substitute-var (:subject plan) bindings-map)
+                             :object (substitute-var (:object plan) bindings-map))
+    :arbitrary-length-path (assoc plan
+                                  :subject (substitute-var (:subject plan) bindings-map)
+                                  :object (substitute-var (:object plan) bindings-map)
+                                  :step-plan (substitute-in-plan (:step-plan plan) bindings-map))
     plan))
 
 (defn apply-initial-bindings

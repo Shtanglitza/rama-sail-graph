@@ -4,7 +4,9 @@
    Use these functions from within a defmodule body."
   (:use [com.rpl.rama]
         [com.rpl.rama.path])
-  (:require [clojure.string :as str]
+  (:require [clojure.set :as set]
+            [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [com.rpl.rama.aggs :as aggs]
             [com.rpl.rama.ops :as ops]
             [rama-sail.module.indexer :as idx]
@@ -372,6 +374,219 @@
                     (|origin)
                     (+set-union *binding-set :> *results)))
 
+;;; ---------------------------------------------------------------------------
+;;; Property Path Support
+;;; ---------------------------------------------------------------------------
+
+(defn compute-transitive-closure
+  "Compute transitive closure of a set of (subject, object) edges.
+   Returns a set of [from to] pairs reachable via 1+ steps.
+   Uses iterative BFS with a visited set to handle cycles.
+   In a cycle A->B->C->A, A reaches itself (self-loop via cycle)."
+  [edges]
+  (let [;; Build adjacency list: from -> #{to ...}
+        adj (reduce (fn [m [s o]]
+                      (update m s (fnil conj #{}) o))
+                    {} edges)
+        ;; For each starting node, BFS to find all reachable nodes (1+ steps)
+        reachable-from (fn [start]
+                         (let [first-step (get adj start #{})]
+                           (loop [frontier first-step
+                                  visited first-step
+                                  result (set (map (fn [n] [start n]) first-step))]
+                             (if (empty? frontier)
+                               result
+                               (let [next-nodes (into #{} (mapcat adj) frontier)
+                                     new-nodes (set/difference next-nodes visited)]
+                                 (recur new-nodes
+                                        (into visited new-nodes)
+                                        (into result (map (fn [n] [start n]) new-nodes))))))))
+        all-starts (keys adj)]
+    (into #{} (mapcat reachable-from) all-starts)))
+
+(defn compute-zero-or-more-closure
+  "Like transitive-closure but includes zero-length paths (node to itself).
+   Every node that appears as subject or object gets a self-loop."
+  [edges]
+  (let [tc (compute-transitive-closure edges)
+        all-nodes (into #{} (mapcat (fn [[s o]] [s o])) edges)]
+    (into tc (map (fn [n] [n n])) all-nodes)))
+
+(defn path-results-to-bindings
+  "Convert transitive closure pairs to binding maps for subject/object variables."
+  [pairs subject-var object-var]
+  (let [s-var? (str/starts-with? subject-var "?")
+        o-var? (str/starts-with? object-var "?")]
+    (cond
+      ;; Both variables: return all pairs
+      (and s-var? o-var?)
+      (set (for [[s o] pairs]
+             (cond-> {}
+               s-var? (assoc subject-var s)
+               o-var? (assoc object-var o))))
+
+      ;; Subject bound, object variable: filter pairs by subject
+      (and (not s-var?) o-var?)
+      (set (for [[s o] pairs
+                 :when (= s subject-var)]
+             {object-var o}))
+
+      ;; Subject variable, object bound: filter pairs by object
+      (and s-var? (not o-var?))
+      (set (for [[s o] pairs
+                 :when (= o object-var)]
+             {subject-var s}))
+
+      ;; Both bound: check if pair exists
+      :else
+      (if (contains? (set pairs) [subject-var object-var])
+        #{{}}
+        #{}))))
+
+(defn zlp-results-to-bindings
+  "Generate bindings for zero-length path (subject = object identity).
+   When both are variables, bind them to all subjects in the store.
+   When one is bound, bind the other to the same value."
+  [all-subjects subject-var object-var]
+  (let [s-var? (str/starts-with? subject-var "?")
+        o-var? (str/starts-with? object-var "?")]
+    (cond
+      ;; Both variables: bind both to every known subject
+      (and s-var? o-var?)
+      (set (for [s all-subjects]
+             {subject-var s object-var s}))
+
+      ;; Subject bound, object variable: object = subject
+      (and (not s-var?) o-var?)
+      #{{object-var subject-var}}
+
+      ;; Subject variable, object bound: subject = object
+      (and s-var? (not o-var?))
+      #{{subject-var object-var}}
+
+      ;; Both bound: check equality
+      :else
+      (if (= subject-var object-var) #{{}} #{}))))
+
+(defn- find-plan-endpoints
+  "Find the subject and object variable names used in a plan's outermost patterns.
+   For BGP: the :s and :o of the pattern.
+   For Join: the :s of the leftmost BGP and :o of the rightmost BGP.
+   Returns [s-var o-var]."
+  [plan]
+  (case (:op plan)
+    :bgp [(get-in plan [:pattern :s]) (get-in plan [:pattern :o])]
+    :join (let [[ls _] (find-plan-endpoints (:left plan))
+                [_ ro] (find-plan-endpoints (:right plan))]
+            [ls ro])
+    :filter (find-plan-endpoints (:sub-plan plan))
+    :project (find-plan-endpoints (:sub-plan plan))
+    :distinct (find-plan-endpoints (:sub-plan plan))
+    ;; Fallback: use generic variable names
+    ["?__path_s" "?__path_o"]))
+
+(defn- wildcard-plan-endpoints
+  "Replace bound (constant) subject/object in the outermost pattern positions
+   with variables, so we fetch ALL edges for transitive closure."
+  [plan s-orig o-orig s-new o-new]
+  (case (:op plan)
+    :bgp (let [pattern (:pattern plan)
+               new-pattern (cond-> pattern
+                             (= (:s pattern) s-orig) (assoc :s s-new)
+                             (= (:o pattern) o-orig) (assoc :o o-new))]
+           (assoc plan :pattern new-pattern))
+    :join (assoc plan
+                 :left (wildcard-plan-endpoints (:left plan) s-orig o-orig s-new o-new)
+                 :right (wildcard-plan-endpoints (:right plan) s-orig o-orig s-new o-new))
+    :filter (assoc plan :sub-plan (wildcard-plan-endpoints (:sub-plan plan) s-orig o-orig s-new o-new))
+    :project (assoc plan :sub-plan (wildcard-plan-endpoints (:sub-plan plan) s-orig o-orig s-new o-new))
+    :distinct (assoc plan :sub-plan (wildcard-plan-endpoints (:sub-plan plan) s-orig o-orig s-new o-new))
+    plan))
+
+(defn make-wildcard-step-plan
+  "Create a wildcard version of a step plan for transitive closure.
+   The ALP's path expression may have bound subject/object from the query,
+   but we need ALL edges for the predicate to compute transitive closure.
+   Replaces bound endpoints with variables throughout the plan tree.
+   Returns [wildcarded-plan s-var o-var] where s-var and o-var are the
+   variable names to extract from results."
+  [step-plan]
+  (let [[s-orig o-orig] (find-plan-endpoints step-plan)
+        s-new (if (str/starts-with? (or s-orig "") "?") s-orig "?__path_s")
+        o-new (if (str/starts-with? (or o-orig "") "?") o-orig "?__path_o")
+        wildcarded (if (or (not= s-orig s-new) (not= o-orig o-new))
+                     (wildcard-plan-endpoints step-plan s-orig o-orig s-new o-new)
+                     step-plan)]
+    {:plan wildcarded :s-var s-new :o-var o-new}))
+
+(defn extract-path-edges
+  "Extract (subject, object) pairs from step plan results."
+  [step-results s-var o-var]
+  (set (for [row step-results]
+         [(get row s-var) (get row o-var)])))
+
+(defn collect-all-nodes
+  "Collect all unique subject and object values from a quad result set."
+  [quads]
+  (into #{} (mapcat (fn [[s _ o _]] [s o])) quads))
+
+(defn add-zero-length-identities
+  "For * paths, add self-identity pairs for all graph nodes.
+   Per SPARQL spec, ?X :p* ?Y at zero length means every term maps to itself.
+   all-nodes is a set of all node values in the store."
+  [pairs all-nodes subject object]
+  (let [s-bound? (not (str/starts-with? (or subject "") "?"))
+        o-bound? (not (str/starts-with? (or object "") "?"))
+        ;; Add self-loops for all known nodes
+        with-all (into pairs (map (fn [n] [n n])) all-nodes)]
+    ;; Also add bound endpoints (may not be in the graph as subjects/objects of this predicate)
+    (cond-> with-all
+      s-bound? (conj [subject subject])
+      (and o-bound? (not= object subject)) (conj [object object]))))
+
+(defn arbitrary-length-path-query-topology [topologies]
+  (<<query-topology topologies "arbitrary-length-path"
+                    [*step-plan *subject *object *min-length :> *results]
+
+                    ;; The step plan may have bound subject/object (e.g., <Poodle> rdfs:subClassOf ?y).
+                    ;; For transitive closure we need ALL edges for the predicate, so make it wildcard.
+                    (rama-sail.module.queries/make-wildcard-step-plan *step-plan :> *wc)
+                    (get *wc :plan :> *wildcard-plan)
+                    (get *wc :s-var :> *s-var)
+                    (get *wc :o-var :> *o-var)
+
+                    ;; Execute the wildcard plan to get all single-step edges
+                    (invoke-query "execute-plan" *wildcard-plan :> *step-results)
+
+                    ;; Extract edges from results
+                    (vec *step-results :> *step-vec)
+                    (rama-sail.module.queries/extract-path-edges *step-vec *s-var *o-var :> *edges)
+
+                    ;; Compute transitive closure
+                    (rama-sail.module.queries/compute-transitive-closure *edges :> *tc-pairs)
+
+                    ;; For * paths (min-length=0), add self-identity for ALL graph nodes
+                    (<<if (= *min-length 0)
+                          (invoke-query "find-triples" nil nil nil nil :> *all-quads)
+                          (rama-sail.module.queries/collect-all-nodes *all-quads :> *all-nodes)
+                          (rama-sail.module.queries/add-zero-length-identities *tc-pairs *all-nodes *subject *object :> *pairs-with-self)
+                          (else>)
+                          (identity *tc-pairs :> *pairs-with-self))
+
+                    ;; Convert to bindings, filtering by the ALP's subject/object constraints
+                    (rama-sail.module.queries/path-results-to-bindings *pairs-with-self *subject *object :> *results)
+                    (|origin)))
+
+(defn zero-length-path-query-topology [topologies]
+  (<<query-topology topologies "zero-length-path"
+                    [*subject *object :> *results]
+                    ;; Get all subjects in the store
+                    (invoke-query "find-triples" nil nil nil nil :> *all-quads)
+                    ;; Collect all unique subject and object URIs
+                    (rama-sail.module.queries/collect-all-nodes *all-quads :> *all-nodes)
+                    (rama-sail.module.queries/zlp-results-to-bindings *all-nodes *subject *object :> *results)
+                    (|origin)))
+
 ;; ============================================================================
 ;; Registration Functions
 ;; ============================================================================
@@ -403,7 +618,14 @@
   (get-global-stats-query-topology topologies)
   (get-subjects-by-type-query-topology topologies)
   (get-types-of-subject-query-topology topologies)
-  (group-query-topology topologies))
+  (group-query-topology topologies)
+  (arbitrary-length-path-query-topology topologies)
+  (zero-length-path-query-topology topologies))
+
+(defn warn-unhandled-op
+  "Log a warning for unhandled plan operator types in execute-plan."
+  [op plan]
+  (log/warn "execute-plan: unhandled :op" op "- returning empty results. Plan:" (pr-str plan)))
 
 (defn execute-plan-query-topology
   "Registers the recursive query plan executor topology.
@@ -501,6 +723,22 @@
                               (invoke-query "batch-lookup" *subjects *predicate *context :> *lookup-map)
                               (qh/batch-enrich-merge-results *sub-results *lookup-map *subject-var *object-var :> *results)
 
+                              (case> :singleton)
+                              (identity #{{}} :> *results)
+
+                              (case> :empty)
+                              (identity #{} :> *results)
+
+                              (case> :arbitrary-length-path)
+                              (identity *plan :> {*step-plan :step-plan *subject :subject
+                                                  *object :object *min-length :min-length})
+                              (invoke-query "arbitrary-length-path" *step-plan *subject *object *min-length :> *results)
+
+                              (case> :zero-length-path)
+                              (identity *plan :> {*subject :subject *object :object})
+                              (invoke-query "zero-length-path" *subject *object :> *results)
+
                               (default>)
+                              (rama-sail.module.queries/warn-unhandled-op *op *plan)
                               (identity #{} :> *results))
                     (|origin)))

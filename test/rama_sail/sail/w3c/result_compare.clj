@@ -148,6 +148,31 @@
        :message (str "Exception: " (.getMessage e))
        :error e})))
 
+(defn- parse-expected-boolean
+  "Parse expected ASK result (.srx) to extract the boolean value."
+  [resource-path]
+  (let [url (io/resource resource-path)
+        content (slurp url)]
+    (cond
+      (str/includes? content "<boolean>true</boolean>") true
+      (str/includes? content "<boolean>false</boolean>") false
+      :else (throw (ex-info "Cannot parse boolean result" {:path resource-path})))))
+
+(defn run-ask-test
+  "Run an ASK query test. Returns {:pass? bool :message str}.
+   Compares actual boolean result to expected .srx file."
+  [conn query-string expected-resource-path]
+  (try
+    (let [actual (.evaluate (.prepareBooleanQuery conn query-string))
+          expected (parse-expected-boolean expected-resource-path)]
+      {:pass? (= actual expected)
+       :message (when (not= actual expected)
+                  (str "ASK result mismatch. Actual: " actual ", Expected: " expected))})
+    (catch Exception e
+      {:pass? false
+       :message (str "Exception: " (.getMessage e))
+       :error e})))
+
 (defn detect-query-type
   "Detect whether a SPARQL query is SELECT, CONSTRUCT, or ASK
    by looking at the query string."
