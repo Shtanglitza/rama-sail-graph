@@ -4,6 +4,9 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str])
   (:import [org.eclipse.rdf4j.rio Rio RDFFormat]
+           [org.eclipse.rdf4j.rio.helpers StatementCollector]
+           [org.eclipse.rdf4j.rio.turtlestar TurtleStarParser]
+           [org.eclipse.rdf4j.rio.trigstar TriGStarParser]
            [org.eclipse.rdf4j.model Resource]
            [org.eclipse.rdf4j.model.impl LinkedHashModel]
            [org.eclipse.rdf4j.model.util Models]
@@ -40,20 +43,27 @@
           (.commit conn))))))
 
 (defn- parse-expected-graph
-  "Parse an expected graph result (.ttl or .trig) into a Model."
+  "Parse an expected graph result (.ttl or .trig) into a Model.
+   Uses Star parsers to handle << >> triple term syntax."
   [resource-path]
   (let [url (io/resource resource-path)
-        format (detect-rdf-format resource-path)]
+        collector (StatementCollector.)
+        parser (cond
+                 (str/ends-with? resource-path ".trig") (TriGStarParser.)
+                 (str/ends-with? resource-path ".ttl") (TurtleStarParser.)
+                 :else (Rio/createParser (detect-rdf-format resource-path)))]
+    (.setRDFHandler parser collector)
     (with-open [in (.openStream url)]
-      (LinkedHashModel. (Rio/parse in (.toString url) format (into-array Resource []))))))
+      (.parse parser in (.toString url)))
+    (LinkedHashModel. (.getStatements collector))))
 
 (defn- get-actual-model
   "Get all statements from a connection as a Model."
   [conn]
-  (let [model (LinkedHashModel.)]
-    (with-open [iter (.getStatements conn nil nil nil false (into-array Resource []))]
-      (doseq [^org.eclipse.rdf4j.model.Statement stmt (iterator-seq iter)]
-        (.add model ^org.eclipse.rdf4j.model.Statement stmt (into-array Resource []))))
+  (let [^LinkedHashModel model (LinkedHashModel.)
+        stmts (with-open [iter (.getStatements conn nil nil nil false (into-array Resource []))]
+                (vec (iterator-seq iter)))]
+    (.addAll model stmts)
     model))
 
 (defn- parse-expected-select-results

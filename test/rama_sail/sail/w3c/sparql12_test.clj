@@ -62,24 +62,22 @@
 
    ;; Cat B+C: Data uses {| |} (Turtle) making CONSTRUCT tests fail
    "Reified triples - CONSTRUCT with constant template"        :rdf12-turtle-syntax
-   ;; construct-2: PASS — CONSTRUCT WHERE works with RDF-star data
+   "Reified triples - CONSTRUCT WHERE with constant template"  :rdf12-turtle-syntax
    "Reified triples - CONSTRUCT - about every triple"          :rdf12-turtle-syntax
+
+   ;; Cat A: Data uses <<( )>> syntax — parser failure
+   "Reified triples - Embedded triple - sameTerm"              :rdf12-turtle-syntax
+   "Reified triples - Embedded triple - value-equality"        :rdf12-turtle-syntax
+   "Reified triples - Embedded triple - ORDER BY"              :rdf12-turtle-syntax
+   "Reified triples - Embedded triple - ordering"              :rdf12-turtle-syntax
 
    ;; Cat D: Data loads but expected results require RDF 1.2 rdf:reifies semantics
    "Reified triples - all graph triples (JSON results)"        :rdf12-reifies-semantics
    "Reified triples - all graph triples (XML results)"         :rdf12-reifies-semantics
    "Reified triples - match constant reified triple"           :rdf12-reifies-semantics
    "Reified triples - match reified triple, var subject"       :rdf12-reifies-semantics
-   ;; basic-4, basic-5: PASS — single-match queries work with current RDF-star storage
-   ;; basic-6: empty result expected, should work — testing now
-   ;; pattern-9: no rdf:reifies in expected output — testing now
    "Reified triples - GRAPH"                                   :rdf12-reifies-semantics
-   "Reified triples - GRAPHs with blank node"                  :rdf12-reifies-semantics
-   "Reified triples - Embedded triple - sameTerm"              :rdf12-reifies-semantics
-   "Reified triples - Embedded triple - value-equality"        :rdf12-reifies-semantics
-   "Reified triples - Embedded triple - ORDER BY"              :rdf12-reifies-semantics
-   "Reified triples - Embedded triple - ordering"              :rdf12-reifies-semantics
-   "Reified triples - Update"                                  :rdf12-reifies-semantics})
+   "Reified triples - GRAPHs with blank node"                  :rdf12-reifies-semantics})
 
 ;;; ---------------------------------------------------------------------------
 ;;; Shared IPC fixture
