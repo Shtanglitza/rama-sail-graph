@@ -7,11 +7,11 @@
              "-Xms6g"
              "-Xmx6g"]
   :dependencies [[com.rpl/rama-helpers "0.10.0" :exclusions [org.clojure/clojure]]
-                 [org.eclipse.rdf4j/rdf4j-sail-api "5.2.0"
+                 [org.eclipse.rdf4j/rdf4j-sail-api "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
-                 [org.eclipse.rdf4j/rdf4j-queryparser-sparql "5.2.0"
+                 [org.eclipse.rdf4j/rdf4j-queryparser-sparql "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
-                 [org.eclipse.rdf4j/rdf4j-repository-sail "5.2.0"
+                 [org.eclipse.rdf4j/rdf4j-repository-sail "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
                  ;; Prometheus metrics for observability
                  [io.prometheus/simpleclient "0.16.0"]
@@ -21,16 +21,16 @@
                  ;; 1.10.0 uses Jetty 9.4.x matching Rama's bundled version
                  [ring/ring-jetty-adapter "1.10.0"]
                  ;; RDF4J result serializers for SPARQL Protocol HTTP endpoint
-                 [org.eclipse.rdf4j/rdf4j-queryresultio-sparqljson "5.2.0"
+                 [org.eclipse.rdf4j/rdf4j-queryresultio-sparqljson "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
-                 [org.eclipse.rdf4j/rdf4j-queryresultio-sparqlxml "5.2.0"
+                 [org.eclipse.rdf4j/rdf4j-queryresultio-sparqlxml "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
-                 [org.eclipse.rdf4j/rdf4j-queryresultio-text "5.2.0"
+                 [org.eclipse.rdf4j/rdf4j-queryresultio-text "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
                  ;; RDF writers for CONSTRUCT/DESCRIBE results
-                 [org.eclipse.rdf4j/rdf4j-rio-turtle "5.2.0"
+                 [org.eclipse.rdf4j/rdf4j-rio-turtle "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
-                 [org.eclipse.rdf4j/rdf4j-rio-rdfxml "5.2.0"
+                 [org.eclipse.rdf4j/rdf4j-rio-rdfxml "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
                  ;; Ring utilities for request parsing
                  [ring/ring-core "1.10.0"]]
@@ -47,7 +47,7 @@
   :aot [rama-sail.core]
   :profiles {:dev      {:resource-paths ["test/resources/"]
                         :java-source-paths ["test-java"]
-                        :dependencies [[org.eclipse.rdf4j/rdf4j-sail-testsuite "5.2.0"
+                        :dependencies [[org.eclipse.rdf4j/rdf4j-sail-testsuite "5.2.2"
                                         :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic]]
                                        [org.junit.platform/junit-platform-console-standalone "1.10.0"]]}
              :provided {:dependencies [[com.rpl/rama "1.6.0"]

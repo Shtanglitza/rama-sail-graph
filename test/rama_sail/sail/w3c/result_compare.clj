@@ -92,8 +92,8 @@
   (try
     (let [actual-model (LinkedHashModel.)
           _ (with-open [iter (.evaluate (.prepareGraphQuery conn query-string))]
-              (doseq [stmt (iterator-seq iter)]
-                (.add actual-model stmt (into-array Resource []))))
+              (doseq [^org.eclipse.rdf4j.model.Statement stmt (iterator-seq iter)]
+                (.add actual-model ^org.eclipse.rdf4j.model.Statement stmt (into-array Resource []))))
           expected-model (parse-expected-graph expected-resource-path)
           iso? (Models/isomorphic actual-model expected-model)]
       {:pass? iso?
