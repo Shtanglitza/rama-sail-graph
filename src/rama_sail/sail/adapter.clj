@@ -647,9 +647,12 @@
         ;; Optimization: Use count topology when no pending ops (avoids full scan)
         (with-sail-error-handling "sizeInternal" -1
           #(cond
-             ;; Fast path 1: All contexts + no pending ops
+             ;; Fast path 1: All contexts + no pending ops → read from $$global-stats
+             ;; Uses the incrementally maintained :total-triples counter instead of
+             ;; scanning all of $$spoc across every partition via count-statements.
              (and (array-empty? contexts) (empty? @pending-ops))
-             (or (invoke-query-with-timeout count-statements-qt timeout-ms nil) 0)
+             (let [stats (invoke-query-with-timeout get-global-stats-qt timeout-ms)]
+               (or (:total-triples stats) 0))
 
              ;; Fast path 2: Specific contexts + no pending ops
              ;; Sum counts for each context using the count topology
