@@ -150,30 +150,6 @@
   (mapv statement->tuple statements))
 
 ;;; ---------------------------------------------------------------------------
-;;; Result Sorting/Comparison Helpers
-;;; ---------------------------------------------------------------------------
-
-(defn sort-results-by
-  "Sort query results (binding maps) by a variable name."
-  [results var-name]
-  (sort-by #(get % var-name) results))
-
-(defn results-as-set
-  "Convert results to a set for order-independent comparison."
-  [results]
-  (set results))
-
-(defn extract-var
-  "Extract values for a single variable from results."
-  [results var-name]
-  (mapv #(get % var-name) results))
-
-(defn extract-vars
-  "Extract values for multiple variables from results as a set of vectors."
-  [results var-names]
-  (set (map (fn [r] (mapv #(get r %) var-names)) results)))
-
-;;; ---------------------------------------------------------------------------
 ;;; Common Test Data
 ;;; ---------------------------------------------------------------------------
 
@@ -183,10 +159,3 @@
    ["<alice>" "<age>" "30" nil]
    ["<bob>" "<knows>" "<charlie>" nil]
    ["<charlie>" "<knows>" "<dave>" nil]])
-
-(def sample-quads-named-graphs
-  "Sample quads across multiple named graphs."
-  [["<alice>" "<knows>" "<bob>" "<g1>"]
-   ["<alice>" "<age>" "30" "<g1>"]
-   ["<bob>" "<knows>" "<charlie>" "<g2>"]
-   ["<dave>" "<knows>" "<alice>" "<g2>"]])

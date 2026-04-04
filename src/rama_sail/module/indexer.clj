@@ -19,25 +19,6 @@
 ;; After deleting an element from a nested map structure, empty containers
 ;; should be removed to prevent memory growth over time.
 
-(defn empty->none
-  "Transform function for Rama's `term` navigator.
-   Returns NONE (causing key removal) if collection is empty, otherwise returns unchanged.
-   Used to clean up empty containers after element deletion.
-   Note: Works with Java collections and Clojure persistent collections."
-  [coll]
-  (cond
-    (nil? coll) com.rpl.rama.path/NONE
-    (instance? java.util.Collection coll) (if (.isEmpty ^java.util.Collection coll)
-                                            com.rpl.rama.path/NONE
-                                            coll)
-    (instance? java.util.Map coll) (if (.isEmpty ^java.util.Map coll)
-                                     com.rpl.rama.path/NONE
-                                     coll)
-    (coll? coll) (if (empty? coll)
-                   com.rpl.rama.path/NONE
-                   coll)
-    :else coll))
-
 ;; Helper: Generic traversal for indices structured as Level1 -> Level2 -> Level3 -> Set<Level4>
 ;; Used for $$spoc, $$posc, $$ospc.
 (deframaop scan-3-levels-index [*k1 *k2 *k3 *k4 *pstate]

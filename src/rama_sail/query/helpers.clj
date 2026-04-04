@@ -1,9 +1,7 @@
 (ns rama-sail.query.helpers
-  (:require [clojure.set :as set]
-            [clojure.string :as str]
+  (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [rama-sail.query.expr :refer [eval-expr parse-numeric evaluate-filter-cond]]
-            [rama-sail.sail.serialization :refer [DEFAULT-CONTEXT-VAL]]))
+            [rama-sail.query.expr :refer [eval-expr parse-numeric evaluate-filter-cond]]))
 
 ;; RDF type predicate IRI - used for materialized view maintenance
 (def RDF-TYPE-PREDICATE "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>")
@@ -315,11 +313,6 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Left Join Helpers
 ;;; ---------------------------------------------------------------------------
-
-(defn check-optional-condition
-  "Check if OPTIONAL condition passes. Returns true if no condition or condition passes."
-  [condition merged-bind]
-  (or (nil? condition) (evaluate-filter-cond condition merged-bind)))
 
 (defn apply-left-join-with-condition
   "Apply left join logic with optional condition.

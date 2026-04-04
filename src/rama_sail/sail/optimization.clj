@@ -1,6 +1,5 @@
 (ns rama-sail.sail.optimization
   (:require [clojure.set :as set]
-            [clojure.string :as str]
             [clojure.tools.logging :as log]))
 
 ;; Dynamic vars for statistics-based cardinality estimation
@@ -148,14 +147,6 @@
 
 ;;; --- Filter Pushdown Optimization ---
 
-(defn- can-push-filter-to?
-  "Check if a filter expression can be pushed to a plan.
-   Filter can be pushed if all its variables are produced by the plan."
-  [expr plan]
-  (let [expr-vars (extract-expr-vars expr)
-        plan-vars (extract-plan-vars plan)]
-    (clojure.set/subset? expr-vars plan-vars)))
-
 (defn- push-filter-into-join
   "Try to push a filter into a join's children.
    Returns {:pushed-left plan, :pushed-right plan, :remaining-filters [exprs]}."
@@ -234,15 +225,6 @@
     (into (decompose-and-filters (:left expr))
           (decompose-and-filters (:right expr)))
     [expr]))
-
-(defn- compose-and-filters
-  "Compose a sequence of expressions into an AND chain.
-   Returns nil for empty seq, single expr for one element."
-  [exprs]
-  (when (seq exprs)
-    (reduce (fn [acc expr]
-              {:type :logic :op :and :left acc :right expr})
-            exprs)))
 
 (defn push-filters-down
   "Push filter expressions down into joins and sub-plans where possible.
