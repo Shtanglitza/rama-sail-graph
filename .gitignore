@@ -17,6 +17,9 @@ pom.xml.asc
 .idea/
 *.iml
 .claude/
+
+# Linting cache
+.clj-kondo/.cache/
 test/resources/bsbm/*.nt
 docs/review-findings-implementation-plan.md
 

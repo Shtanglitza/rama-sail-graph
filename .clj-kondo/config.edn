@@ -1,0 +1,13 @@
+{:lint-as {com.rpl.rama/defmodule clj-kondo.lint-as/def-catch-all
+           com.rpl.rama/<<query-topology clj-kondo.lint-as/def-catch-all
+           com.rpl.rama/<<sources clj-kondo.lint-as/def-catch-all
+           com.rpl.rama/<<batch clj-kondo.lint-as/def-catch-all
+           com.rpl.rama/<<if clojure.core/if
+           com.rpl.rama/<<do clojure.core/do
+           com.rpl.rama/<<cond clojure.core/cond}
+ :linters {:unresolved-symbol {:exclude [(com.rpl.rama)
+                                         (com.rpl.rama.path)
+                                         (com.rpl.rama.test)]}
+           :unresolved-namespace {:exclude [com.rpl.rama
+                                            com.rpl.rama.path
+                                            com.rpl.rama.test]}}}

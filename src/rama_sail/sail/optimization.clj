@@ -1,4 +1,4 @@
-(ns rama-sail.sail.optimization
+(ns ^:no-doc rama-sail.sail.optimization
   (:require [clojure.set :as set]
             [clojure.tools.logging :as log]))
 

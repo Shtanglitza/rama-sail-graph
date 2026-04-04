@@ -1,0 +1,41 @@
+{:paths ["src"]
+ :deps {com.rpl/rama-helpers {:mvn/version "0.10.0"
+                              :exclusions [org.clojure/clojure]}
+        org.eclipse.rdf4j/rdf4j-sail-api {:mvn/version "5.2.2"
+                                          :exclusions [org.slf4j/slf4j-api
+                                                       ch.qos.logback/logback-classic
+                                                       org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-queryparser-sparql {:mvn/version "5.2.2"
+                                                    :exclusions [org.slf4j/slf4j-api
+                                                                 ch.qos.logback/logback-classic
+                                                                 org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-repository-sail {:mvn/version "5.2.2"
+                                                 :exclusions [org.slf4j/slf4j-api
+                                                              ch.qos.logback/logback-classic
+                                                              org.slf4j/slf4j-simple]}
+        io.prometheus/simpleclient {:mvn/version "0.16.0"}
+        io.prometheus/simpleclient_hotspot {:mvn/version "0.16.0"}
+        io.prometheus/simpleclient_common {:mvn/version "0.16.0"}
+        ring/ring-jetty-adapter {:mvn/version "1.10.0"}
+        org.eclipse.rdf4j/rdf4j-queryresultio-sparqljson {:mvn/version "5.2.2"
+                                                          :exclusions [org.slf4j/slf4j-api
+                                                                       ch.qos.logback/logback-classic
+                                                                       org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-queryresultio-sparqlxml {:mvn/version "5.2.2"
+                                                         :exclusions [org.slf4j/slf4j-api
+                                                                      ch.qos.logback/logback-classic
+                                                                      org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-queryresultio-text {:mvn/version "5.2.2"
+                                                    :exclusions [org.slf4j/slf4j-api
+                                                                 ch.qos.logback/logback-classic
+                                                                 org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-rio-turtle {:mvn/version "5.2.2"
+                                            :exclusions [org.slf4j/slf4j-api
+                                                         ch.qos.logback/logback-classic
+                                                         org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-rio-rdfxml {:mvn/version "5.2.2"
+                                            :exclusions [org.slf4j/slf4j-api
+                                                         ch.qos.logback/logback-classic
+                                                         org.slf4j/slf4j-simple]}
+        ring/ring-core {:mvn/version "1.10.0"}}
+ :mvn/repos {"releases" {:url "https://nexus.redplanetlabs.com/repository/maven-public-releases"}}}

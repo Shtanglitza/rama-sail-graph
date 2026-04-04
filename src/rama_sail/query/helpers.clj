@@ -1,4 +1,4 @@
-(ns rama-sail.query.helpers
+(ns ^:no-doc rama-sail.query.helpers
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
             [rama-sail.query.expr :refer [eval-expr parse-numeric evaluate-filter-cond]]))

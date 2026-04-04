@@ -1,4 +1,4 @@
-(ns rama-sail.sail.compilation
+(ns ^:no-doc rama-sail.sail.compilation
   (:require [clojure.set :as set]
             [clojure.string :as str]
             [rama-sail.sail.serialization :refer [val->str DEFAULT-CONTEXT-VAL]]

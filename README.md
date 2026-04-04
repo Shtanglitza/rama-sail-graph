@@ -1,5 +1,7 @@
 # rama-sail-graph
 
+[![CI](https://github.com/Shtanglitza/rama-sail-graph/actions/workflows/ci.yml/badge.svg)](https://github.com/Shtanglitza/rama-sail-graph/actions/workflows/ci.yml)
+
 > **Status: Public Preview** — This project is functional and tested but not yet production-hardened. APIs may change. Feedback and contributions welcome.
 
 A Rama-backed RDF quad store with SPARQL query evaluation and HTTP endpoint.
@@ -20,6 +22,14 @@ rama-sail-graph integrates the [Rama](https://redplanetlabs.com/rama) distribute
 - **Observability**: Prometheus metrics (`/metrics`), health checks (`/health`), query latency histograms, connection tracking
 - **Namespace Management**: Full prefix/IRI namespace support
 
+### API Stability
+
+| Tier | Namespaces | Guarantee |
+|------|-----------|-----------|
+| **Stable** | `rama-sail.core`, `rama-sail.sail.adapter`, `rama-sail.server.connection`, `rama-sail.server.sparql` | Semver-protected. Breaking changes require major version bump. |
+| **Extension** | `rama-sail.module.*`, `rama-sail.metrics`, `rama-sail.metrics-server` | Documented and supported, may evolve with notice in CHANGELOG. |
+| **Internal** | `rama-sail.query.*`, `rama-sail.sail.compilation`, `rama-sail.sail.optimization`, `rama-sail.sail.serialization`, `rama-sail.errors` | No stability guarantees. May change without notice. |
+
 ## Quick Start
 
 ### Prerequisites
@@ -33,6 +43,28 @@ rama-sail-graph integrates the [Rama](https://redplanetlabs.com/rama) distribute
 This project is open source under the Apache License 2.0.
 
 You can use, modify, and ship this code in commercial products, subject to Apache 2.0 notice requirements. However, this project depends on Rama, which has its own platform licensing terms. Per Red Planet Labs, Rama includes an embedded free license for clusters up to two Supervisor nodes; larger clusters require a separate paid license.
+
+### Installation
+
+**deps.edn (git dependency):**
+```clojure
+{:deps {io.github.Shtanglitza/rama-sail-graph
+        {:git/tag "v0.1.0" :git/sha "<sha>"}}}
+```
+
+**Leiningen (local JAR):**
+
+Download the JAR from [GitHub Releases](https://github.com/Shtanglitza/rama-sail-graph/releases) and install locally:
+```bash
+mvn install:install-file -Dfile=rama-sail-graph-0.1.0.jar -DgroupId=com.shtanglitza -DartifactId=rama-sail-graph -Dversion=0.1.0 -Dpackaging=jar
+```
+
+Then add to `project.clj`:
+```clojure
+[com.shtanglitza/rama-sail-graph "0.1.0"]
+```
+
+> **Note:** Rama 1.6.0 is required at runtime. Add the [Red Planet Labs Maven repository](https://nexus.redplanetlabs.com/repository/maven-public-releases) to resolve the Rama dependency.
 
 ### Build & Test
 

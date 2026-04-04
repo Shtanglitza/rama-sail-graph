@@ -355,7 +355,8 @@
           (when (instance? Triple c)
             (throw (SailException.
                     (str "context argument can not be of type Triple: " c)))))
-        ;; proxy-super cannot resolve overloaded methods (Clojure limitation CLJ-1433)
+        ;; Reflection warning unavoidable here — proxy-super cannot resolve overloaded
+        ;; methods in Clojure (CLJ-1433). Not a performance concern: called once per statement.
         (proxy-super addStatement op s p o contexts))
 
       (addStatementInternal [^Resource s ^IRI p ^Value o ^"[Lorg.eclipse.rdf4j.model.Resource;" contexts]
@@ -833,6 +834,9 @@
   ([ipc module-name {:keys [query-timeout-ms sync-commits]
                      :or {query-timeout-ms DEFAULT-QUERY-TIMEOUT-MS
                           sync-commits false}}]
+   {:pre [(some? ipc)
+          (and (string? module-name) (not (clojure.string/blank? module-name)))
+          (and (number? query-timeout-ms) (pos? query-timeout-ms))]}
    (log/info "Creating RamaSail for module:" module-name "with timeout:" query-timeout-ms "ms"
              (if sync-commits " (sync-commits enabled)" " (sync-commits disabled)"))
    (let [depot               (rama/foreign-depot ipc module-name "*triple-depot")

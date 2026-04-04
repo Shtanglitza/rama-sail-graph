@@ -1,4 +1,4 @@
-(ns rama-sail.sail.serialization
+(ns ^:no-doc rama-sail.sail.serialization
   (:require [clojure.string :as str])
   (:import (org.eclipse.rdf4j.model.vocabulary XSD)
            [org.eclipse.rdf4j.model Value Resource IRI Literal BNode Triple ValueFactory]

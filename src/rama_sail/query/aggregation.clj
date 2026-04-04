@@ -1,4 +1,4 @@
-(ns rama-sail.query.aggregation
+(ns ^:no-doc rama-sail.query.aggregation
   (:use [com.rpl.rama])
   (:require [clojure.set]
             [rama-sail.query.expr :refer [eval-expr parse-numeric]]))
