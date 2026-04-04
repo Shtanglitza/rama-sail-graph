@@ -394,63 +394,63 @@ These benchmark results were recorded on this development machine:
 
 | Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
 |-------|----------|----------|----------|-----------|-------------|
-| Q1 | 26.43 | 97.45 | 168.15 | 35.89 | 0.0 |
-| Q2 | 9.58 | 31.05 | 78.85 | 12.80 | 3.3 |
-| Q3 | 45.17 | 109.28 | 168.22 | 51.64 | 3.6 |
-| Q4 | 42.80 | 111.54 | 187.03 | 50.97 | 1.6 |
-| Q5 | 62.89 | 159.77 | 176.09 | 74.15 | 4.7 |
-| Q7 | 160.36 | 233.29 | 351.72 | 176.10 | 5.5 |
-| Q8 | 92.62 | 145.91 | 169.98 | 102.97 | 0.0 |
-| Q10 | 78.60 | 145.92 | 220.08 | 90.29 | 0.0 |
-| Q11 | 1.07 | 80.18 | 101.64 | 8.14 | 5.0 |
-| QJ1 | 148.99 | 212.05 | 217.03 | 163.62 | 100.0 |
-| QJ2 | 46.08 | 147.32 | 164.02 | 61.38 | 2.5 |
-| QJ3 | 132.12 | 175.09 | 277.64 | 144.08 | 100.0 |
-| QJ4 | 77.62 | 98.08 | 98.95 | 81.24 | 100.0 |
+| Q1 | 30.98 | 95.01 | 108.78 | 42.39 | 0.0 |
+| Q2 | 10.34 | 15.07 | 68.26 | 11.89 | 3.2 |
+| Q3 | 48.97 | 112.19 | 129.99 | 54.77 | 3.8 |
+| Q4 | 49.07 | 119.00 | 150.66 | 56.76 | 1.1 |
+| Q5 | 68.15 | 132.60 | 138.83 | 76.76 | 4.6 |
+| Q7 | 182.21 | 284.50 | 373.69 | 198.67 | 7.8 |
+| Q8 | 97.55 | 173.29 | 259.01 | 111.92 | 0.0 |
+| Q10 | 86.06 | 142.91 | 144.33 | 92.42 | 0.0 |
+| Q11 | 0.98 | 1.04 | 1.14 | 0.97 | 5.5 |
+| QJ1 | 162.49 | 233.83 | 241.95 | 177.10 | 100.0 |
+| QJ2 | 58.91 | 156.81 | 169.85 | 68.10 | 2.7 |
+| QJ3 | 146.18 | 203.05 | 243.12 | 159.83 | 100.0 |
+| QJ4 | 81.54 | 104.50 | 181.00 | 88.02 | 100.0 |
 
 #### 59K Triples (1,000 products)
 
 | Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
 |-------|----------|----------|----------|-----------|-------------|
-| Q1 | 26.73 | 134.43 | 562.69 | 52.42 | 0.0 |
-| Q2 | 9.22 | 20.04 | 65.96 | 11.84 | 3.1 |
-| Q3 | 46.06 | 168.08 | 698.92 | 89.63 | 4.2 |
-| Q4 | 43.69 | 189.10 | 650.29 | 72.44 | 1.5 |
-| Q5 | 65.24 | 525.02 | 705.95 | 121.77 | 4.5 |
-| Q7 | 169.42 | 583.64 | 766.94 | 221.93 | 8.6 |
-| Q8 | 87.24 | 159.37 | 245.30 | 99.48 | 0.0 |
-| Q10 | 78.07 | 141.51 | 179.79 | 87.23 | 0.0 |
-| Q11 | 0.94 | 1.22 | 1.32 | 0.95 | 5.0 |
-| QJ1 | 148.90 | 225.29 | 345.31 | 165.09 | 100.0 |
-| QJ2 | 46.44 | 99.90 | 223.75 | 55.61 | 2.8 |
-| QJ3 | 132.94 | 180.43 | 276.93 | 147.07 | 100.0 |
-| QJ4 | 77.79 | 100.58 | 152.55 | 83.41 | 100.0 |
+| Q1 | 28.42 | 131.37 | 134.57 | 40.34 | 0.0 |
+| Q2 | 7.33 | 8.43 | 17.76 | 7.61 | 3.3 |
+| Q3 | 48.98 | 122.81 | 222.04 | 58.03 | 4.6 |
+| Q4 | 49.05 | 117.05 | 119.68 | 54.92 | 2.2 |
+| Q5 | 65.92 | 167.55 | 188.96 | 77.81 | 4.6 |
+| Q7 | 176.22 | 277.94 | 348.82 | 195.34 | 5.2 |
+| Q8 | 97.07 | 166.19 | 179.38 | 109.81 | 0.0 |
+| Q10 | 101.29 | 178.64 | 208.85 | 116.89 | 0.0 |
+| Q11 | 1.69 | 3.05 | 88.63 | 3.95 | 5.5 |
+| QJ1 | 162.50 | 239.36 | 342.28 | 179.14 | 100.0 |
+| QJ2 | 52.61 | 91.75 | 155.22 | 60.67 | 2.5 |
+| QJ3 | 148.59 | 195.12 | 222.34 | 159.63 | 100.0 |
+| QJ4 | 81.15 | 105.27 | 106.30 | 84.77 | 100.0 |
 
 #### Scaling: p50 Comparison (6K → 59K)
 
 | Query | 6K p50 | 59K p50 | Slowdown |
 |-------|--------|---------|----------|
-| Q1 | 26.4 | 26.7 | 1.0x |
-| Q2 | 9.6 | 9.2 | 1.0x |
-| Q3 | 45.2 | 46.1 | 1.0x |
-| Q4 | 42.8 | 43.7 | 1.0x |
-| Q5 | 62.9 | 65.2 | 1.0x |
-| Q7 | 160.4 | 169.4 | 1.1x |
-| Q8 | 92.6 | 87.2 | 0.9x |
-| Q10 | 78.6 | 78.1 | 1.0x |
-| Q11 | 1.1 | 0.9 | 0.9x |
-| QJ1 | 149.0 | 148.9 | 1.0x |
-| QJ2 | 46.1 | 46.4 | 1.0x |
-| QJ3 | 132.1 | 132.9 | 1.0x |
-| QJ4 | 77.6 | 77.8 | 1.0x |
+| Q1 | 31.0 | 28.4 | 0.9x |
+| Q2 | 10.3 | 7.3 | 0.7x |
+| Q3 | 49.0 | 49.0 | 1.0x |
+| Q4 | 49.1 | 49.1 | 1.0x |
+| Q5 | 68.2 | 65.9 | 1.0x |
+| Q7 | 182.2 | 176.2 | 1.0x |
+| Q8 | 97.6 | 97.1 | 1.0x |
+| Q10 | 86.1 | 101.3 | 1.2x |
+| Q11 | 1.0 | 1.7 | 1.7x |
+| QJ1 | 162.5 | 162.5 | 1.0x |
+| QJ2 | 58.9 | 52.6 | 0.9x |
+| QJ3 | 146.2 | 148.6 | 1.0x |
+| QJ4 | 81.5 | 81.2 | 1.0x |
 
-With query optimizations (LIMIT pushdown, adaptive filter selectivity, AND decomposition for filter pushdown), p50 latencies are now nearly flat across 6K to 59K triples. The previous worst scaler (QJ4 at 15.8x) now shows 1.0x scaling.
+With query optimizations (LIMIT pushdown to BGPs, adaptive filter selectivity, AND decomposition for filter pushdown), p50 latencies scale near-linearly across 6K to 59K triples. Most queries show 1.0x for a 10x data increase.
 
 ### Query Optimizations
 
 The following optimizations are applied automatically during query planning:
 
-- **LIMIT pushdown**: Propagates LIMIT through joins and self-joins for early termination, preventing unbounded result generation
+- **LIMIT pushdown**: Propagates LIMIT into BGPs, joins, and self-joins for early termination — truncates quads before binding construction. Pushes through transparent operators (PROJECT, BIND), with safety multipliers for FILTER (4x) and DISTINCT (2x). Correctly blocks at ORDER BY for BGP targets (ORDER BY needs all rows to sort)
 - **Adaptive filter selectivity**: Estimates filter selectivity by operator type (equality=0.05, range=0.3, inequality=0.8) instead of a flat 0.3, improving join ordering decisions
 - **AND decomposition**: Splits compound AND filters into independent conjuncts that can be pushed separately to each join side
 - **Selinger-style join ordering**: Dynamic programming optimizer for multi-way join chains using predicate statistics

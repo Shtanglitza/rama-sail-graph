@@ -1247,3 +1247,78 @@
 
         (.close conn))
       (.shutDown repo))))
+
+(deftest test-limit-early-termination
+  ;; Verifies that LIMIT queries return the correct number of results
+  ;; and that the early-termination optimization via :result-limit works correctly.
+  (with-open [ipc (rtest/create-ipc)]
+    (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+
+    (let [module-name (com.rpl.rama/get-module-name RdfStorageModule)
+          sail (rsail/create-rama-sail ipc module-name)
+          repo (SailRepository. sail)]
+
+      (.init repo)
+
+      (let [conn (.getConnection repo)
+            type-prop (.createIRI VF "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+            item-type (.createIRI VF "http://ex/Item")
+            label-prop (.createIRI VF "http://ex/label")]
+
+        ;; Load 50 triples: 50 items with type and label
+        (.begin conn)
+        (doseq [i (range 50)]
+          (let [subj (.createIRI VF (str "http://ex/item" i))]
+            (.add conn subj type-prop item-type (into-array Resource []))
+            (.add conn subj label-prop (.createLiteral VF (str "Item " i)) (into-array Resource []))))
+        (.commit conn)
+        (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 100)
+
+        (testing "LIMIT returns exactly the requested number of results"
+          (let [sparql "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5"
+                query (.prepareTupleQuery conn sparql)
+                res (with-open [iter (.evaluate query)]
+                      (vec (iterator-seq iter)))]
+            (is (= 5 (count res))
+                "LIMIT 5 should return exactly 5 results")))
+
+        (testing "OFFSET + LIMIT returns correct count"
+          (let [sparql "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5 OFFSET 3"
+                query (.prepareTupleQuery conn sparql)
+                res (with-open [iter (.evaluate query)]
+                      (vec (iterator-seq iter)))]
+            (is (= 5 (count res))
+                "OFFSET 3 LIMIT 5 should return exactly 5 results")))
+
+        (testing "LIMIT with PROJECT returns correct count"
+          (let [sparql "SELECT ?s WHERE { ?s <http://ex/label> ?label } LIMIT 10"
+                query (.prepareTupleQuery conn sparql)
+                res (with-open [iter (.evaluate query)]
+                      (vec (iterator-seq iter)))]
+            (is (= 10 (count res))
+                "SELECT ?s ... LIMIT 10 should return exactly 10 results")))
+
+        (testing "ASK query works correctly (uses synthetic LIMIT 1)"
+          (let [sparql "ASK { ?s <http://ex/label> ?o }"
+                query (.prepareBooleanQuery conn sparql)
+                res (.evaluate query)]
+            (is (true? res)
+                "ASK should return true when matching triples exist")))
+
+        (testing "ASK query returns false when no match"
+          (let [sparql "ASK { <http://ex/nonexistent> <http://ex/nonexistent> ?o }"
+                query (.prepareBooleanQuery conn sparql)
+                res (.evaluate query)]
+            (is (false? res)
+                "ASK should return false when no matching triples exist")))
+
+        (testing "LIMIT larger than result set returns all results"
+          (let [sparql "SELECT ?s WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Item> } LIMIT 1000"
+                query (.prepareTupleQuery conn sparql)
+                res (with-open [iter (.evaluate query)]
+                      (vec (iterator-seq iter)))]
+            (is (= 50 (count res))
+                "LIMIT larger than actual results should return all 50 items")))
+
+        (.close conn))
+      (.shutDown repo))))

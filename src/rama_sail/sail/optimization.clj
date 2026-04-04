@@ -1173,13 +1173,39 @@
         limit))))
 
 (defn push-limit-down
-  "Push LIMIT hints into joins and self-joins for early termination.
+  "Push LIMIT hints into joins, self-joins, and BGPs for early termination.
    Walks the plan tree and when a :slice with a positive limit wraps
-   operators that don't change cardinality (:project, :order, :distinct),
-   propagates :result-limit to the innermost :join or :self-join."
+   operators that don't change cardinality (:project, :bind),
+   propagates :result-limit to the innermost target operator.
+
+   ORDER BY handling: pushes through to joins/self-joins (heuristic truncation
+   of the left side) but NOT to BGPs. ORDER BY needs all input rows to sort
+   correctly, so truncating BGP results would return arbitrary rows sorted
+   instead of the correct top-N. A proper top-N combiner is future work."
   [plan]
-  (letfn [(push-limit [plan limit]
-            ;; Try to push limit down through transparent operators
+  (letfn [(push-limit-joins-only [plan limit]
+            ;; Push limit only to join/self-join targets (used below ORDER BY,
+            ;; where truncating BGP input would break sort correctness but
+            ;; truncating join left-side is an acceptable heuristic).
+            (case (:op plan)
+              :join
+              (assoc plan
+                     :result-limit limit
+                     :left (push-limit-down (:left plan))
+                     :right (push-limit-down (:right plan)))
+
+              :self-join
+              (assoc plan :result-limit limit)
+
+              ;; Transparent operators: keep pushing (joins-only) through them
+              (:project :bind)
+              (update plan :sub-plan #(push-limit-joins-only % limit))
+
+              ;; For everything else (including :bgp), stop — ORDER BY needs all rows
+              (push-limit-down plan)))
+
+          (push-limit [plan limit]
+            ;; Push limit to any target operator (join, self-join, bgp)
             (case (:op plan)
               ;; Target operators: annotate with :result-limit
               :join
@@ -1191,16 +1217,28 @@
               :self-join
               (assoc plan :result-limit limit)
 
-              ;; Transparent operators: push through
+              :bgp
+              (assoc plan :result-limit limit)
+
+              ;; Transparent operators (1:1 cardinality): push through unchanged
               :project
               (update plan :sub-plan #(push-limit % limit))
 
-              :order
+              :bind
               (update plan :sub-plan #(push-limit % limit))
 
-              ;; Distinct can reduce rows, so multiply limit as safety margin
+              ;; Cardinality-reducing operators: push through with safety multiplier
               :distinct
               (update plan :sub-plan #(push-limit % (* limit 2)))
+
+              :filter
+              (update plan :sub-plan #(push-limit % (* limit 4)))
+
+              ;; ORDER BY: can still push to joins (heuristic) but NOT to BGPs
+              ;; ORDER BY needs all rows to sort correctly; truncating BGP input
+              ;; would return arbitrary rows sorted, not the correct top-N.
+              :order
+              (update plan :sub-plan #(push-limit-joins-only % limit))
 
               ;; For other operators, stop pushing but still recurse normally
               (push-limit-down plan)))

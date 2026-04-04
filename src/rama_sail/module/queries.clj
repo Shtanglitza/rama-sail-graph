@@ -48,7 +48,7 @@
                     (aggs/+vec-agg *quad :> *quads)))
 
 (defn find-bgp-query-topology [topologies]
-  (<<query-topology topologies "find-bgp" [*pattern :> *bindings]
+  (<<query-topology topologies "find-bgp" [*pattern *result-limit :> *bindings]
                     (identity *pattern :> {:keys [*s *p *o *c]})
                     (<<if (str/starts-with? *s "?") (identity nil :> *s-const) (else>) (identity *s :> *s-const))
                     (<<if (str/starts-with? *p "?") (identity nil :> *p-const) (else>) (identity *p :> *p-const))
@@ -56,7 +56,13 @@
                     (<<if (or> (nil? *c) (str/starts-with? *c "?"))
                           (identity nil :> *c-const) (else>) (identity *c :> *c-const))
                     (invoke-query "find-triples" *s-const *p-const *o-const *c-const :> *quads)
-                    (ops/explode *quads :> [*f-s *f-p *f-o *f-c])
+                    ;; When result-limit is set, truncate quads before building bindings
+                    ;; to avoid per-row binding construction and +set-agg dedup cost
+                    (<<if (some? *result-limit)
+                          (identity (vec (take *result-limit *quads)) :> *limited-quads)
+                          (else>)
+                          (identity *quads :> *limited-quads))
+                    (ops/explode *limited-quads :> [*f-s *f-p *f-o *f-c])
                     (identity {} :> *b-init)
                     (<<if (nil? *s-const) (assoc *b-init *s *f-s :> *b-1) (else>) (identity *b-init :> *b-1))
                     (<<if (nil? *p-const) (assoc *b-1 *p *f-p :> *b-2) (else>) (identity *b-1 :> *b-2))
@@ -100,7 +106,7 @@
                     [*predicate *join-var *left-subject *right-subject *filter *context *result-limit :> *results]
 
                     (identity {:s "?s" :p *predicate :o "?o" :c *context} :> *pattern)
-                    (invoke-query "find-bgp" *pattern :> *bgp-results)
+                    (invoke-query "find-bgp" *pattern nil :> *bgp-results)
 
                     (qh/build-subject-groups *bgp-results :> *groups)
 
@@ -637,7 +643,8 @@
                     (<<switch *op
                               (case> :bgp)
                               (get *plan :pattern :> *pattern)
-                              (invoke-query "find-bgp" *pattern :> *results)
+                              (get *plan :result-limit nil :> *bgp-limit)
+                              (invoke-query "find-bgp" *pattern *bgp-limit :> *results)
 
                               (case> :join)
                               (identity *plan :> {*left-plan :left *right-plan :right *join-vars :join-vars})

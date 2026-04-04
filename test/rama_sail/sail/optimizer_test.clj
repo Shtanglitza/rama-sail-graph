@@ -474,6 +474,122 @@
       (is (contains-op? optimized :bgp)
           "BGP should be used to filter by specific context"))))
 
+;;; ---------------------------------------------------------------------------
+;;; Limit Pushdown Tests
+;;; ---------------------------------------------------------------------------
+
+(defn find-node
+  "Find the first node in the plan tree matching a predicate."
+  [plan pred]
+  (when (map? plan)
+    (if (pred plan)
+      plan
+      (or (find-node (:sub-plan plan) pred)
+          (find-node (:left plan) pred)
+          (find-node (:right plan) pred)
+          (when (:base plan) (find-node (:base plan) pred))))))
+
+(defn find-bgp-node
+  "Find the first :bgp node in the plan tree."
+  [plan]
+  (find-node plan #(= :bgp (:op %))))
+
+(deftest test-push-limit-to-bgp
+  (testing "LIMIT pushes :result-limit to BGP"
+    (let [query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (= 10 (:result-limit bgp))
+            "BGP should have :result-limit 10")))))
+
+(deftest test-push-limit-through-project-to-bgp
+  (testing "LIMIT pushes through PROJECT to BGP"
+    (let [query "SELECT ?s WHERE { ?s ?p ?o } LIMIT 10"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (= 10 (:result-limit bgp))
+            "BGP inside project should have :result-limit 10")))))
+
+(deftest test-no-push-limit-through-order-to-bgp
+  (testing "LIMIT does NOT push through ORDER BY to BGP"
+    (let [query "SELECT * WHERE { ?s ?p ?o } ORDER BY ?s LIMIT 10"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (nil? (:result-limit bgp))
+            "BGP below ORDER BY should NOT have :result-limit")))))
+
+(deftest test-push-limit-through-order-to-join
+  (testing "LIMIT still pushes through ORDER BY to join (heuristic)"
+    ;; ORDER BY blocks pushdown to BGP (would break sort correctness)
+    ;; but allows it to join/self-join (left-side truncation heuristic).
+    ;; Plan shape: slice → project → order → join(bgp, bgp)
+    (let [query (str prefixes "
+                 SELECT ?product ?label
+                 WHERE {
+                   ?product bsbm:producer ?producer .
+                   ?product rdfs:label ?label .
+                 } ORDER BY ?label LIMIT 10")
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      ;; The join (or batch-enrich) below ORDER BY should get :result-limit
+      (let [join-node (find-node optimized #(#{:join :batch-enrich :self-join} (:op %)))]
+        (is (some? join-node) "Plan should contain a join-type operator")
+        (when (= :join (:op join-node))
+          (is (some? (:result-limit join-node))
+              "Join below ORDER BY should still get :result-limit (heuristic)")))
+      ;; But BGP nodes should NOT get :result-limit
+      (let [bgp (find-bgp-node optimized)]
+        (when bgp
+          (is (nil? (:result-limit bgp))
+              "BGP below ORDER BY should NOT get :result-limit"))))))
+
+(deftest test-push-limit-through-bind
+  (testing "LIMIT pushes through BIND to BGP"
+    (let [query "SELECT * WHERE { ?s ?p ?o . BIND(?s AS ?x) } LIMIT 10"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (= 10 (:result-limit bgp))
+            "BGP below BIND should have :result-limit 10")))))
+
+(deftest test-push-limit-accounts-for-offset
+  (testing "LIMIT accounts for OFFSET when pushing down"
+    (let [query "SELECT * WHERE { ?s ?p ?o } LIMIT 10 OFFSET 5"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (= 15 (:result-limit bgp))
+            "BGP should have :result-limit = limit + offset = 15")))))
+
+(deftest test-push-limit-through-distinct-doubles
+  (testing "LIMIT doubles when pushing through DISTINCT"
+    (let [query "SELECT DISTINCT ?s WHERE { ?s ?p ?o } LIMIT 10"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (= 20 (:result-limit bgp))
+            "BGP below DISTINCT should have :result-limit doubled to 20")))))
+
+(deftest test-push-limit-through-filter-multiplies
+  (testing "LIMIT multiplies by 4 when pushing through FILTER"
+    (let [query (str prefixes "
+                 SELECT * WHERE { ?s ?p ?o . FILTER(?o = \"test\") } LIMIT 10")
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (= 40 (:result-limit bgp))
+            "BGP below FILTER should have :result-limit multiplied by 4 to 40")))))
+
 (comment
   ;; Run tests from REPL
   (require '[clojure.test :as t])
