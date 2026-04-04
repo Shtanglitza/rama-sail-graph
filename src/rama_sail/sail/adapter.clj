@@ -5,8 +5,8 @@
             [com.rpl.rama :as rama]
             [rama-sail.errors :as errors]
             [rama-sail.metrics :as metrics]
-            [rama-sail.sail.compilation :as comp :refer [tuple-expr->plan value-expr->plan apply-initial-bindings compute-join-vars binding-names->vars]]
-            [rama-sail.sail.optimization :as opt :refer [*predicate-stats* *global-stats* RDF-TYPE-PREDICATE is-variable? optimize-plan estimate-plan-cardinality extract-plan-vars extract-expr-vars get-plan-vars]]
+            [rama-sail.sail.compilation :as comp :refer [tuple-expr->plan apply-initial-bindings]]
+            [rama-sail.sail.optimization :as opt :refer [*predicate-stats* *global-stats* optimize-plan]]
             [rama-sail.sail.serialization :as ser :refer [val->str str->val DEFAULT-CONTEXT-VAL VF]])
   (:import (java.util Iterator)
            (org.eclipse.rdf4j.query QueryInterruptedException)
@@ -15,7 +15,7 @@
            (org.eclipse.rdf4j.query.algebra.evaluation.impl DefaultEvaluationStrategyFactory)
            [org.eclipse.rdf4j.sail.helpers AbstractSail AbstractSailConnection]
            [org.eclipse.rdf4j.sail UpdateContext]
-           [org.eclipse.rdf4j.model Value Resource Statement IRI Literal BNode ValueFactory Namespace]
+           [org.eclipse.rdf4j.model Value Resource Statement IRI ValueFactory Namespace]
            [org.eclipse.rdf4j.model.impl SimpleNamespace]
            [org.eclipse.rdf4j.query.algebra TupleExpr]
            [org.eclipse.rdf4j.model Triple]

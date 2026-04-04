@@ -209,11 +209,6 @@
   [conn depot-name]
   (rama/foreign-depot (get-cluster-manager conn) (get-module-name conn) depot-name))
 
-(defn get-pstate
-  "Get a foreign PState from the cluster connection."
-  [conn pstate-name]
-  (rama/foreign-pstate (get-cluster-manager conn) (get-module-name conn) pstate-name))
-
 (defn get-query
   "Get a foreign query from the cluster connection."
   [conn query-name]
@@ -225,26 +220,3 @@
   (println (format "  Connection type: %s" (name (connection-type conn))))
   (println (format "  Module name: %s" (get-module-name conn))))
 
-;;; ---------------------------------------------------------------------------
-;;; Configuration Loading
-;;; ---------------------------------------------------------------------------
-
-(defn load-cluster-config
-  "Load cluster configuration from an EDN file.
-
-   Expected format:
-   {:local {:conductor-host \"localhost\" :conductor-port 1973 ...}
-    :cloud {:conductor-host \"rama.example.com\" ...}}"
-  [config-path profile]
-  (let [config (clojure.edn/read-string (slurp config-path))]
-    (get config profile)))
-
-(defn create-connection-from-config
-  "Create a cluster connection from a configuration file.
-
-   Arguments:
-   - config-path: Path to EDN config file
-   - profile: Profile key (:local, :cloud, etc.)"
-  [config-path profile]
-  (let [config (load-cluster-config config-path profile)]
-    (apply create-cluster-connection (mapcat identity config))))

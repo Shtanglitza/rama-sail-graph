@@ -34,16 +34,6 @@
 ;;; Timing Utilities
 ;;; ---------------------------------------------------------------------------
 
-(defmacro time-ns
-  "Execute expr and return {:result <value> :ns <nanoseconds> :ms <milliseconds>}."
-  [expr]
-  `(let [start# (System/nanoTime)
-         result# ~expr
-         end# (System/nanoTime)]
-     {:result result#
-      :ns (- end# start#)
-      :ms (/ (- end# start#) 1e6)}))
-
 (defmacro time-ms-only
   "Execute expr and return {:result <value> :ms <milliseconds>}."
   [expr]

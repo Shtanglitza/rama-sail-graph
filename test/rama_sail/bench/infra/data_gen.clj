@@ -157,49 +157,6 @@
 ;;; Scale Test Data
 ;;; ---------------------------------------------------------------------------
 
-(defn generate-scale-data
-  "Generate data for scale testing at the given level.
-   Combines multiple patterns to create realistic mixed workload.
-
-   Levels:
-   - :small  - 1M triples
-   - :medium - 10M triples
-
-   Returns a lazy sequence of quads to avoid memory pressure."
-  [level]
-  (let [config (case level
-                 :small  {:entities 250000 :predicates 100 :contexts 10}
-                 :medium {:entities 2500000 :predicates 200 :contexts 50}
-                 ;; Default to small
-                 {:entities 250000 :predicates 100 :contexts 10})
-        {:keys [entities predicates contexts]} config]
-    ;; Generate roughly 4 quads per entity
-    (concat
-     ;; Type triples (1 per entity)
-     (for [i (range entities)]
-       [(entity-uri i)
-        "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
-        (type-uri (str "Type" (mod i 10)))
-        nil])
-     ;; Name triples (1 per entity)
-     (for [i (range entities)]
-       [(entity-uri i)
-        (predicate-uri "name")
-        (literal-string (str "Name-" i))
-        nil])
-     ;; Value triples with varied predicates (1 per entity)
-     (for [i (range entities)]
-       [(entity-uri i)
-        (predicate-uri (str "prop" (mod i predicates)))
-        (literal-int i)
-        nil])
-     ;; Relationship triples in contexts (1 per entity)
-     (for [i (range entities)]
-       [(entity-uri i)
-        (predicate-uri "relatesTo")
-        (entity-uri (mod (* i 7) entities))
-        (graph-uri (mod i contexts))]))))
-
 (defn generate-batch-for-scale
   "Generate a batch of n quads for scale testing.
    Uses a deterministic pattern based on offset for reproducibility."
