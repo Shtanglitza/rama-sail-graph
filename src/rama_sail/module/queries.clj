@@ -95,7 +95,7 @@
                     (ops/explode *matches :> *joined)
 
                     (|origin)
-                    (aggs/+set-agg *joined :> *results)))
+                    (aggs/+vec-agg *joined :> *results)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Self-Join Optimization
@@ -114,11 +114,11 @@
 
                     (|origin)))
 
-;; Combiner for union - merges two Sets for distributed aggregation
-(def +set-union
+;; Combiner for union - merges two vectors for distributed bag-union aggregation
+(def +vec-union-combiner
   (combiner
-   (fn [set1 set2] (into (or set1 #{}) set2))
-   :init-fn (fn [] #{})))
+   (fn [v1 v2] (into (or v1 []) v2))
+   :init-fn (fn [] [])))
 
 ;; --- Batch Lookup ---
 
@@ -150,7 +150,7 @@
                     (qh/join-subject-locally *left-pattern *right-pattern *subj *pred-map :> *subj-results)
                     (ops/explode *subj-results :> *result)
                     (|origin)
-                    (aggs/+set-agg *result :> *results)))
+                    (aggs/+vec-agg *result :> *results)))
 
 ;; --- Left Hash Join (Left Outer Join for OPTIONAL) ---
 
@@ -167,7 +167,7 @@
                     (ops/explode *join-results :> *joined)
 
                     (|origin)
-                    (aggs/+set-agg *joined :> *results)))
+                    (aggs/+vec-agg *joined :> *results)))
 
 (defn multi-left-join-query-topology [topologies]
   (<<query-topology topologies "multi-left-join"
@@ -193,7 +193,7 @@
                     (|shuffle)
                     (invoke-query "execute-plan" *plan :> *res)
                     (|origin)
-                    (+set-union *res :> *results)))
+                    (+vec-union-combiner *res :> *results)))
 
 ;; Combiner for ordered results - preserves insertion order
 (def +vec-concat-combiner
@@ -263,7 +263,7 @@
                     (ops/explode *sub-results :> *row)
                     (apply-bindings *row *bindings :> *extended-row)
                     (|origin)
-                    (aggs/+set-agg *extended-row :> *results)))
+                    (aggs/+vec-agg *extended-row :> *results)))
 
 ;; --- ORDER BY Operator ---
 
@@ -376,9 +376,9 @@
                     (ops/explode *sub-results :> *binding)
                     (|shuffle)
                     (filter> (evaluate-filter-cond *expr *binding))
-                    (hash-set *binding :> *binding-set)
+                    (vector *binding :> *binding-vec)
                     (|origin)
-                    (+set-union *binding-set :> *results)))
+                    (+vec-concat-combiner *binding-vec :> *results)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Property Path Support

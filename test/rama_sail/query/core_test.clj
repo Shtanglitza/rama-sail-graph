@@ -334,7 +334,7 @@
       (testing "Query: find-bgp (Variable Bindings)"
 				;; 1. Find who Alice knows and in what graph: {:s <alice> :p <knows> :o ?who :c ?g}
         (let [pattern {:s "<alice>" :p "<knows>" :o "?who" :c "?g"}
-              res     (foreign-invoke-query q-bgp pattern)
+              res     (foreign-invoke-query q-bgp pattern nil)
               binding (first res)]
           (is (= 1 (count res)))
           (is (= "<bob>" (get binding "?who")))
@@ -342,7 +342,7 @@
 
 				;; 2. Find anything in graph <g1>: {:s ?s :p ?p :o ?o :c <g1>}
         (let [pattern {:s "?s" :p "?p" :o "?o" :c "<g1>"}
-              res     (foreign-invoke-query q-bgp pattern)]
+              res     (foreign-invoke-query q-bgp pattern nil)]
           (is (= 1 (count res)))
           (let [b (first res)]
             (is (= "<bob>" (get b "?s")))
