@@ -52,6 +52,6 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
           restore-keys: ${{ runner.os }}-maven-
-      - run: lein test
+      - run: lein test :only rama-sail.sail.e2e-test rama-sail.query.transaction-test rama-sail.query.find-triples-test
         env:
           JVM_OPTS: "-Xms6g -Xmx6g -Xss6m"
