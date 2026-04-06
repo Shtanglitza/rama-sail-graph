@@ -34,7 +34,16 @@
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
                  ;; Ring utilities for request parsing
                  [ring/ring-core "1.10.0"]]
-	;:global-vars {*warn-on-reflection* true}
+  :plugins [[lein-codox "0.10.8"]]
+  :codox {:output-path "target/doc"
+          :source-uri "https://github.com/Shtanglitza/rama-sail-graph/blob/main/{filepath}#L{line}"
+          :metadata {:doc/format :markdown}
+          :namespaces [#"^rama-sail\.core"
+                       #"^rama-sail\.sail\.adapter"
+                       #"^rama-sail\.server\."
+                       #"^rama-sail\.metrics"
+                       #"^rama-sail\.module\."]}
+  :global-vars {*warn-on-reflection* true}
   :repositories
   [["releases" {:id  "maven-releases"
                 :url "https://nexus.redplanetlabs.com/repository/maven-public-releases"}]]

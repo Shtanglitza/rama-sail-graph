@@ -1,4 +1,4 @@
-(ns rama-sail.errors
+(ns ^:no-doc rama-sail.errors
   "Comprehensive error handling for Rama SAIL operations.
 
    Provides utilities to wrap Rama-specific exceptions with user-friendly

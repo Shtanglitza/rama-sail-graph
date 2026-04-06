@@ -1,4 +1,4 @@
-(ns rama-sail.query.expr
+(ns ^:no-doc rama-sail.query.expr
   "Expression evaluation for SPARQL FILTER and BIND expressions.
 
    Evaluates expression trees against variable bindings, supporting:

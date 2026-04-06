@@ -3,7 +3,8 @@
 
    Manages depot handles, SAIL/Repository, and RepositoryConnection.
    Supports IPC mode (dev/test) and cluster mode (production)."
-  (:require [com.rpl.rama :as rama]
+  (:require [clojure.string]
+            [com.rpl.rama :as rama]
             [com.rpl.rama.test :as rtest]
             [rama-sail.core :refer [RdfStorageModule]]
             [rama-sail.sail.adapter :as sail])
@@ -17,6 +18,7 @@
      {:ipc ipc, :depot depot, :repo repo, :conn conn}"
   ([] (start-ipc! {}))
   ([{:keys [tasks threads] :or {tasks 4 threads 2}}]
+   {:pre [(pos-int? tasks) (pos-int? threads)]}
    (let [ipc (rtest/create-ipc)]
      (try
        (rtest/launch-module! ipc RdfStorageModule {:tasks tasks :threads threads})
@@ -38,6 +40,8 @@
      {:manager manager, :depot depot, :repo repo, :conn conn, ...}"
   ([] (start-cluster! {}))
   ([{:keys [host port] :or {host "localhost" port 1973}}]
+   {:pre [(and (string? host) (not (clojure.string/blank? host)))
+          (and (integer? port) (<= 1 port 65535))]}
    (let [manager (rama/open-cluster-manager {"conductor.host" host
                                              "conductor.port" port})]
      (try
