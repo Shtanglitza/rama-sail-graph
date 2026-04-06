@@ -15,7 +15,7 @@ jobs:
         with:
           clj-kondo: 2026.01.19
       - name: Run clj-kondo
-        run: clj-kondo --lint src
+        run: clj-kondo --lint src --fail-level error
 
   unit-test:
     runs-on: ubuntu-latest
