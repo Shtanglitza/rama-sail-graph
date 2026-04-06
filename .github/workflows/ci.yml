@@ -11,9 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: DeLaGuardo/clojure-lint-action@master
+      - uses: DeLaGuardo/setup-clojure@12.5
         with:
-          clj-kondo-args: '--lint src'
+          clj-kondo: 2025.01.10
+      - name: Run clj-kondo
+        run: clj-kondo --lint src
 
   unit-test:
     runs-on: ubuntu-latest
