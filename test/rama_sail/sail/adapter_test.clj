@@ -7,10 +7,10 @@
             [taoensso.nippy :as nippy])
   (:import [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.model.vocabulary XSD]
-           [org.eclipse.rdf4j.model Triple]
+           [org.eclipse.rdf4j.model Literal Triple]
            [org.eclipse.rdf4j.query.algebra ArbitraryLengthPath EmptySet Join LeftJoin Projection ProjectionElem ProjectionElemList SingletonSet Slice StatementPattern TripleRef Var ZeroLengthPath]))
 
-(def VF (SimpleValueFactory/getInstance))
+(def ^:private ^org.eclipse.rdf4j.model.ValueFactory VF (SimpleValueFactory/getInstance))
 
 ;; Use public functions from extracted namespaces
 (def val->str ser/val->str)
@@ -44,7 +44,7 @@
           s   (val->str lit)]
       (is (= "\"hello\"@en" s))
       (is (= lit (str->val s)))
-      (is (= "en" (.get (.getLanguage (str->val s)))))))
+      (is (= "en" (.get (.getLanguage ^Literal (str->val s)))))))
 
   (testing "Literal Serialization (Datatype)"
     (let [type-iri (.createIRI VF "http://example.org/type")
@@ -122,7 +122,7 @@
 
   (testing "Translate PROJECTION"
     (let [sp (StatementPattern. (Var. "s") (Var. "p") (Var. "o"))
-          proj (Projection. sp (reduce #(doto %1 (.addElement %2))
+          proj (Projection. sp (reduce (fn [^ProjectionElemList pel elem] (doto pel (.addElement elem)))
                                        (ProjectionElemList.)
                                        [(ProjectionElem. "s")]))
           plan (tuple-expr->plan proj)]
@@ -231,7 +231,7 @@
   (testing "Literal with embedded newline roundtrips correctly"
     (let [lit (.createLiteral VF "line1\nline2")
           s (val->str lit)
-          parsed (str->val s)]
+          ^Literal parsed (str->val s)]
       (is (= "\"line1\\nline2\"" s))
       (is (= lit parsed))
       (is (= "line1\nline2" (.getLabel parsed)))))
@@ -239,7 +239,7 @@
   (testing "Literal with embedded quote roundtrips correctly"
     (let [lit (.createLiteral VF "He said \"hello\"")
           s (val->str lit)
-          parsed (str->val s)]
+          ^Literal parsed (str->val s)]
       (is (= "\"He said \\\"hello\\\"\"" s))
       (is (= lit parsed))
       (is (= "He said \"hello\"" (.getLabel parsed)))))
@@ -247,7 +247,7 @@
   (testing "Literal with backslash-n (not newline) roundtrips correctly"
     (let [lit (.createLiteral VF "hello\\nworld")  ; literal backslash + n
           s (val->str lit)
-          parsed (str->val s)]
+          ^Literal parsed (str->val s)]
       (is (= "\"hello\\\\nworld\"" s))
       (is (= lit parsed))
       (is (= "hello\\nworld" (.getLabel parsed)))
@@ -256,7 +256,7 @@
   (testing "Literal with Windows path roundtrips correctly"
     (let [lit (.createLiteral VF "C:\\Users\\Name")
           s (val->str lit)
-          parsed (str->val s)]
+          ^Literal parsed (str->val s)]
       (is (= "\"C:\\\\Users\\\\Name\"" s))
       (is (= lit parsed))
       (is (= "C:\\Users\\Name" (.getLabel parsed)))))
@@ -285,22 +285,22 @@
     (is (thrown? IllegalArgumentException (str->val "<>"))))
 
   (testing "IRI with spaces (technically invalid but RDF4J accepts)"
-    (let [result (str->val "<http://example.com/path with spaces>")]
+    (let [^org.eclipse.rdf4j.model.IRI result (str->val "<http://example.com/path with spaces>")]
       (is (instance? org.eclipse.rdf4j.model.IRI result))
       (is (= "http://example.com/path with spaces" (.toString result)))))
 
   (testing "BNode with empty ID"
-    (let [result (str->val "_:")]
+    (let [^org.eclipse.rdf4j.model.BNode result (str->val "_:")]
       (is (instance? org.eclipse.rdf4j.model.BNode result))
       (is (= "" (.getID result)))))
 
   (testing "BNode with special characters in ID"
-    (let [result (str->val "_:node-123_abc")]
+    (let [^org.eclipse.rdf4j.model.BNode result (str->val "_:node-123_abc")]
       (is (instance? org.eclipse.rdf4j.model.BNode result))
       (is (= "node-123_abc" (.getID result)))))
 
   (testing "Empty literal"
-    (let [result (str->val "\"\"")]
+    (let [^Literal result (str->val "\"\"")]
       (is (instance? org.eclipse.rdf4j.model.Literal result))
       (is (= "" (.getLabel result)))))
 
@@ -315,12 +315,12 @@
 
   (testing "Fallback: unrecognized format becomes literal"
     ;; Strings not starting with <, _:, or " fall through to the else branch
-    (let [result (str->val "plain text")]
+    (let [^Literal result (str->val "plain text")]
       (is (instance? org.eclipse.rdf4j.model.Literal result))
       (is (= "plain text" (.getLabel result)))))
 
   (testing "Fallback: empty string becomes literal"
-    (let [result (str->val "")]
+    (let [^Literal result (str->val "")]
       (is (instance? org.eclipse.rdf4j.model.Literal result))
       (is (= "" (.getLabel result))))))
 
@@ -356,13 +356,13 @@
 
   (testing "Typed literal with empty datatype marker - falls back to simple literal"
     ;; "value"^^ - has ^^ but no <, so doesn't match ^^< prefix
-    (let [result (str->val "\"value\"^^")]
+    (let [^Literal result (str->val "\"value\"^^")]
       (is (instance? org.eclipse.rdf4j.model.Literal result))
       (is (= "value" (.getLabel result)))))
 
   (testing "Underscore without colon is not a BNode"
     ;; "_abc" doesn't start with "_:", so falls through to literal
-    (let [result (str->val "_abc")]
+    (let [^Literal result (str->val "_abc")]
       (is (instance? org.eclipse.rdf4j.model.Literal result))
       (is (= "_abc" (.getLabel result)))))
 

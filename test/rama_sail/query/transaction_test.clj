@@ -13,10 +13,12 @@
             [rama-sail.core :refer [RdfStorageModule]]
             [rama-sail.sail.adapter :as rsail])
   (:import (org.eclipse.rdf4j.model Resource)
-           [org.eclipse.rdf4j.repository.sail SailRepository]
+           [org.eclipse.rdf4j.query BindingSet]
+           [org.eclipse.rdf4j.model Literal]
+           [org.eclipse.rdf4j.repository.sail SailRepository SailRepositoryConnection]
            [org.eclipse.rdf4j.model.impl SimpleValueFactory]))
 
-(def VF (SimpleValueFactory/getInstance))
+(def ^:private ^org.eclipse.rdf4j.model.ValueFactory VF (SimpleValueFactory/getInstance))
 (def module-name (rama/get-module-name RdfStorageModule))
 
 ;; Shared IPC and microbatch counter
@@ -44,7 +46,7 @@
   (str "http://ex/" base "-" (System/nanoTime)))
 
 ;; Helper to count statements matching a pattern
-(defn count-statements [conn s p o contexts]
+(defn count-statements [^SailRepositoryConnection conn s p o contexts]
   (with-open [iter (.getStatements conn s p o true (into-array Resource contexts))]
     (count (iterator-seq iter))))
 
@@ -58,7 +60,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "commit-test"))
               p (.createIRI VF "http://ex/p1")
               o (.createLiteral VF "value1")]
@@ -86,7 +88,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "rollback-test"))
               p (.createIRI VF "http://ex/p")
               o (.createLiteral VF "should-not-exist")]
@@ -112,7 +114,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "add-del-same"))
               p (.createIRI VF "http://ex/p")
               o (.createLiteral VF "value")
@@ -141,7 +143,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "del-add-same"))
               p (.createIRI VF "http://ex/p")
               o (.createLiteral VF "value")
@@ -169,7 +171,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "isolation-test"))
               p (.createIRI VF "http://ex/p")
               o (.createLiteral VF "pending")]
@@ -199,7 +201,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               ;; Create a BNode that will be used as both subject and object
               bnode (.createBNode VF (str "localId-" (System/nanoTime)))
               p1 (.createIRI VF "http://ex/name")
@@ -224,7 +226,7 @@
                             (vec (iterator-seq iter)))]
               (is (= 1 (count results)) "Should find exactly one result - BNode linked correctly")
               (when (seq results)
-                (is (= "Anonymous" (.stringValue (.getValue (first results) "name"))))))
+                (is (= "Anonymous" (.stringValue ^org.eclipse.rdf4j.model.Value (.getValue ^BindingSet (first results) "name"))))))
             (finally
               (.close conn))))
         (finally
@@ -236,7 +238,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)]
+        (let [^SailRepositoryConnection conn (.getConnection repo)]
           (try
             ;; Empty transaction 1
             (.begin conn)
@@ -267,7 +269,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "named-graph-s"))
               p (.createIRI VF "http://ex/p")
               o1 (.createLiteral VF "val1")
@@ -310,7 +312,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               ctx (.createIRI VF (unique-iri "add-del-ctx"))
               s (.createIRI VF (unique-iri "subj"))
               p (.createIRI VF "http://ex/pred")
@@ -346,7 +348,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               ctx (.createIRI VF (unique-iri "mixed-ctx"))
               s1 (.createIRI VF (unique-iri "subj1"))
               s2 (.createIRI VF (unique-iri "subj2"))
@@ -382,7 +384,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               ctx (.createIRI VF (unique-iri "pending-clear-ctx"))
               s (.createIRI VF (unique-iri "subj"))
               p (.createIRI VF "http://ex/pred")
@@ -426,7 +428,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "has-stmt-add"))
               p (.createIRI VF "http://ex/p")
               o (.createLiteral VF "pending-value")]
@@ -460,7 +462,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "has-stmt-del"))
               p (.createIRI VF "http://ex/p")
               o (.createLiteral VF "to-delete")]
@@ -496,7 +498,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "has-stmt-clear"))
               p (.createIRI VF "http://ex/p")
               o (.createLiteral VF "clear-me")
@@ -536,7 +538,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               ctx (.createIRI VF (unique-iri "clear-add-ctx"))
               s (.createIRI VF (unique-iri "clear-add-s"))
               p (.createIRI VF "http://ex/p")
@@ -577,7 +579,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               ctx (.createIRI VF (unique-iri "add-clear-add-ctx"))
               s (.createIRI VF (unique-iri "aca-s"))
               p (.createIRI VF "http://ex/p")
@@ -607,7 +609,7 @@
           repo (SailRepository. sail)]
       (.init repo)
       (try
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               ctx (.createIRI VF (unique-iri "add-clear-ctx"))
               s (.createIRI VF (unique-iri "ac-s"))
               p (.createIRI VF "http://ex/p")
