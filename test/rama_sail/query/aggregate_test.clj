@@ -22,7 +22,9 @@
             [rama-sail.sail.adapter :as rsail]
             [rama-sail.query.expr :refer [parse-numeric]])
   (:import (org.eclipse.rdf4j.model Resource)
-           [org.eclipse.rdf4j.repository.sail SailRepository]
+           [org.eclipse.rdf4j.model Literal]
+           [org.eclipse.rdf4j.query BindingSet]
+           [org.eclipse.rdf4j.repository.sail SailRepository SailRepositoryConnection]
            [org.eclipse.rdf4j.model.impl SimpleValueFactory])
   (:use [com.rpl.rama]
         [com.rpl.rama.path]))
@@ -238,7 +240,7 @@
 ;; End-to-End Tests via SPARQL / SAIL Layer
 ;; =============================================================================
 
-(def ^:private VF (SimpleValueFactory/getInstance))
+(def ^:private ^org.eclipse.rdf4j.model.ValueFactory VF (SimpleValueFactory/getInstance))
 
 (deftest test-e2e-count-no-group-by
   (testing "E2E: COUNT without GROUP BY via SPARQL"
@@ -250,7 +252,7 @@
             repo (SailRepository. sail)]
         (.init repo)
 
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               person (.createIRI VF "http://ex/Person")
               rdf-type (.createIRI VF "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
               alice (.createIRI VF "http://ex/alice")
@@ -272,7 +274,7 @@
                 results (with-open [iter (.evaluate query)]
                           (vec (iterator-seq iter)))]
             (is (= 1 (count results)) "Should return exactly one result row")
-            (let [cnt-val (-> results first (.getValue "cnt") .intValue)]
+            (let [cnt-val (.intValue ^Literal (.getValue ^BindingSet (first results) "cnt"))]
               (is (= 3 cnt-val) "Should count 3 people")))
 
           (.close conn))
@@ -288,7 +290,7 @@
             repo (SailRepository. sail)]
         (.init repo)
 
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               works-at (.createIRI VF "http://ex/worksAt")
               acme (.createIRI VF "http://ex/Acme")
               globex (.createIRI VF "http://ex/Globex")
@@ -316,9 +318,9 @@
 
             ;; Build a map of company -> count
             (let [counts (into {}
-                               (map (fn [bs]
-                                      [(-> bs (.getValue "company") .stringValue)
-                                       (-> bs (.getValue "cnt") .intValue)])
+                               (map (fn [^BindingSet bs]
+                                      [(.stringValue ^org.eclipse.rdf4j.model.Value (.getValue bs "company"))
+                                       (.intValue ^Literal (.getValue bs "cnt"))])
                                     results))]
               (is (= 2 (get counts "http://ex/Acme")) "Acme should have 2 employees")
               (is (= 2 (get counts "http://ex/Globex")) "Globex should have 2 employees")))
@@ -336,7 +338,7 @@
             repo (SailRepository. sail)]
         (.init repo)
 
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               amount (.createIRI VF "http://ex/amount")
               int-type (.createIRI VF "http://www.w3.org/2001/XMLSchema#integer")
               order1 (.createIRI VF "http://ex/order1")
@@ -358,7 +360,7 @@
                 results (with-open [iter (.evaluate query)]
                           (vec (iterator-seq iter)))]
             (is (= 1 (count results)))
-            (let [total (-> results first (.getValue "total") .intValue)]
+            (let [total (.intValue ^Literal (.getValue ^BindingSet (first results) "total"))]
               (is (= 400 total) "Sum should be 100 + 250 + 50 = 400")))
 
           (.close conn))
@@ -374,7 +376,7 @@
             repo (SailRepository. sail)]
         (.init repo)
 
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               score (.createIRI VF "http://ex/score")
               int-type (.createIRI VF "http://www.w3.org/2001/XMLSchema#integer")
               test1 (.createIRI VF "http://ex/test1")
@@ -398,7 +400,7 @@
                 results (with-open [iter (.evaluate query)]
                           (vec (iterator-seq iter)))]
             (is (= 1 (count results)))
-            (let [avg (-> results first (.getValue "avg") .doubleValue)]
+            (let [avg (.doubleValue ^Literal (.getValue ^BindingSet (first results) "avg"))]
               (is (== 85.0 avg) "Average should be (80+90+70+100)/4 = 85")))
 
           (.close conn))
@@ -414,7 +416,7 @@
             repo (SailRepository. sail)]
         (.init repo)
 
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               price (.createIRI VF "http://ex/price")
               int-type (.createIRI VF "http://www.w3.org/2001/XMLSchema#integer")
               item1 (.createIRI VF "http://ex/item1")
@@ -436,8 +438,8 @@
                 results (with-open [iter (.evaluate query)]
                           (vec (iterator-seq iter)))]
             (is (= 1 (count results)))
-            (let [min-price (-> results first (.getValue "minPrice") .intValue)
-                  max-price (-> results first (.getValue "maxPrice") .intValue)]
+            (let [min-price (.intValue ^Literal (.getValue ^BindingSet (first results) "minPrice"))
+                  max-price (.intValue ^Literal (.getValue ^BindingSet (first results) "maxPrice"))]
               (is (= 25 min-price) "Minimum price should be 25")
               (is (= 100 max-price) "Maximum price should be 100")))
 
@@ -454,7 +456,7 @@
             repo (SailRepository. sail)]
         (.init repo)
 
-        (let [conn (.getConnection repo)
+        (let [^SailRepositoryConnection conn (.getConnection repo)
               category (.createIRI VF "http://ex/category")
               price (.createIRI VF "http://ex/price")
               int-type (.createIRI VF "http://www.w3.org/2001/XMLSchema#integer")
@@ -495,11 +497,11 @@
 
             ;; Build map of category -> aggregates
             (let [by-cat (into {}
-                               (map (fn [bs]
-                                      [(-> bs (.getValue "cat") .stringValue)
-                                       {:count (-> bs (.getValue "cnt") .intValue)
-                                        :sum (-> bs (.getValue "total") .intValue)
-                                        :avg (-> bs (.getValue "avg") .doubleValue)}])
+                               (map (fn [^BindingSet bs]
+                                      [(.stringValue ^org.eclipse.rdf4j.model.Value (.getValue bs "cat"))
+                                       {:count (.intValue ^Literal (.getValue bs "cnt"))
+                                        :sum (.intValue ^Literal (.getValue bs "total"))
+                                        :avg (.doubleValue ^Literal (.getValue bs "avg"))}])
                                     results))]
               ;; Electronics: 2 items, sum=300, avg=150
               (is (= 2 (get-in by-cat ["Electronics" :count])))
