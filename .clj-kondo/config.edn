@@ -4,10 +4,18 @@
            com.rpl.rama/<<batch clj-kondo.lint-as/def-catch-all
            com.rpl.rama/<<if clojure.core/if
            com.rpl.rama/<<do clojure.core/do
-           com.rpl.rama/<<cond clojure.core/cond}
+           com.rpl.rama/<<cond clojure.core/cond
+           com.rpl.rama/deframaop clj-kondo.lint-as/def-catch-all
+           com.rpl.rama/microbatch-topology clj-kondo.lint-as/def-catch-all}
  :linters {:unresolved-symbol {:exclude [(com.rpl.rama)
                                          (com.rpl.rama.path)
                                          (com.rpl.rama.test)]}
            :unresolved-namespace {:exclude [com.rpl.rama
                                             com.rpl.rama.path
-                                            com.rpl.rama.test]}}}
+                                            com.rpl.rama.test]}
+           :invalid-arity {:skip-args [clojure.core/keyword]}}
+ :config-in-ns {rama-sail.core {:linters {:unresolved-symbol {:level :off}}}
+                rama-sail.module.indexer {:linters {:unresolved-symbol {:level :off}}}
+                rama-sail.module.namespaces {:linters {:unresolved-symbol {:level :off}}}
+                rama-sail.module.queries {:linters {:unresolved-symbol {:level :off}}}
+                rama-sail.query.aggregation {:linters {:unresolved-symbol {:level :off}}}}}
