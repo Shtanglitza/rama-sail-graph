@@ -155,10 +155,10 @@
                   pairs (generate-self-join-pairs subjects join-value left-subject right-subject join-var filter-spec remaining)]
               (into acc pairs))
             acc)))
-      #{}
+      []
       groups)
      ;; Without limit: original behavior
-     (into #{}
+     (into []
            (mapcat
             (fn [[join-value subjects]]
               (when (> (count subjects) 1)
@@ -192,7 +192,7 @@
      the binding is exploded into multiple bindings."
   [bindings lookup-pairs subject-var object-var]
   (let [lookup-map (pairs-to-grouped-map lookup-pairs)]
-    (into #{}
+    (into []
           (mapcat (fn [binding]
                     (when-let [subj (get binding subject-var)]
                       (when-let [objs (get lookup-map subj)]
@@ -340,7 +340,7 @@
   [base-bindings optional-indices]
   (reduce
    (fn [bindings {:keys [hash-idx join-vars condition]}]
-     (into #{}
+     (into []
            (mapcat #(apply-left-join-with-condition hash-idx % join-vars condition))
            bindings))
    base-bindings
