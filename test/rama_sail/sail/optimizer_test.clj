@@ -494,19 +494,53 @@
   [plan]
   (find-node plan #(= :bgp (:op %))))
 
-(deftest test-push-limit-to-bgp
-  (testing "LIMIT pushes :result-limit to BGP"
-    (let [query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+(deftest test-push-limit-to-context-bound-bgp
+  (testing "LIMIT pushes :result-limit to a BGP with a constant context"
+    (let [query "SELECT * WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } } LIMIT 10"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
         (is (some? bgp) "Plan should contain a BGP")
         (is (= 10 (:result-limit bgp))
-            "BGP should have :result-limit 10")))))
+            "Context-bound BGP should have :result-limit 10")))))
+
+(deftest test-push-limit-to-context-variable-bgp
+  (testing "LIMIT pushes :result-limit to a BGP with a context variable"
+    (let [query "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 10"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (= 10 (:result-limit bgp))
+            "Context-variable BGP should have :result-limit 10")))))
+
+(deftest test-no-push-limit-to-wildcard-context-bgp
+  (testing "LIMIT does NOT push to a BGP without a GRAPH clause"
+    ;; find-bgp truncates quads before dedup; quads differing only by
+    ;; context collapse to one binding, so truncation can under-produce.
+    (let [query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (nil? (:result-limit bgp))
+            "Wildcard-context BGP should NOT have :result-limit")))))
+
+(deftest test-no-push-limit-to-repeated-variable-bgp
+  (testing "LIMIT does NOT push to a BGP with a repeated variable"
+    ;; Distinct quads collapse to the same binding when a variable repeats,
+    ;; so truncating quads can under-produce results.
+    (let [plan {:op :slice :offset 0 :limit 10
+                :sub-plan {:op :bgp
+                           :pattern {:s "?x" :p "<http://example.org/knows>"
+                                     :o "?x" :c "<http://example.org/g>"}}}
+          pushed (opt/push-limit-down plan)]
+      (is (nil? (:result-limit (:sub-plan pushed)))
+          "Repeated-variable BGP should NOT have :result-limit"))))
 
 (deftest test-push-limit-through-project-to-bgp
-  (testing "LIMIT pushes through PROJECT to BGP"
-    (let [query "SELECT ?s WHERE { ?s ?p ?o } LIMIT 10"
+  (testing "LIMIT pushes through PROJECT to a safe BGP"
+    (let [query "SELECT ?s WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } } LIMIT 10"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
@@ -524,11 +558,10 @@
         (is (nil? (:result-limit bgp))
             "BGP below ORDER BY should NOT have :result-limit")))))
 
-(deftest test-push-limit-through-order-to-join
-  (testing "LIMIT still pushes through ORDER BY to join (heuristic)"
-    ;; ORDER BY blocks pushdown to BGP (would break sort correctness)
-    ;; but allows it to join/self-join (left-side truncation heuristic).
-    ;; Plan shape: slice → project → order → join(bgp, bgp)
+(deftest test-no-push-limit-through-order-to-join
+  (testing "LIMIT does NOT push through ORDER BY to join-type operators"
+    ;; ORDER BY needs all input rows to produce the correct top-N; the old
+    ;; left-side truncation heuristic returned wrong results and was removed.
     (let [query (str prefixes "
                  SELECT ?product ?label
                  WHERE {
@@ -537,21 +570,45 @@
                  } ORDER BY ?label LIMIT 10")
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
-      ;; The join (or batch-enrich) below ORDER BY should get :result-limit
       (let [join-node (find-node optimized #(#{:join :batch-enrich :self-join} (:op %)))]
         (is (some? join-node) "Plan should contain a join-type operator")
-        (when (= :join (:op join-node))
-          (is (some? (:result-limit join-node))
-              "Join below ORDER BY should still get :result-limit (heuristic)")))
-      ;; But BGP nodes should NOT get :result-limit
+        (is (nil? (:result-limit join-node))
+            "Join-type operator below ORDER BY should NOT get :result-limit"))
       (let [bgp (find-bgp-node optimized)]
         (when bgp
           (is (nil? (:result-limit bgp))
               "BGP below ORDER BY should NOT get :result-limit"))))))
 
+(deftest test-no-push-limit-to-join
+  (testing "LIMIT does NOT annotate a :join even without ORDER BY"
+    ;; The join executor applies :result-limit to its LEFT INPUT before
+    ;; probing, so unmatched left rows would silently shrink the output.
+    (let [bgp-a {:op :bgp :pattern {:s "?s" :p "<http://example.org/a>" :o "?x" :c nil}}
+          bgp-b {:op :bgp :pattern {:s "?x" :p "<http://example.org/b>" :o "?y" :c nil}}
+          plan {:op :slice :offset 0 :limit 10
+                :sub-plan {:op :join :left bgp-a :right bgp-b :join-vars ["?x"]}}
+          pushed (opt/push-limit-down plan)]
+      (is (nil? (:result-limit (:sub-plan pushed)))
+          "Join should NOT have :result-limit"))))
+
+(deftest test-push-limit-to-self-join
+  (testing "LIMIT pushes to :self-join (output-level truncation is exact)"
+    ;; The self-join executor truncates final output pairs after applying
+    ;; the pair filter, so any N of them satisfy LIMIT-without-ORDER.
+    (let [self-join {:op :self-join
+                     :predicate "<http://example.org/p>"
+                     :join-var "?x"
+                     :left-subject "?a"
+                     :right-subject "?b"
+                     :filter {:op :lt :left "?a" :right "?b"}}
+          plan {:op :slice :offset 0 :limit 10 :sub-plan self-join}
+          pushed (opt/push-limit-down plan)]
+      (is (= 10 (:result-limit (:sub-plan pushed)))
+          "Self-join should have :result-limit 10"))))
+
 (deftest test-push-limit-through-bind
-  (testing "LIMIT pushes through BIND to BGP"
-    (let [query "SELECT * WHERE { ?s ?p ?o . BIND(?s AS ?x) } LIMIT 10"
+  (testing "LIMIT pushes through BIND to a safe BGP"
+    (let [query "SELECT * WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } BIND(?s AS ?x) } LIMIT 10"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
@@ -561,7 +618,7 @@
 
 (deftest test-push-limit-accounts-for-offset
   (testing "LIMIT accounts for OFFSET when pushing down"
-    (let [query "SELECT * WHERE { ?s ?p ?o } LIMIT 10 OFFSET 5"
+    (let [query "SELECT * WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } } LIMIT 10 OFFSET 5"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
@@ -569,26 +626,30 @@
         (is (= 15 (:result-limit bgp))
             "BGP should have :result-limit = limit + offset = 15")))))
 
-(deftest test-push-limit-through-distinct-doubles
-  (testing "LIMIT doubles when pushing through DISTINCT"
-    (let [query "SELECT DISTINCT ?s WHERE { ?s ?p ?o } LIMIT 10"
+(deftest test-no-push-limit-through-distinct
+  (testing "LIMIT does NOT push through DISTINCT"
+    ;; A truncated input can under-produce distinct rows; the old x2
+    ;; multiplier heuristic was unsound and was removed.
+    (let [query "SELECT DISTINCT ?s WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } } LIMIT 10"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
         (is (some? bgp) "Plan should contain a BGP")
-        (is (= 20 (:result-limit bgp))
-            "BGP below DISTINCT should have :result-limit doubled to 20")))))
+        (is (nil? (:result-limit bgp))
+            "BGP below DISTINCT should NOT have :result-limit")))))
 
-(deftest test-push-limit-through-filter-multiplies
-  (testing "LIMIT multiplies by 4 when pushing through FILTER"
+(deftest test-no-push-limit-through-filter
+  (testing "LIMIT does NOT push through FILTER"
+    ;; A truncated input can under-produce qualifying rows; the old x4
+    ;; multiplier heuristic was unsound and was removed.
     (let [query (str prefixes "
-                 SELECT * WHERE { ?s ?p ?o . FILTER(?o = \"test\") } LIMIT 10")
+                 SELECT * WHERE { GRAPH <http://example.org/g> { ?s ?p ?o . FILTER(?o = \"test\") } } LIMIT 10")
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
         (is (some? bgp) "Plan should contain a BGP")
-        (is (= 40 (:result-limit bgp))
-            "BGP below FILTER should have :result-limit multiplied by 4 to 40")))))
+        (is (nil? (:result-limit bgp))
+            "BGP below FILTER should NOT have :result-limit")))))
 
 (comment
   ;; Run tests from REPL

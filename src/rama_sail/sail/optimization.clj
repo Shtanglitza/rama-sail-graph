@@ -1139,11 +1139,10 @@
 ;;; ---------------------------------------------------------------------------
 ;;; LIMIT Pushdown Optimization
 ;;; ---------------------------------------------------------------------------
-;;; When a :slice (LIMIT) wraps a :join or :self-join (possibly through
-;;; transparent operators like :project, :distinct, :order), propagate
-;;; :result-limit into the join/self-join node so it can stop early.
-;;; This is critical for queries like QJ1-QJ4 where unbounded joins produce
-;;; thousands of results only to LIMIT to 100.
+;;; When a :slice (LIMIT) wraps a target operator through cardinality-
+;;; preserving operators (:project, :bind), propagate :result-limit into the
+;;; target so it can stop early. Only semantics-preserving pushdowns are
+;;; performed; the :slice above still enforces the exact offset/limit.
 
 (defn- find-effective-limit
   "Walk down from a :slice through transparent operators to find the effective limit.
@@ -1154,52 +1153,54 @@
       (when (and limit (pos? limit))
         limit))))
 
-(defn push-limit-down
-  "Push LIMIT hints into joins, self-joins, and BGPs for early termination.
-   Walks the plan tree and when a :slice with a positive limit wraps
-   operators that don't change cardinality (:project, :bind),
-   propagates :result-limit to the innermost target operator.
+(defn bgp-limit-safe?
+  "True when annotating this :bgp with :result-limit cannot change results.
 
-   ORDER BY handling: pushes through to joins/self-joins (heuristic truncation
-   of the left side) but NOT to BGPs. ORDER BY needs all input rows to sort
-   correctly, so truncating BGP results would return arbitrary rows sorted
-   instead of the correct top-N. A proper top-N combiner is future work."
+   find-bgp truncates quads BEFORE building bindings and deduplicating
+   (+set-agg), so the limit is sound only when distinct quads are guaranteed
+   to produce distinct bindings:
+   - the context position must be a constant or a variable; when it is nil
+     (no GRAPH clause) quads differing only by context collapse into one
+     binding, so truncating quads can under-produce results
+   - no variable may repeat across positions; repeated variables collapse
+     distinct quads into the same binding"
   [plan]
-  (letfn [(push-limit-joins-only [plan limit]
-            ;; Push limit only to join/self-join targets (used below ORDER BY,
-            ;; where truncating BGP input would break sort correctness but
-            ;; truncating join left-side is an acceptable heuristic).
+  (let [{:keys [s p o c]} (:pattern plan)
+        vars (filterv is-variable? [s p o c])]
+    (and (some? c)
+         (or (< (count vars) 2)
+             (apply distinct? vars)))))
+
+(defn push-limit-down
+  "Push LIMIT hints into operators that can terminate early without changing
+   results. Walks the plan tree and, when a :slice with a positive limit wraps
+   only cardinality-preserving operators (:project, :bind), annotates the
+   target operator with :result-limit.
+
+   Semantics-preserving targets:
+   - :bgp — only when `bgp-limit-safe?` holds (context bound or projected,
+     no repeated variables)
+   - :self-join — the executor truncates final output pairs after applying
+     the pair filter, so any N of them satisfy LIMIT-without-ORDER
+
+   Pushdown STOPS at operators where truncating input can change results:
+   - :join — the executor applies :result-limit to the join's LEFT INPUT
+     before probing; unmatched left rows would silently shrink the output
+   - :filter / :distinct — a truncated input can under-produce qualifying
+     rows; the former x4 / x2 multiplier heuristics were unsound and removed
+   - :order — ORDER BY needs all input rows to produce the correct top-N;
+     a distributed top-N combiner is future work (see
+     docs/rama-performance-opportunities.md, Priority 2)"
+  [plan]
+  (letfn [(push-limit [plan limit]
+            ;; Push limit to a semantics-preserving target operator
             (case (:op plan)
-              :join
-              (assoc plan
-                     :result-limit limit
-                     :left (push-limit-down (:left plan))
-                     :right (push-limit-down (:right plan)))
-
-              :self-join
-              (assoc plan :result-limit limit)
-
-              ;; Transparent operators: keep pushing (joins-only) through them
-              (:project :bind)
-              (update plan :sub-plan #(push-limit-joins-only % limit))
-
-              ;; For everything else (including :bgp), stop — ORDER BY needs all rows
-              (push-limit-down plan)))
-
-          (push-limit [plan limit]
-            ;; Push limit to any target operator (join, self-join, bgp)
-            (case (:op plan)
-              ;; Target operators: annotate with :result-limit
-              :join
-              (assoc plan
-                     :result-limit limit
-                     :left (push-limit-down (:left plan))
-                     :right (push-limit-down (:right plan)))
-
-              :self-join
-              (assoc plan :result-limit limit)
-
               :bgp
+              (if (bgp-limit-safe? plan)
+                (assoc plan :result-limit limit)
+                plan)
+
+              :self-join
               (assoc plan :result-limit limit)
 
               ;; Transparent operators (1:1 cardinality): push through unchanged
@@ -1209,20 +1210,9 @@
               :bind
               (update plan :sub-plan #(push-limit % limit))
 
-              ;; Cardinality-reducing operators: push through with safety multiplier
-              :distinct
-              (update plan :sub-plan #(push-limit % (* limit 2)))
-
-              :filter
-              (update plan :sub-plan #(push-limit % (* limit 4)))
-
-              ;; ORDER BY: can still push to joins (heuristic) but NOT to BGPs
-              ;; ORDER BY needs all rows to sort correctly; truncating BGP input
-              ;; would return arbitrary rows sorted, not the correct top-N.
-              :order
-              (update plan :sub-plan #(push-limit-joins-only % limit))
-
-              ;; For other operators, stop pushing but still recurse normally
+              ;; For all other operators (:join, :filter, :distinct, :order, ...)
+              ;; truncation is not semantics-preserving: stop pushing but keep
+              ;; scanning the subtree for nested slices.
               (push-limit-down plan)))
 
           (push-limit-down [plan]
