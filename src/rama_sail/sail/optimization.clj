@@ -29,25 +29,42 @@
 
 (defn extract-expr-vars
   "Extract all variable names referenced in an expression.
-   Returns a set of variable strings (e.g., #{\"?x\" \"?y\"})."
+   Returns a set of variable strings (e.g., #{\"?x\" \"?y\"}).
+
+   For an unknown expression type the result contains ::unknown-vars, a
+   sentinel that can never be a plan variable. Subset tests against plan
+   vars then fail, so passes like filter pushdown leave the expression
+   where it is instead of relocating a filter whose variables they
+   under-counted."
   [expr]
-  (case (:type expr)
-    :var #{(:name expr)}
-    :const #{}
-    :cmp (into (extract-expr-vars (:left expr))
-               (extract-expr-vars (:right expr)))
-    :logic (if (= :not (:op expr))
-             (extract-expr-vars (:arg expr))
-             (into (extract-expr-vars (:left expr))
-                   (extract-expr-vars (:right expr))))
-    :math (into (extract-expr-vars (:left expr))
-                (extract-expr-vars (:right expr)))
-    :str (extract-expr-vars (:arg expr))
-    :coalesce (reduce into #{} (map extract-expr-vars (:args expr)))
-    :bound #{(:var expr)}
-    :agg (if (:arg expr) (extract-expr-vars (:arg expr)) #{})
-    ;; Default: no variables
-    #{}))
+  (letfn [(binary [e] (into (extract-expr-vars (:left e))
+                            (extract-expr-vars (:right e))))
+          (unary [e] (extract-expr-vars (:arg e)))]
+    (case (:type expr)
+      :var #{(:name expr)}
+      :const #{}
+      :cmp (binary expr)
+      :logic (if (= :not (:op expr))
+               (unary expr)
+               (binary expr))
+      :math (binary expr)
+      (:str :lang :datatype :type-check :is-triple
+            :triple-subject :triple-predicate :triple-object) (unary expr)
+      :coalesce (reduce into #{} (map extract-expr-vars (:args expr)))
+      :bound #{(:var expr)}
+      :agg (if (:arg expr) (unary expr) #{})
+      :if (into (extract-expr-vars (:condition expr))
+                (into (extract-expr-vars (:then expr))
+                      (extract-expr-vars (:else expr))))
+      (:langmatches :same-term) (binary expr)
+      :regex (cond-> (into (unary expr) (extract-expr-vars (:pattern expr)))
+               (:flags expr) (into (extract-expr-vars (:flags expr))))
+      :in (reduce into (unary expr) (map extract-expr-vars (:set expr)))
+      :triple-constructor (into (extract-expr-vars (:subject expr))
+                                (into (extract-expr-vars (:predicate expr))
+                                      (extract-expr-vars (:object expr))))
+      ;; Unknown type: poison the result so callers cannot prove safety
+      #{::unknown-vars})))
 
 (defn extract-plan-vars
   "Extract all variables that a plan produces in its output bindings.
@@ -368,27 +385,32 @@
              (is-variable? left-s)
              (is-variable? right-s)
              (not= left-s right-s)
-             (= (:c left-pattern) (:c right-pattern)))))))
+             ;; Context must match and must not be a variable: the :self-join
+             ;; node only carries the two subjects and the join var, so a
+             ;; GRAPH ?g binding would silently vanish from the output.
+             (= (:c left-pattern) (:c right-pattern))
+             (not (is-variable? (:c left-pattern))))))))
 
 (defn- find-self-join-in-plan
   "Recursively find a self-join node in a plan and return [path, self-join-node].
-   Path is a vector of keys to reach the self-join from root."
+   Path is a vector of keys to reach the self-join from root.
+
+   Descends only through operators a conjunctive filter commutes with:
+   :join (inner), :filter, :project, :distinct, :order, :bind. It must NOT
+   descend through :union (the filter would be dropped for the other branch),
+   :left-join (moving a filter into or below OPTIONAL changes its scope), or
+   :slice (filter-after-limit is not filter-before-limit)."
   [plan path]
   (when plan
     (case (:op plan)
       :self-join [path plan]
       :join (or (find-self-join-in-plan (:left plan) (conj path :left))
                 (find-self-join-in-plan (:right plan) (conj path :right)))
-      :left-join (or (find-self-join-in-plan (:left plan) (conj path :left))
-                     (find-self-join-in-plan (:right plan) (conj path :right)))
       :filter (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
       :project (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
       :distinct (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
-      :slice (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
       :order (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
       :bind (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
-      :union (or (find-self-join-in-plan (:left plan) (conj path :left))
-                 (find-self-join-in-plan (:right plan) (conj path :right)))
       nil)))
 
 (defn- is-self-join-inequality?
@@ -876,6 +898,38 @@
       {:op :join :left right :right left :join-vars join-vars}
       {:op :join :left left :right right :join-vars join-vars})))
 
+(def ^:private dp-join-relation-limit
+  "Above this many relations, subset-enumeration DP (Θ(3^n) splits) is
+   replaced by greedy ordering: at n=12 the DP explores ~500k splits in
+   milliseconds, but every additional relation triples the work and the
+   planner runs on the caller's thread."
+  12)
+
+(defn- greedy-join-order
+  "Greedy left-deep join ordering for chains too large for DP.
+   Starts from the lowest-cardinality relation and repeatedly joins the
+   relation yielding the smallest estimated intermediate result, preferring
+   connected relations (shared join vars) to avoid cross products."
+  [base-plans]
+  (let [plans (vec base-plans)
+        start (apply min-key #(estimate-plan-cardinality (plans %))
+                     (range (count plans)))]
+    (loop [current (plans start)
+           remaining (disj (set (range (count plans))) start)]
+      (if (empty? remaining)
+        current
+        (let [current-vars (get-plan-vars current)
+              connected (filter #(seq (set/intersection
+                                       current-vars (get-plan-vars (plans %))))
+                                remaining)
+              candidates (if (seq connected) connected remaining)
+              best-i (apply min-key
+                            #(estimate-plan-cardinality
+                              (build-join-node current (plans %)))
+                            candidates)]
+          (recur (build-join-node current (plans best-i))
+                 (disj remaining best-i)))))))
+
 (defn- dp-optimal-join-order
   "Use dynamic programming to find optimal join order for a set of relations.
    Returns the optimal plan tree.
@@ -883,14 +937,24 @@
    Algorithm: Standard DP for join ordering (Selinger-style)
    - For each subset S of relations, find the best way to join them
    - Best[S] = min over all proper subsets S1, S2 where S1 ∪ S2 = S
-               of cost(Best[S1]) + cost(Best[S2]) + cost(join result)"
+               of cost(Best[S1]) + cost(Best[S2]) + cost(join result)
+
+   Falls back to greedy-join-order above dp-join-relation-limit relations."
   [base-plans]
   (let [n (count base-plans)]
-    (if (<= n 2)
+    (cond
+      (> n dp-join-relation-limit)
+      (do (log/debug "Join chain of" n "relations exceeds DP limit"
+                     dp-join-relation-limit "- using greedy ordering")
+          (greedy-join-order base-plans))
+
+      (<= n 2)
       ;; For 2 or fewer plans, just do simple ordering
       (if (= n 2)
         (build-join-node (first base-plans) (second base-plans))
         (first base-plans))
+
+      :else
 
       ;; DP for 3+ plans
       ;; Key: bit mask representing which plans are included

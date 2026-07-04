@@ -1248,6 +1248,82 @@
         (.close conn))
       (.shutDown repo))))
 
+(deftest test-phase1-correctness-fixes
+  ;; End-to-end coverage for the Phase 1 fail-fast fixes: FunctionCall
+  ;; fallback, FROM dataset fallback, repeated-variable patterns, and
+  ;; mixed-type ORDER BY.
+  (with-open [ipc (rtest/create-ipc)]
+    (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+
+    (let [module-name (com.rpl.rama/get-module-name RdfStorageModule)
+          sail (rsail/create-rama-sail ipc module-name)
+          repo (SailRepository. sail)]
+
+      (.init repo)
+
+      (let [conn (.getConnection repo)
+            alice (.createIRI VF "http://ex/alice")
+            bob (.createIRI VF "http://ex/bob")
+            knows (.createIRI VF "http://ex/knows")
+            name-prop (.createIRI VF "http://ex/name")
+            val-prop (.createIRI VF "http://ex/val")
+            graph-a (.createIRI VF "http://ex/graphA")
+            xsd-int (.createIRI VF "http://www.w3.org/2001/XMLSchema#integer")]
+
+        (.begin conn)
+        ;; Default graph: a self-loop and a normal edge
+        (.add conn alice knows alice (into-array Resource []))
+        (.add conn alice knows bob (into-array Resource []))
+        (.add conn alice name-prop (.createLiteral VF "Alice") (into-array Resource []))
+        (.add conn bob name-prop (.createLiteral VF "Bob") (into-array Resource []))
+        ;; Mixed-type objects on one predicate (used to kill ORDER BY)
+        (.add conn alice val-prop (.createLiteral VF "5" xsd-int) (into-array Resource []))
+        (.add conn bob val-prop (.createLiteral VF "abc") (into-array Resource []))
+        ;; A named-graph triple for the FROM test
+        (.add conn alice name-prop (.createLiteral VF "GraphAlice") (into-array Resource [graph-a]))
+        (.commit conn)
+        (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 7)
+
+        (testing "FILTER with SPARQL function falls back to RDF4J and is correct"
+          ;; Previously compiled to an unevaluatable :function-call that
+          ;; silently returned unbound (zero or wrong rows).
+          (let [sparql "SELECT ?s WHERE { ?s <http://ex/name> ?n . FILTER(CONTAINS(?n, \"ob\")) }"
+                query (.prepareTupleQuery conn sparql)
+                res (with-open [iter (.evaluate query)]
+                      (vec (iterator-seq iter)))]
+            (is (= 1 (count res)) "Only Bob's name contains 'ob'")
+            (is (= bob (.getValue (first res) "s")))))
+
+        (testing "FROM <graph> is honored via fallback instead of silently ignored"
+          (let [sparql "SELECT ?n FROM <http://ex/graphA> WHERE { ?s <http://ex/name> ?n }"
+                query (.prepareTupleQuery conn sparql)
+                res (with-open [iter (.evaluate query)]
+                      (vec (iterator-seq iter)))]
+            (is (= 1 (count res)) "Only the named-graph triple is in scope")
+            (is (= "GraphAlice" (.stringValue (.getValue (first res) "n"))))))
+
+        (testing "repeated-variable pattern matches only self-loops"
+          (let [sparql "SELECT ?x WHERE { ?x <http://ex/knows> ?x }"
+                query (.prepareTupleQuery conn sparql)
+                res (with-open [iter (.evaluate query)]
+                      (vec (iterator-seq iter)))]
+            (is (= 1 (count res)) "Only alice knows herself")
+            (is (= alice (.getValue (first res) "x")))))
+
+        (testing "ORDER BY over mixed-type values returns all rows sorted"
+          ;; Previously threw ClassCastException inside the order topology.
+          (let [sparql "SELECT ?v WHERE { ?s <http://ex/val> ?v } ORDER BY ?v"
+                query (.prepareTupleQuery conn sparql)
+                res (with-open [iter (.evaluate query)]
+                      (vec (iterator-seq iter)))]
+            (is (= 2 (count res)) "Both the numeric and the string value are returned")
+            (is (= ["5" "abc"]
+                   (mapv #(.stringValue (.getValue % "v")) res))
+                "Numeric literal sorts before plain literal")))
+
+        (.close conn))
+      (.shutDown repo))))
+
 (deftest test-limit-early-termination
   ;; Verifies that LIMIT queries return the correct number of results
   ;; and that the early-termination optimization via :result-limit works correctly.

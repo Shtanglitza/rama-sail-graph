@@ -33,7 +33,7 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
           restore-keys: ${{ runner.os }}-maven-
-      - run: lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test
+      - run: lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test rama-sail.query.helpers-test
 
   integration-test:
     runs-on: ubuntu-latest

@@ -25,31 +25,52 @@
   [subjects var-name]
   (set (map (fn [s] {var-name s}) subjects)))
 
+(defn compatible-bindings?
+  "SPARQL solution compatibility: two bindings are compatible when every
+   variable bound in both maps to the same value. A variable bound in only
+   one binding is compatible with anything."
+  [b1 b2]
+  (reduce-kv (fn [_ k v]
+               (let [other (get b2 k ::absent)]
+                 (if (or (= other ::absent) (= other v))
+                   true
+                   (reduced false))))
+             true
+             b1))
+
 (defn build-hash-index
   "Build a hash index from a collection of bindings.
-   Returns {join-key -> [binding1, binding2, ...]}
-   Empty join-vars creates a single key [] for cross-product joins.
-   Bindings with missing join key values are dropped with debug logging."
+   Returns {:keyed {join-key -> [binding ...]} :wildcard [binding ...]}.
+   Empty join-vars creates a single key [] (cross-product with the
+   compatibility check applied at probe time). Bindings missing a join-key
+   value go into :wildcard — per SPARQL compatibility an unbound variable
+   joins with anything, so such rows must be candidates for every probe."
   [bindings join-vars]
   (reduce
    (fn [idx binding]
-     (let [key (extract-join-key binding join-vars)]
-       (if key
-         (update idx key (fnil conj []) binding)
-         (do
-           (log/debug "Dropping binding with missing join key(s)"
-                      {:join-vars join-vars :binding binding})
-           idx))))
-   {}
+     (if-let [key (extract-join-key binding join-vars)]
+       (update-in idx [:keyed key] (fnil conj []) binding)
+       (update idx :wildcard conj binding)))
+   {:keyed {} :wildcard []}
    bindings))
 
-(defn probe-hash-index
-  "Probe hash index with a binding. Returns seq of merged bindings or nil."
+(defn hash-index-candidates
+  "Candidate matches for a probe binding: the bucket for its join key plus
+   all wildcard rows. A probe binding missing a join-key value must consider
+   every indexed row (it is compatible with any key)."
   [hash-idx binding join-vars]
   (let [key (extract-join-key binding join-vars)]
-    (when key
-      (when-let [matches (get hash-idx key)]
-        (map #(merge % binding) matches)))))
+    (if key
+      (concat (get (:keyed hash-idx) key) (:wildcard hash-idx))
+      (concat (mapcat val (:keyed hash-idx)) (:wildcard hash-idx)))))
+
+(defn probe-hash-index
+  "Probe hash index with a binding. Returns seq of merged bindings or nil.
+   Candidates are filtered for full SPARQL compatibility (every shared
+   variable — join key or not — must agree) before merging."
+  [hash-idx binding join-vars]
+  (seq (keep #(when (compatible-bindings? binding %) (merge % binding))
+             (hash-index-candidates hash-idx binding join-vars))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Self-Join Helpers
@@ -286,16 +307,14 @@
    join-vars specifies which variables to join on."
   [left-bindings right-bindings join-vars]
   (if (empty? join-vars)
-    ;; Cross product
-    (for [l left-bindings, r right-bindings]
+    ;; Cross product (compatibility-checked: sides may still share variables)
+    (for [l left-bindings
+          r right-bindings
+          :when (compatible-bindings? l r)]
       (merge l r))
     ;; Hash join
     (let [right-idx (build-hash-index right-bindings join-vars)]
-      (for [l left-bindings
-            :let [key (extract-join-key l join-vars)]
-            :when key
-            r (get right-idx key [])]
-        (merge l r)))))
+      (mapcat #(probe-hash-index right-idx % join-vars) left-bindings))))
 
 (defn join-subject-locally
   "Join two patterns for a single subject.
@@ -316,10 +335,13 @@
 
 (defn apply-left-join-with-condition
   "Apply left join logic with optional condition.
-   Returns seq of result bindings."
+   Returns seq of result bindings.
+   Candidates are filtered for full SPARQL compatibility (every shared
+   variable must agree), so a left row with an unbound join variable still
+   matches compatible right rows instead of being treated as unmatched."
   [hash-idx left-bind join-vars condition]
-  (let [key (extract-join-key left-bind join-vars)
-        matches (and key (get hash-idx key))]
+  (let [matches (filter #(compatible-bindings? left-bind %)
+                        (hash-index-candidates hash-idx left-bind join-vars))]
     (if (seq matches)
       ;; Has matches - apply condition filter
       (let [merged-results (map #(merge left-bind %) matches)]
@@ -369,27 +391,47 @@
 
 (defn compute-sort-key
   "Compute a composite sort key where natural vector ordering produces correct result.
-   Each element is [category value] where:
+   Each element is [category rank value] where:
    - category 0: nil (ASC) - sorts first
-   - category 1: actual value (possibly negated for DESC numerics, wrapped for DESC strings)
+   - category 1: bound value
    - category 2: nil (DESC) - sorts last
-   This ensures proper SPARQL null ordering and ASC/DESC behavior."
+
+   rank orders bound values by term type so mixed-type columns are totally
+   ordered (SPARQL: blank nodes < IRIs < literals) instead of throwing
+   ClassCastException when e.g. a numeric and a string value meet:
+   - 0: blank node    (compared as string)
+   - 1: IRI           (compared as string)
+   - 2: numeric literal (compared numerically)
+   - 3: other literal (compared as string)
+   - 4: non-string evaluation result, e.g. a boolean (compared via str)
+   Values are only compared within the same rank, so every key element is
+   mutually comparable. For DESC both rank and value are inverted."
   [row order-specs]
   (mapv (fn [{:keys [expr ascending]}]
           (let [raw (eval-expr expr row)
-                parsed (when raw (parse-numeric raw))]
+                parsed (when (and (string? raw)
+                                  (not (str/starts-with? raw "<"))
+                                  (not (str/starts-with? raw "_:")))
+                         (parse-numeric raw))]
             (cond
               ;; nil: use category to control null ordering
               (nil? raw)
-              (if ascending [0 nil] [2 nil])
+              (if ascending [0 0 nil] [2 0 nil])
 
-              ;; numeric: negate for DESC so larger values sort first
+              ;; numeric literal: negate for DESC so larger values sort first
               parsed
-              [1 (if ascending parsed (- parsed))]
+              [1 (if ascending 2 -2) (if ascending parsed (- parsed))]
 
-              ;; string/other: wrap in DescString for DESC to reverse comparison
               :else
-              [1 (if ascending raw (->DescString raw))])))
+              (let [rank (cond
+                           (not (string? raw)) 4
+                           (str/starts-with? raw "_:") 0
+                           (str/starts-with? raw "<") 1
+                           :else 3)
+                    s (if (string? raw) raw (str raw))]
+                [1
+                 (if ascending rank (- rank))
+                 (if ascending s (->DescString s))]))))
         order-specs))
 
 (defn sort-keyed-rows

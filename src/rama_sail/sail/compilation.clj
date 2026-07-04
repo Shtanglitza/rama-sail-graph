@@ -20,11 +20,18 @@
 (defn compute-join-vars
   "Compute the join variables between two tuple expressions.
    Returns a vector of variable names with '?' prefix.
+
+   Uses getAssuredBindingNames (vars bound in EVERY solution) rather than
+   getBindingNames: a shared var that is only possibly bound (e.g. from a
+   nested OPTIONAL or UNION branch) cannot serve as a hash-join key — rows
+   lacking it must still join per SPARQL compatibility. The executor checks
+   compatibility of all remaining shared vars after probing.
+
    Excludes synthetic constant variables (those starting with '_const_')
    which RDF4J generates for shared constant values in patterns."
   [left-expr right-expr]
-  (let [l-vars (set (.getBindingNames ^TupleExpr left-expr))
-        r-vars (set (.getBindingNames ^TupleExpr right-expr))
+  (let [l-vars (set (.getAssuredBindingNames ^TupleExpr left-expr))
+        r-vars (set (.getAssuredBindingNames ^TupleExpr right-expr))
         shared-vars (set/intersection l-vars r-vars)
         ;; Filter out RDF4J's synthetic constant variables
         real-vars (remove #(str/starts-with? % "_const_") shared-vars)]
@@ -49,6 +56,33 @@
    :offset (.getOffset expr) ; Extract the offset (long)
    :limit (.getLimit expr)})   ; Extract the limit (long)
 
+(defn- rewrite-repeated-vars
+  "Rewrite a pattern with repeated variables into a pattern with fresh
+   variables plus sameTerm equality filters.
+
+   find-bgp builds bindings positionally with successive assoc, so a later
+   occurrence of the same variable would silently overwrite the earlier one
+   instead of requiring equality (?x <knows> ?x would match every <knows>
+   triple). Renaming later occurrences and filtering with sameTerm preserves
+   the equality constraint; the fresh variable is equal to the original term,
+   so it cannot distort DISTINCT, and SELECT projection removes it.
+
+   Returns {:pattern {...} :filters [...]}."
+  [positions]
+  (reduce (fn [{:keys [pattern filters seen]} [k v]]
+            (if (and (is-variable? v) (contains? seen v))
+              (let [fresh (str v "__rep-" (name k))]
+                {:pattern (assoc pattern k fresh)
+                 :filters (conj filters {:type :same-term
+                                         :left {:type :var :name v}
+                                         :right {:type :var :name fresh}})
+                 :seen seen})
+              {:pattern (assoc pattern k v)
+               :filters filters
+               :seen (cond-> seen (is-variable? v) (conj v))}))
+          {:pattern {} :filters [] :seen #{}}
+          positions))
+
 (defmethod tuple-expr->plan StatementPattern [^StatementPattern sp]
   (let [get-val (fn [^Var v]
                   (if (.hasValue v)
@@ -61,12 +95,17 @@
         ;; SPARQL semantics: no GRAPH clause = match ALL contexts (wildcard = nil)
         ;; GRAPH <uri> = match specific context
         ;; GRAPH ?var = match any context, binding the variable
-        c-val (when c-var (get-val c-var))]
-    {:op :bgp
-     :pattern {:s s-val
-               :p p-val
-               :o o-val
-               :c c-val}}))
+        c-val (when c-var (get-val c-var))
+        {:keys [pattern filters]} (rewrite-repeated-vars
+                                   [[:s s-val] [:p p-val] [:o o-val] [:c c-val]])
+        bgp {:op :bgp :pattern pattern}]
+    (if (seq filters)
+      {:op :filter
+       :sub-plan bgp
+       :expr (reduce (fn [acc f] {:type :logic :op :and :left acc :right f})
+                     (first filters)
+                     (rest filters))}
+      bgp)))
 
 (defn- rewrite-triple-ref-join
   "Rewrite Join(TripleRef, Plan) into an efficient plan.
@@ -99,21 +138,25 @@
                                       [k constructed]
                                       [k v])))]
             {:op :bgp :pattern new-pattern})
-          ;; General case: wrap in bind that sets expr-var = constructed value
-          ;; This shouldn't normally happen but handles edge cases
-          other-plan))
+          ;; Returning other-plan unchanged would silently drop the triple-term
+          ;; constraint. Throw so the adapter falls back to RDF4J.
+          (throw (UnsupportedOperationException.
+                  "RamaSail does not yet support constant triple-term joins with non-BGP partners"))))
       ;; Case 2: Decompose triple term variable into s/p/o components.
       ;; For shared variables (already in other-plan), add filter BEFORE bind.
       ;; For new variables, add bind to extract the component.
       ;; For constants, add filter to verify the component matches.
-      (let [make-extract (fn [part-type]
+      ;; Only BGP partners are supported: for any other plan shape we cannot
+      ;; enumerate its variables here, so a shared variable would be silently
+      ;; overwritten by :bind instead of filtered for equality.
+      (let [_ (when-not (= :bgp (:op other-plan))
+                (throw (UnsupportedOperationException.
+                        "RamaSail does not yet support triple-term decomposition joins with non-BGP partners")))
+            make-extract (fn [part-type]
                            {:type part-type :arg {:type :var :name expr-var}})
 
             ;; Detect which variables the other plan already provides
-            other-vars (cond
-                         (= :bgp (:op other-plan))
-                         (set (filter is-variable? (vals (:pattern other-plan))))
-                         :else #{})
+            other-vars (set (filter is-variable? (vals (:pattern other-plan))))
 
             components [{:var subject-var :extract (make-extract :triple-subject)}
                         {:var predicate-var :extract (make-extract :triple-predicate)}
@@ -251,6 +294,12 @@
                     (str "?" (.getName v))))
         s-val (get-val (.getSubjectVar zlp))
         o-val (get-val (.getObjectVar zlp))]
+    ;; path-results-to-bindings builds bindings by successive assoc, so a
+    ;; shared subject/object variable would be overwritten instead of
+    ;; constrained to equality. Fall back to RDF4J for that shape.
+    (when (and (is-variable? s-val) (= s-val o-val))
+      (throw (UnsupportedOperationException.
+              "RamaSail does not yet support zero-length paths with a repeated variable")))
     {:op :zero-length-path
      :subject s-val
      :object o-val}))
@@ -268,6 +317,10 @@
         ;; Extract the predicate from the path expression (usually a StatementPattern)
         path-expr (.getPathExpression alp)
         step-plan (tuple-expr->plan path-expr)]
+    ;; Same repeated-variable limitation as ZeroLengthPath (see above).
+    (when (and (is-variable? s-val) (= s-val o-val))
+      (throw (UnsupportedOperationException.
+              "RamaSail does not yet support property paths with a repeated variable")))
     {:op :arbitrary-length-path
      :subject s-val
      :object o-val
@@ -380,9 +433,12 @@
    :distinct false})  ;; DISTINCT has no effect on MAX
 
 (defmethod value-expr->plan FunctionCall [^FunctionCall fc]
-  {:type :function-call
-   :uri (.getURI fc)
-   :args (mapv value-expr->plan (.getArgs fc))})
+  ;; The expression evaluator has no :function-call handler; compiling this
+  ;; would make the function silently evaluate to unbound. Throw so the
+  ;; adapter falls back to RDF4J's evaluation strategy, which implements
+  ;; the full SPARQL function library.
+  (throw (UnsupportedOperationException.
+          (str "RamaSail does not yet support SPARQL function: " (.getURI fc)))))
 
 ;;; --- Phase 1 SPARQL Functions ---
 
@@ -427,12 +483,12 @@
    :right (value-expr->plan (.getRightArg expr))})
 
 (defmethod value-expr->plan In [^In expr]
-  ;; In is a subquery-based IN operator (not list-based).
-  ;; SPARQL's FILTER(?x IN (...)) is parsed as ListMemberOperator, not In.
-  ;; Delegate to getArg + getSubQuery for the subquery form.
-  {:type :in-subquery
-   :arg (value-expr->plan (.getArg expr))
-   :sub-query (.getSubQuery expr)})
+  ;; In is a subquery-based IN operator (not list-based; SPARQL's
+  ;; FILTER(?x IN (...)) is parsed as ListMemberOperator). Embedding the live
+  ;; RDF4J TupleExpr sub-query in the plan cannot serialize to Rama workers
+  ;; and has no evaluator. Throw so the adapter falls back to RDF4J.
+  (throw (UnsupportedOperationException.
+          "RamaSail does not yet support subquery-based IN expressions")))
 
 (defmethod value-expr->plan ListMemberOperator [^ListMemberOperator expr]
   (let [args (.getArguments expr)]

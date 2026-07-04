@@ -427,11 +427,17 @@
                     (-> strategy
                         (.precompile tuple-expr)
                         (.evaluate bindings))))]
-          ;; If there are pending ops, use fallback strategy to ensure read-your-own-writes
-          ;; This goes through getStatementsInternal which properly handles pending ops
-          (if (seq @pending-ops)
+          ;; Fallback cases handled by RDF4J's strategy over getStatementsInternal:
+          ;; - pending ops: ensures read-your-own-writes
+          ;; - a Dataset with FROM / FROM NAMED graphs: the Rama path has no
+          ;;   dataset support and would silently query all graphs
+          (if (or (seq @pending-ops)
+                  (and dataset
+                       (or (seq (.getDefaultGraphs dataset))
+                           (seq (.getNamedGraphs dataset)))))
             (do
-              (log/debug "Using fallback strategy due to pending ops")
+              (log/debug "Using fallback strategy due to"
+                         (if (seq @pending-ops) "pending ops" "FROM/FROM NAMED dataset"))
               (metrics/with-fallback-timing
                 (use-fallback-strategy)))
             ;; Wrap query evaluation with comprehensive error handling and metrics
@@ -439,22 +445,38 @@
               (metrics/with-query-timing
                 (try
                   ;; Fetch statistics for cardinality estimation
-                  (let [stats (fetch-stats!)
-                        ;; Bind statistics for use in plan optimization
-                        plan (binding [*predicate-stats* (:predicate-stats stats)
-                                       *global-stats* (:global-stats stats)]
-                               (let [plan (tuple-expr->plan tuple-expr)
-                                     ;; If initial bindings provided, substitute constants in plan
-                                     plan-with-bindings (if (.isEmpty bindings)
-                                                          plan
-                                                          (apply-initial-bindings plan bindings))
-                                     ;; Apply optimizations: filter pushdown and join reordering
-                                     optimized-plan (optimize-plan plan-with-bindings)]
-                                 optimized-plan))]
+                  (let [start-ms (System/currentTimeMillis)
+                        stats (fetch-stats!)
+                        ;; Plan on a separate thread so pathological planning
+                        ;; (e.g. very large join chains) is bounded by the query
+                        ;; timeout instead of hanging the calling thread.
+                        plan-future (future
+                                      (binding [*predicate-stats* (:predicate-stats stats)
+                                                *global-stats* (:global-stats stats)]
+                                        (let [plan (tuple-expr->plan tuple-expr)
+                                              ;; If initial bindings provided, substitute constants in plan
+                                              plan-with-bindings (if (.isEmpty bindings)
+                                                                   plan
+                                                                   (apply-initial-bindings plan bindings))]
+                                          ;; Apply optimizations: filter pushdown and join reordering
+                                          (optimize-plan plan-with-bindings))))
+                        plan (try
+                               (let [res (deref plan-future timeout-ms ::planning-timeout)]
+                                 (if (= res ::planning-timeout)
+                                   (do (future-cancel plan-future)
+                                       (throw (QueryInterruptedException.
+                                               (str "Query planning exceeded timeout of " timeout-ms "ms"))))
+                                   res))
+                               (catch java.util.concurrent.ExecutionException e
+                                 ;; Unwrap so UnsupportedOperationException from
+                                 ;; compilation reaches the fallback catch below
+                                 (throw (or (.getCause e) e))))
+                        ;; Execution gets whatever budget planning left over
+                        remaining-ms (max 1 (- timeout-ms (- (System/currentTimeMillis) start-ms)))]
                     ;; Warn about complex queries with insufficient timeout
-                    (warn-complex-query plan timeout-ms)
+                    (warn-complex-query plan remaining-ms)
                     (log/debug "Executing optimized Rama plan:" (pr-str plan))
-                    (let [rama-results (invoke-query-with-timeout query-qt timeout-ms plan)
+                    (let [rama-results (invoke-query-with-timeout query-qt remaining-ms plan)
                           binding-sets (map ser/rama-result->binding-set rama-results)]
                       ;; Use lazy counting to avoid OOM on large result sets
                       ;; Count is logged when iteration is closed

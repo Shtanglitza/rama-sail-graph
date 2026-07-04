@@ -5,7 +5,8 @@
             [rama-sail.sail.adapter :as sail]
             [rama-sail.sail.compilation :as comp]
             [rama-sail.sail.optimization :as opt])
-  (:import [org.eclipse.rdf4j.query.parser.sparql SPARQLParser]))
+  (:import [org.eclipse.rdf4j.query.parser.sparql SPARQLParser]
+           [org.eclipse.rdf4j.query.algebra ArbitraryLengthPath StatementPattern Var]))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Helper Functions
@@ -650,6 +651,123 @@
         (is (some? bgp) "Plan should contain a BGP")
         (is (nil? (:result-limit bgp))
             "BGP below FILTER should NOT have :result-limit")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Phase 1 correctness fixes
+;;; ---------------------------------------------------------------------------
+
+(deftest test-repeated-variable-pattern-rewrite
+  (testing "a StatementPattern with a repeated var compiles to distinct vars + sameTerm filter"
+    ;; The SPARQL parser pre-renames repeated variables itself, but the
+    ;; compiler is a public API that accepts arbitrary algebra. find-bgp
+    ;; builds bindings by successive assoc, so a repeated variable reaching
+    ;; it would be overwritten (?x <knows> ?x would match EVERY <knows> triple).
+    (let [sp (StatementPattern. (Var. "x") (Var. "p") (Var. "x"))
+          plan (comp/tuple-expr->plan sp)
+          bgp (find-bgp-node plan)
+          pattern (:pattern bgp)]
+      (is (some? bgp) "Plan should contain a BGP")
+      (is (not= (:s pattern) (:o pattern))
+          "Subject and object positions must hold distinct variables")
+      (is (= :filter (:op plan))
+          "An equality filter must constrain the renamed variable")
+      (is (= :same-term (get-in plan [:expr :type]))
+          "The equality must be sameTerm (exact term equality)")
+      (is (= "?x" (get-in plan [:expr :left :name]))
+          "Filter compares the original variable to the renamed one"))))
+
+(deftest test-repeated-variable-property-path-throws
+  (testing "an ArbitraryLengthPath with subject var = object var falls back"
+    ;; Unreachable via the SPARQL parser (it pre-renames), but the path
+    ;; executor's binding construction cannot express the equality constraint.
+    (let [x (Var. "x")
+          step (StatementPattern. (Var. "x") (Var. "p") (Var. "x2"))
+          alp (ArbitraryLengthPath. x step (Var. "x") 1)]
+      (is (thrown? UnsupportedOperationException
+                   (comp/tuple-expr->plan alp))))))
+
+(deftest test-parsed-repeated-variable-query-is-safe
+  (testing "parsed ?x <knows> ?x yields a sameTerm-filtered plan end to end"
+    ;; Documents the combined parser + compiler behavior: whether the parser
+    ;; or the compiler does the renaming, the final plan must constrain both
+    ;; positions to the same term.
+    (let [plan (parse-and-plan "SELECT ?x WHERE { ?x <http://ex/knows> ?x }")
+          bgp (find-bgp-node plan)
+          pattern (:pattern bgp)
+          filter-node (find-node plan #(= :filter (:op %)))]
+      (is (some? bgp))
+      (is (not= (:s pattern) (:o pattern)))
+      (is (= :same-term (get-in filter-node [:expr :type]))))))
+
+(deftest test-function-call-throws
+  (testing "SPARQL function calls throw so the RDF4J fallback engages"
+    ;; Compiling them used to succeed while the evaluator silently returned
+    ;; unbound — wrong results instead of a correct fallback evaluation.
+    (is (thrown? UnsupportedOperationException
+                 (parse-and-plan
+                  "SELECT ?s WHERE { ?s ?p ?o . FILTER(CONTAINS(?o, \"x\")) }")))
+    (is (thrown? UnsupportedOperationException
+                 (parse-and-plan
+                  "SELECT ?s WHERE { ?s ?p ?o . FILTER(STRLEN(?o) > 3) }")))))
+
+(deftest test-join-vars-exclude-possibly-unbound
+  (testing "join vars come from assured binding names, not possible ones"
+    ;; ?y is only bound when the OPTIONAL matches; hashing on it would drop
+    ;; or mis-handle rows where it is unbound.
+    (let [plan (parse-and-plan
+                "SELECT * WHERE {
+                   { ?s <http://ex/p> ?x OPTIONAL { ?s <http://ex/q> ?y } }
+                   ?z <http://ex/r> ?y .
+                 }")
+          join (find-node plan #(and (= :join (:op %))
+                                     (contains-op? % :left-join)))]
+      (is (some? join) "Plan should contain the outer join")
+      (is (not (some #{"?y"} (:join-vars join)))
+          "?y is only possibly bound and must not be a hash-join key"))))
+
+(deftest test-filter-not-incorporated-through-union
+  (testing "self-join filter incorporation must not cross a UNION boundary"
+    ;; Moving the filter into one union branch silently drops it for the other.
+    (let [self-join {:op :self-join :predicate "<http://ex/p>" :join-var "?o"
+                     :left-subject "?a" :right-subject "?b"}
+          other-bgp {:op :bgp :pattern {:s "?a" :p "<http://ex/q>" :o "?b" :c nil}}
+          ineq {:type :cmp :op :lt
+                :left {:type :var :name "?a"}
+                :right {:type :var :name "?b"}}
+          incorporate @#'opt/incorporate-filter-into-self-join]
+      (is (nil? (incorporate {:op :filter :expr ineq
+                              :sub-plan {:op :union :left self-join :right other-bgp}}))
+          "No incorporation through :union")
+      (is (nil? (incorporate {:op :filter :expr ineq
+                              :sub-plan {:op :left-join :left other-bgp :right self-join
+                                         :join-vars ["?a"]}}))
+          "No incorporation through :left-join")
+      (is (nil? (incorporate {:op :filter :expr ineq
+                              :sub-plan {:op :slice :offset 0 :limit 10
+                                         :sub-plan self-join}}))
+          "No incorporation through :slice")
+      (is (some? (incorporate {:op :filter :expr ineq :sub-plan self-join}))
+          "Direct incorporation still works"))))
+
+(deftest test-greedy-join-order-above-dp-limit
+  (testing "chains above the DP limit use greedy ordering and stay left-deep"
+    (let [bgps (mapv (fn [i]
+                       {:op :bgp
+                        :pattern {:s (str "?v" i)
+                                  :p (str "<http://ex/p" i ">")
+                                  :o (str "?v" (inc i))
+                                  :c nil}})
+                     (range 14))
+          greedy @#'opt/greedy-join-order
+          result (greedy bgps)]
+      (is (= :join (:op result)) "Result is a join tree")
+      (is (= 13 (count-ops result :join)) "All 14 relations joined"))))
+
+(deftest test-unknown-expr-type-blocks-filter-pushdown
+  (testing "an unknown expression type reports the poison sentinel"
+    (let [vars (opt/extract-expr-vars {:type :some-future-expr})]
+      (is (contains? vars :rama-sail.sail.optimization/unknown-vars)
+          "Unknown expr types must not report 'no variables'"))))
 
 (comment
   ;; Run tests from REPL
