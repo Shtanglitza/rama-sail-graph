@@ -914,6 +914,37 @@
         (is (contains? zmc ["C" "C"]))
         (is (contains? zmc ["A" "C"]))))))
 
+(deftest test-path-materialization-limit
+  ;; C5: property-path helpers must fail fast instead of materializing an
+  ;; unbounded working set on one task.
+  (testing "check-path-limit! passes under the cap and throws over it"
+    (binding [queries/*path-materialization-limit* 5]
+      (is (= 3 (queries/check-path-limit! 3 "edges")))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"materialization limit"
+                            (queries/check-path-limit! 6 "edges")))))
+
+  (testing "extract-path-edges caps the edge set"
+    (let [rows (for [i (range 20)] {"?s" (str "n" i) "?o" (str "n" (inc i))})]
+      (binding [queries/*path-materialization-limit* 10]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"path edges"
+                              (queries/extract-path-edges rows "?s" "?o"))))
+      (binding [queries/*path-materialization-limit* 100]
+        (is (= 20 (count (queries/extract-path-edges rows "?s" "?o")))))))
+
+  (testing "collect-all-nodes caps the node set"
+    (let [quads (for [i (range 20)] [(str "s" i) "p" (str "o" i) "c"])]
+      (binding [queries/*path-materialization-limit* 10]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"path nodes"
+                              (queries/collect-all-nodes quads))))))
+
+  (testing "compute-transitive-closure caps the closure output (O(n^2) blowup)"
+    ;; A complete-ish chain of 40 nodes yields ~40*40/2 reachable pairs, over a
+    ;; small cap — this is the DoS shape the guard exists to stop.
+    (let [edges (set (for [i (range 40)] [(str "n" i) (str "n" (inc i))]))]
+      (binding [queries/*path-materialization-limit* 50]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"path pairs"
+                              (queries/compute-transitive-closure edges)))))))
+
 (comment
 
   (run-tests 'rama-sail.sail.adapter-test))

@@ -394,11 +394,34 @@
 ;;; Property Path Support
 ;;; ---------------------------------------------------------------------------
 
+(def ^:dynamic *path-materialization-limit*
+  "Interim availability guard (finding C5). Property-path evaluation materializes
+   edges/nodes and their transitive closure on a single task in local Clojure, so
+   an unbounded `?x :p* ?y` over a large store is a DoS (worst case O(nodes^2)
+   pairs). Cap the working-set size and fail fast with a clear error instead of
+   OOM-ing the worker. Rebind for tests or raise for known-small stores; the real
+   fix is distributed frontier iteration (perf doc Priority 5)."
+  1000000)
+
+(defn check-path-limit!
+  "Throw a clear, client-visible error when a property-path working set exceeds
+   `*path-materialization-limit*`, rather than exhausting the worker's heap."
+  [n what]
+  (when (> n *path-materialization-limit*)
+    (throw (ex-info (str "Property-path evaluation exceeded the materialization limit ("
+                         n " " what " > " *path-materialization-limit* "). This query "
+                         "would materialize the store on a single task; constrain the "
+                         "pattern (bind an endpoint) or raise *path-materialization-limit*.")
+                    {:limit *path-materialization-limit* :count n :kind what})))
+  n)
+
 (defn compute-transitive-closure
   "Compute transitive closure of a set of (subject, object) edges.
    Returns a set of [from to] pairs reachable via 1+ steps.
    Uses iterative BFS with a visited set to handle cycles.
-   In a cycle A->B->C->A, A reaches itself (self-loop via cycle)."
+   In a cycle A->B->C->A, A reaches itself (self-loop via cycle).
+   Guarded by `*path-materialization-limit*`: the closure is O(nodes^2) in the
+   worst case, so the accumulated pair count is checked as it grows (C5)."
   [edges]
   (let [;; Build adjacency list: from -> #{to ...}
         adj (reduce (fn [m [s o]]
@@ -418,7 +441,11 @@
                                         (into visited new-nodes)
                                         (into result (map (fn [n] [start n]) new-nodes))))))))
         all-starts (keys adj)]
-    (into #{} (mapcat reachable-from) all-starts)))
+    (reduce (fn [acc start]
+              (let [acc' (into acc (reachable-from start))]
+                (check-path-limit! (count acc') "path pairs")
+                acc'))
+            #{} all-starts)))
 
 (defn compute-zero-or-more-closure
   "Like transitive-closure but includes zero-length paths (node to itself).
@@ -536,15 +563,21 @@
     {:plan wildcarded :s-var s-new :o-var o-new}))
 
 (defn extract-path-edges
-  "Extract (subject, object) pairs from step plan results."
+  "Extract (subject, object) pairs from step plan results.
+   Capped by `*path-materialization-limit*` (C5)."
   [step-results s-var o-var]
-  (set (for [row step-results]
-         [(get row s-var) (get row o-var)])))
+  (let [edges (set (for [row step-results]
+                     [(get row s-var) (get row o-var)]))]
+    (check-path-limit! (count edges) "path edges")
+    edges))
 
 (defn collect-all-nodes
-  "Collect all unique subject and object values from a quad result set."
+  "Collect all unique subject and object values from a quad result set.
+   Capped by `*path-materialization-limit*` (C5)."
   [quads]
-  (into #{} (mapcat (fn [[s _ o _]] [s o])) quads))
+  (let [nodes (into #{} (mapcat (fn [[s _ o _]] [s o])) quads)]
+    (check-path-limit! (count nodes) "path nodes")
+    nodes))
 
 (defn add-zero-length-identities
   "For * paths, add self-identity pairs for all graph nodes.
