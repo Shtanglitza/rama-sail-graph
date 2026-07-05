@@ -849,7 +849,10 @@
             (vec (reverse all-plans))))))))
 
 (defn get-plan-vars
-  "Extract all variables produced by a plan."
+  "Extract all variables a plan MAY produce (possibly-bound semantics: a :union
+   contributes the vars of EITHER branch). Contrast `extract-plan-vars`, which
+   uses guaranteed-bound (:union = intersection) semantics. Used for join-var
+   detection, where a variable bound in some rows can still participate in a join."
   [plan]
   (case (:op plan)
     :bgp (let [p (:pattern plan)]
@@ -859,6 +862,12 @@
     :union (set/union (get-plan-vars (:left plan)) (get-plan-vars (:right plan)))
     :filter (get-plan-vars (:sub-plan plan))
     :project (set (:vars plan))
+    ;; :bind adds its computed vars on top of the sub-plan; the default
+    ;; sub-plan recursion alone would drop them.
+    :bind (into (get-plan-vars (:sub-plan plan)) (map :var (:bindings plan)))
+    ;; :group produces only its grouping keys and aggregate outputs — NOT the
+    ;; sub-plan's vars, which the default clause would wrongly return.
+    :group (into (set (:group-vars plan)) (map :name (:aggregates plan)))
     :self-join #{(:left-subject plan) (:right-subject plan) (:join-var plan)}
     :values (set (:vars plan))
     :type-lookup #{(:subject-var plan)}
