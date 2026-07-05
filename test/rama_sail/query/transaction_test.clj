@@ -96,17 +96,28 @@
         (let [^SailRepositoryConnection conn (.getConnection repo)
               s (.createIRI VF (unique-iri "rollback-test"))
               p (.createIRI VF "http://ex/p")
-              o (.createLiteral VF "should-not-exist")]
+              o (.createLiteral VF "should-not-exist")
+              sentinel-s (.createIRI VF (unique-iri "rollback-sentinel"))
+              sentinel-o (.createLiteral VF "sentinel")]
           (try
             ;; Begin transaction, add, rollback
             (.begin conn)
             (.add conn s p o (into-array Resource []))
             (.rollback conn)
 
-            ;; Give some time for any potential (incorrect) processing
-            (Thread/sleep 100)
+            ;; Deterministic barrier: commit a sentinel triple on the same
+            ;; connection, then wait until ALL appended depot records are
+            ;; processed. If the rolled-back add had (incorrectly) reached the
+            ;; depot, it would have been indexed by now too.
+            (.begin conn)
+            (.add conn sentinel-s p sentinel-o (into-array Resource []))
+            (.commit conn)
+            (wait-mb!)
 
-            ;; Data should NOT be visible
+            ;; Sentinel IS visible - proves the barrier covers the commit
+            (is (= 1 (count-statements conn sentinel-s p sentinel-o []))
+                "Sentinel committed after rollback must be visible")
+            ;; Rolled-back data is NOT visible - it never landed in the depot
             (is (= 0 (count-statements conn s p o [])))
             (finally
               (.close conn))))

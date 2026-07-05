@@ -33,9 +33,31 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
           restore-keys: ${{ runner.os }}-maven-
-      - run: lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test rama-sail.query.helpers-test rama-sail.query.expr-test
+      - run: lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test rama-sail.query.helpers-test rama-sail.query.expr-test rama-sail.sail.serialization-roundtrip-test
 
+  # Runs on PRs too: the e2e suite shares one in-process cluster per
+  # namespace, so the whole job is minutes, not tens of minutes.
   integration-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: DeLaGuardo/setup-clojure@12.5
+        with:
+          lein: 2.11.2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
+          restore-keys: ${{ runner.os }}-maven-
+      - run: lein test :only rama-sail.sail.e2e-test rama-sail.query.transaction-test rama-sail.query.find-triples-test rama-sail.module.indexer-test rama-sail.query.core-test rama-sail.query.aggregate-test rama-sail.sail.optimizer-equivalence-test
+
+  # W3C conformance harnesses guard the skip lists both ways (unexpected
+  # failures AND unexpected passes fail the job). Push-to-main only.
+  w3c-conformance:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
@@ -52,6 +74,4 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
           restore-keys: ${{ runner.os }}-maven-
-      - run: lein test :only rama-sail.sail.e2e-test rama-sail.query.transaction-test rama-sail.query.find-triples-test rama-sail.module.indexer-test
-        env:
-          JVM_OPTS: "-Xms6g -Xmx6g -Xss6m"
+      - run: lein test :only rama-sail.sail.w3c.sparql11-property-path-test rama-sail.sail.w3c.sparql12-test

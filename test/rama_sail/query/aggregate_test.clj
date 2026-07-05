@@ -141,46 +141,22 @@
     (is (nil? (format-agg-result :avg nil)))))
 
 ;; =============================================================================
-;; Integration Tests with RdfStorageModule
+;; build-group-entry Unit Tests
 ;; =============================================================================
 
-(deftest test-group-topology-count
-  (testing "GROUP BY with COUNT using RdfStorageModule"
-    (with-open [ipc (rtest/create-ipc)]
-      (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+(deftest test-build-group-entry-count
+  (testing "build-group-entry keys entries by group-var values for COUNT"
+    (let [group-vars ["?p"]
+          aggregates [{:name "?cnt"
+                       :agg {:fn :count
+                             :arg {:type :var :name "?v"}
+                             :distinct false}}]
+          group-entry-a (build-group-entry {"?p" "<http://ex/a>" "?v" "\"1\""} group-vars aggregates)
+          group-entry-b (build-group-entry {"?p" "<http://ex/b>" "?v" "\"10\""} group-vars aggregates)]
 
-      (let [module-name (rama/get-module-name RdfStorageModule)
-            query (rama/foreign-query ipc module-name "group")
-
-            ;; Mock input: simulate bindings from a sub-plan
-            ;; 3 rows for group A, 2 for group B
-            input-bindings #{{"?p" "<http://ex/a>" "?v" "\"1\""}
-                             {"?p" "<http://ex/a>" "?v" "\"2\""}
-                             {"?p" "<http://ex/a>" "?v" "\"3\""}
-                             {"?p" "<http://ex/b>" "?v" "\"10\""}
-                             {"?p" "<http://ex/b>" "?v" "\"20\""}}
-
-            ;; Mock sub-plan that just returns our test bindings
-            sub-plan {:op :bgp :pattern {:s "?s" :p "?p" :o "?v" :c nil}}
-
-            group-vars ["?p"]
-
-            aggregates [{:name "?cnt"
-                         :agg {:fn :count
-                               :arg {:type :var :name "?v"}
-                               :distinct false}}]]
-
-        ;; For this test, we'll invoke the group topology directly with pre-made bindings
-        ;; This tests the grouping/aggregation logic without needing real data in PStates
-        (let [group-entry-a (build-group-entry {"?p" "<http://ex/a>" "?v" "\"1\""} group-vars aggregates)
-              group-entry-b (build-group-entry {"?p" "<http://ex/b>" "?v" "\"10\""} group-vars aggregates)]
-
-          (println "Group entry A:" group-entry-a)
-          (println "Group entry B:" group-entry-b)
-
-          ;; Verify build-group-entry works correctly
-          (is (contains? group-entry-a ["<http://ex/a>"]))
-          (is (contains? group-entry-b ["<http://ex/b>"])))))))
+      ;; Verify build-group-entry works correctly
+      (is (contains? group-entry-a ["<http://ex/a>"]))
+      (is (contains? group-entry-b ["<http://ex/b>"])))))
 
 (deftest test-group-topology-sum
   (testing "GROUP BY with SUM aggregate"
