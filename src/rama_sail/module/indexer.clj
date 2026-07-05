@@ -15,6 +15,17 @@
   [n]
   (max 0 (dec (or n 0))))
 
+(defn new-subject?
+  "True when a quad becoming visible belongs to a subject with no prior triples."
+  [becoming-visible subj-existed]
+  (boolean (and becoming-visible (not subj-existed))))
+
+(defn nil-or-zero?
+  "True for nil or 0 — a predicate-stats :count in this state means the
+   predicate is (re)appearing."
+  [n]
+  (or (nil? n) (zero? n)))
+
 ;; --- Empty Container Cleanup ---
 ;; After deleting an element from a nested map structure, empty containers
 ;; should be removed to prevent memory growth over time.
@@ -144,22 +155,35 @@
                ;; Quad is becoming visible iff it doesn't already exist
                (identity (nil? *existing-tx-time) :> *becoming-visible)
 
+               ;; Claim visibility IMMEDIATELY, on the same task as the check with
+               ;; no partitioner in between: ops between partitioners run atomically
+               ;; per event, so a duplicate :add of the same quad later in this
+               ;; microbatch observes the entry and is NOT "becoming visible".
+               ;; (Previously the write happened 4 hops later, so concurrent
+               ;; duplicates each saw nil and permanently double-counted stats.)
+               (<<if *becoming-visible
+                     (local-transform> [(keypath *s *p *o *c) (termval *tx-time)] $$quad-tx-time))
+
+               ;; Subject visibility must be sampled BEFORE the $$spoc insert on
+               ;; this same task: a brand-new subject means :total-subjects grows.
+               (local-select> [(keypath *s) (view some?)] $$spoc :> *subj-existed)
+               (new-subject? *becoming-visible *subj-existed :> *new-subject)
+
                ;; Update indices (idempotent - set semantics)
-               (|hash *s) (local-transform> [(keypath *s *p *o) NIL->SET NONE-ELEM (termval *c)] $$spoc)
+               (local-transform> [(keypath *s *p *o) NIL->SET NONE-ELEM (termval *c)] $$spoc)
                (|hash *p) (local-transform> [(keypath *p *o *s) NIL->SET NONE-ELEM (termval *c)] $$posc)
                (|hash *o) (local-transform> [(keypath *o *s *p) NIL->SET NONE-ELEM (termval *c)] $$ospc)
                (|hash *c) (local-transform> [(keypath *c *s *p) NIL->SET NONE-ELEM (termval *o)] $$cspo)
 
-               ;; Store transaction time for this quad
-               (|hash *s)
-               (<<if (nil? *existing-tx-time)
-                     (local-transform> [(keypath *s *p *o *c) (termval *tx-time)] $$quad-tx-time))
-
                ;; Only update statistics if quad is BECOMING VISIBLE (not already visible)
                ;; This ensures idempotent adds don't inflate counts
                (<<if *becoming-visible
-                     ;; Update statistics with accurate distinct tracking
+                     ;; Update statistics with accurate distinct tracking.
+                     ;; The :count read and increment are adjacent on the predicate
+                     ;; task, so the 0->1 transition (new predicate) is race-free.
                      (|hash *p)
+                     (local-select> [(keypath *p :count)] $$predicate-stats :> *prev-pred-count)
+                     (nil-or-zero? *prev-pred-count :> *new-predicate)
                      (local-transform> [(keypath *p :count) (nil->val 0) (term inc)] $$predicate-stats)
 
                      ;; Track distinct subjects: increment only when first triple for (pred, subject)
@@ -177,6 +201,10 @@
                      ;; Update global statistics (single global partition)
                      (|global)
                      (local-transform> [(keypath :total-triples) (nil->val 0) (term inc)] $$global-stats)
+                     (<<if *new-subject
+                           (local-transform> [(keypath :total-subjects) (nil->val 0) (term inc)] $$global-stats))
+                     (<<if *new-predicate
+                           (local-transform> [(keypath :total-predicates) (nil->val 0) (term inc)] $$global-stats))
 
                      ;; --- Materialized View Maintenance (add) ---
                      ;; If this is an rdf:type triple, update type views with context-aware cardinality.
@@ -205,19 +233,49 @@
                (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *quad-existed)
 
                (<<if (some? *quad-existed)
-                     ;; Remove from all 4 indices
-                     (|hash *s) (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
-                     (|hash *p) (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
-                     (|hash *o) (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
-                     (|hash *c) (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
-                     ;; Remove quad-tx-time entry
-                     (|hash *s) (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time))
+                     ;; Claim the delete IMMEDIATELY (same task, no partitioner in
+                     ;; between the check and this removal): a duplicate :del of the
+                     ;; same quad later in this microbatch sees the entry gone and
+                     ;; does not double-decrement statistics.
+                     (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time)
+                     (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$quad-tx-time)
+                     (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$quad-tx-time)
+                     (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$quad-tx-time)
 
-               ;; Only update statistics if quad actually existed
-               (<<if (some? *quad-existed)
+                     ;; Remove from all 4 indices, pruning newly-empty containers so
+                     ;; churn workloads don't grow the indices without bound.
+                     (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
+                     (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$spoc)
+                     (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$spoc)
+                     (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$spoc)
+                     ;; Did this delete remove the subject's last triple?
+                     ;; (Sampled on the subject task before hopping away.)
+                     (local-select> [(keypath *s) (view some?)] $$spoc :> *subj-still-exists)
 
-                     ;; Update statistics - decrement counts for deleted triple
                      (|hash *p)
+                     (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
+                     (local-transform> [(keypath *p *o *s) (if-path (pred empty?) NONE>)] $$posc)
+                     (local-transform> [(keypath *p *o) (if-path (pred empty?) NONE>)] $$posc)
+                     (local-transform> [(keypath *p) (if-path (pred empty?) NONE>)] $$posc)
+
+                     (|hash *o)
+                     (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
+                     (local-transform> [(keypath *o *s *p) (if-path (pred empty?) NONE>)] $$ospc)
+                     (local-transform> [(keypath *o *s) (if-path (pred empty?) NONE>)] $$ospc)
+                     (local-transform> [(keypath *o) (if-path (pred empty?) NONE>)] $$ospc)
+
+                     (|hash *c)
+                     (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
+                     (local-transform> [(keypath *c *s *p) (if-path (pred empty?) NONE>)] $$cspo)
+                     (local-transform> [(keypath *c *s) (if-path (pred empty?) NONE>)] $$cspo)
+                     (local-transform> [(keypath *c) (if-path (pred empty?) NONE>)] $$cspo)
+
+                     ;; Update statistics - decrement counts for deleted triple.
+                     ;; :count read and decrement are adjacent on the predicate task,
+                     ;; so the 1->0 transition (predicate vanishing) is race-free.
+                     (|hash *p)
+                     (local-select> [(keypath *p :count)] $$predicate-stats :> *cur-pred-count)
+                     (identity (= *cur-pred-count 1) :> *pred-vanished)
                      (local-transform> [(keypath *p :count) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
 
                      ;; Decrement distinct subjects only when last triple for (pred, subject) removed
@@ -239,6 +297,10 @@
                      ;; Update global statistics
                      (|global)
                      (local-transform> [(keypath :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
+                     (<<if (not *subj-still-exists)
+                           (local-transform> [(keypath :total-subjects) (nil->val 0) (term dec-floor-zero)] $$global-stats))
+                     (<<if *pred-vanished
+                           (local-transform> [(keypath :total-predicates) (nil->val 0) (term dec-floor-zero)] $$global-stats))
 
                      ;; --- Materialized View Maintenance (delete) ---
                      ;; If this is an rdf:type triple, update type views with context-aware cardinality.
@@ -277,13 +339,42 @@
                ;; 3. Apply deletion if quad exists and clear is not older than creation
                (<<if (and> (some? *quad-creation-time)
                            (>= *tx-time *quad-creation-time))
-                     ;; Remove from all indices
-                     (|hash *s) (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
-                     (|hash *p) (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
-                     (|hash *o) (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
-                     (|hash *c) (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
-                     (|hash *s) (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time)
+                     ;; Claim the delete atomically with the check (same task): a
+                     ;; duplicate :clear-context or concurrent :del of this quad in
+                     ;; the same microbatch sees the entry gone.
+                     (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time)
+                     (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$quad-tx-time)
+                     (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$quad-tx-time)
+                     (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$quad-tx-time)
+
+                     ;; Remove from all indices, pruning newly-empty containers
+                     (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
+                     (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$spoc)
+                     (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$spoc)
+                     (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$spoc)
+                     (local-select> [(keypath *s) (view some?)] $$spoc :> *subj-still-exists)
+
                      (|hash *p)
+                     (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
+                     (local-transform> [(keypath *p *o *s) (if-path (pred empty?) NONE>)] $$posc)
+                     (local-transform> [(keypath *p *o) (if-path (pred empty?) NONE>)] $$posc)
+                     (local-transform> [(keypath *p) (if-path (pred empty?) NONE>)] $$posc)
+
+                     (|hash *o)
+                     (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
+                     (local-transform> [(keypath *o *s *p) (if-path (pred empty?) NONE>)] $$ospc)
+                     (local-transform> [(keypath *o *s) (if-path (pred empty?) NONE>)] $$ospc)
+                     (local-transform> [(keypath *o) (if-path (pred empty?) NONE>)] $$ospc)
+
+                     (|hash *c)
+                     (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
+                     (local-transform> [(keypath *c *s *p) (if-path (pred empty?) NONE>)] $$cspo)
+                     (local-transform> [(keypath *c *s) (if-path (pred empty?) NONE>)] $$cspo)
+                     (local-transform> [(keypath *c) (if-path (pred empty?) NONE>)] $$cspo)
+
+                     (|hash *p)
+                     (local-select> [(keypath *p :count)] $$predicate-stats :> *cur-pred-count)
+                     (identity (= *cur-pred-count 1) :> *pred-vanished)
                      (local-transform> [(keypath *p :count) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
 
                      ;; Decrement distinct subjects only when last triple for (pred, subject) removed
@@ -304,6 +395,10 @@
 
                      (|global)
                      (local-transform> [(keypath :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
+                     (<<if (not *subj-still-exists)
+                           (local-transform> [(keypath :total-subjects) (nil->val 0) (term dec-floor-zero)] $$global-stats))
+                     (<<if *pred-vanished
+                           (local-transform> [(keypath :total-predicates) (nil->val 0) (term dec-floor-zero)] $$global-stats))
                      ;; Update type views if this is an rdf:type triple (context-aware cardinality)
                      (<<if (= *p RDF-TYPE-PREDICATE)
                            ;; Decrement type->subject occurrence count

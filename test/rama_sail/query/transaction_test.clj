@@ -21,24 +21,29 @@
 (def ^:private ^org.eclipse.rdf4j.model.ValueFactory VF (SimpleValueFactory/getInstance))
 (def module-name (rama/get-module-name RdfStorageModule))
 
-;; Shared IPC and microbatch counter
+;; Shared IPC
 (def ^:dynamic *ipc* nil)
-(def ^:dynamic *mb-counter* nil)
 
 (defn transaction-fixture [f]
   (with-open [ipc (rtest/create-ipc)]
     (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
-    (binding [*ipc* ipc
-              *mb-counter* (atom 0)]
+    (binding [*ipc* ipc]
       (f))))
 
 (use-fixtures :once transaction-fixture)
 
 (defn wait-mb!
-  "Wait for microbatch and increment counter."
+  "Barrier: wait until the indexer has processed every depot record appended
+   so far. wait-for-microbatch-processed-count counts DEPOT RECORDS (not
+   iterations), so the exact target is the sum of the depot partitions'
+   end-offsets — no manual counter to drift when a commit appends several
+   records."
   []
-  (swap! *mb-counter* inc)
-  (rtest/wait-for-microbatch-processed-count *ipc* module-name "indexer" @*mb-counter*))
+  (let [depot (rama/foreign-depot *ipc* module-name "*triple-depot")
+        num-partitions (:num-partitions (rama/foreign-object-info depot))
+        total (reduce + (for [part (range num-partitions)]
+                          (:end-offset (rama/foreign-depot-partition-info depot part))))]
+    (rtest/wait-for-microbatch-processed-count *ipc* module-name "indexer" total)))
 
 (defn unique-iri
   "Generate unique IRI for test isolation."
@@ -626,6 +631,53 @@
             ;; The quad should be gone (clear came after add)
             (is (= 0 (count-statements conn s p o [ctx]))
                 "Quad added before clear must NOT exist after commit")
+            (finally
+              (.close conn))))
+        (finally
+          (.shutDown repo))))))
+
+(deftest test-wildcard-hasstatement-sees-named-graph-pending-ops
+  (testing "hasStatement with wildcard context honors pending deletes/clears in named graphs"
+    ;; Regression (M7): with an empty contexts array the ASK matched a quad in
+    ;; ANY graph, but the pending-delete check only tested the default-context
+    ;; quad — a statement deleted (or its graph cleared) in the current
+    ;; transaction still reported true.
+    (let [sail (rsail/create-rama-sail *ipc* module-name)
+          repo (SailRepository. sail)]
+      (.init repo)
+      (try
+        (let [^SailRepositoryConnection conn (.getConnection repo)
+              s (.createIRI VF (unique-iri "ryow-del"))
+              p (.createIRI VF "http://ex/ryow-p")
+              o (.createLiteral VF "ryow-value")
+              g (.createIRI VF (unique-iri "ryow-graph"))
+              s2 (.createIRI VF (unique-iri "ryow-clear"))
+              g2 (.createIRI VF (unique-iri "ryow-clear-graph"))]
+          (try
+            ;; Commit statements into named graphs
+            (.begin conn)
+            (.add conn s p o (into-array Resource [g]))
+            (.add conn s2 p o (into-array Resource [g2]))
+            (.commit conn)
+            (wait-mb!)
+            (is (true? (.hasStatement conn s p o true (into-array Resource []))))
+            (is (true? (.hasStatement conn s2 p o true (into-array Resource []))))
+
+            (testing "pending remove from a named graph"
+              (.begin conn)
+              (.remove conn s p o (into-array Resource [g]))
+              (is (false? (.hasStatement conn s p o true (into-array Resource [])))
+                  "Wildcard hasStatement must see the pending named-graph delete")
+              (.rollback conn)
+              (is (true? (.hasStatement conn s p o true (into-array Resource [])))
+                  "After rollback the statement is visible again"))
+
+            (testing "pending clear of a named graph"
+              (.begin conn)
+              (.clear conn (into-array Resource [g2]))
+              (is (false? (.hasStatement conn s2 p o true (into-array Resource [])))
+                  "Wildcard hasStatement must see the pending graph clear")
+              (.rollback conn))
             (finally
               (.close conn))))
         (finally
