@@ -29,25 +29,42 @@
 
 (defn extract-expr-vars
   "Extract all variable names referenced in an expression.
-   Returns a set of variable strings (e.g., #{\"?x\" \"?y\"})."
+   Returns a set of variable strings (e.g., #{\"?x\" \"?y\"}).
+
+   For an unknown expression type the result contains ::unknown-vars, a
+   sentinel that can never be a plan variable. Subset tests against plan
+   vars then fail, so passes like filter pushdown leave the expression
+   where it is instead of relocating a filter whose variables they
+   under-counted."
   [expr]
-  (case (:type expr)
-    :var #{(:name expr)}
-    :const #{}
-    :cmp (into (extract-expr-vars (:left expr))
-               (extract-expr-vars (:right expr)))
-    :logic (if (= :not (:op expr))
-             (extract-expr-vars (:arg expr))
-             (into (extract-expr-vars (:left expr))
-                   (extract-expr-vars (:right expr))))
-    :math (into (extract-expr-vars (:left expr))
-                (extract-expr-vars (:right expr)))
-    :str (extract-expr-vars (:arg expr))
-    :coalesce (reduce into #{} (map extract-expr-vars (:args expr)))
-    :bound #{(:var expr)}
-    :agg (if (:arg expr) (extract-expr-vars (:arg expr)) #{})
-    ;; Default: no variables
-    #{}))
+  (letfn [(binary [e] (into (extract-expr-vars (:left e))
+                            (extract-expr-vars (:right e))))
+          (unary [e] (extract-expr-vars (:arg e)))]
+    (case (:type expr)
+      :var #{(:name expr)}
+      :const #{}
+      :cmp (binary expr)
+      :logic (if (= :not (:op expr))
+               (unary expr)
+               (binary expr))
+      :math (binary expr)
+      (:str :lang :datatype :type-check :is-triple
+            :triple-subject :triple-predicate :triple-object) (unary expr)
+      :coalesce (reduce into #{} (map extract-expr-vars (:args expr)))
+      :bound #{(:var expr)}
+      :agg (if (:arg expr) (unary expr) #{})
+      :if (into (extract-expr-vars (:condition expr))
+                (into (extract-expr-vars (:then expr))
+                      (extract-expr-vars (:else expr))))
+      (:langmatches :same-term) (binary expr)
+      :regex (cond-> (into (unary expr) (extract-expr-vars (:pattern expr)))
+               (:flags expr) (into (extract-expr-vars (:flags expr))))
+      :in (reduce into (unary expr) (map extract-expr-vars (:set expr)))
+      :triple-constructor (into (extract-expr-vars (:subject expr))
+                                (into (extract-expr-vars (:predicate expr))
+                                      (extract-expr-vars (:object expr))))
+      ;; Unknown type: poison the result so callers cannot prove safety
+      #{::unknown-vars})))
 
 (defn extract-plan-vars
   "Extract all variables that a plan produces in its output bindings.
@@ -368,27 +385,32 @@
              (is-variable? left-s)
              (is-variable? right-s)
              (not= left-s right-s)
-             (= (:c left-pattern) (:c right-pattern)))))))
+             ;; Context must match and must not be a variable: the :self-join
+             ;; node only carries the two subjects and the join var, so a
+             ;; GRAPH ?g binding would silently vanish from the output.
+             (= (:c left-pattern) (:c right-pattern))
+             (not (is-variable? (:c left-pattern))))))))
 
 (defn- find-self-join-in-plan
   "Recursively find a self-join node in a plan and return [path, self-join-node].
-   Path is a vector of keys to reach the self-join from root."
+   Path is a vector of keys to reach the self-join from root.
+
+   Descends only through operators a conjunctive filter commutes with:
+   :join (inner), :filter, :project, :distinct, :order, :bind. It must NOT
+   descend through :union (the filter would be dropped for the other branch),
+   :left-join (moving a filter into or below OPTIONAL changes its scope), or
+   :slice (filter-after-limit is not filter-before-limit)."
   [plan path]
   (when plan
     (case (:op plan)
       :self-join [path plan]
       :join (or (find-self-join-in-plan (:left plan) (conj path :left))
                 (find-self-join-in-plan (:right plan) (conj path :right)))
-      :left-join (or (find-self-join-in-plan (:left plan) (conj path :left))
-                     (find-self-join-in-plan (:right plan) (conj path :right)))
       :filter (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
       :project (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
       :distinct (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
-      :slice (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
       :order (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
       :bind (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
-      :union (or (find-self-join-in-plan (:left plan) (conj path :left))
-                 (find-self-join-in-plan (:right plan) (conj path :right)))
       nil)))
 
 (defn- is-self-join-inequality?
@@ -876,6 +898,38 @@
       {:op :join :left right :right left :join-vars join-vars}
       {:op :join :left left :right right :join-vars join-vars})))
 
+(def ^:private dp-join-relation-limit
+  "Above this many relations, subset-enumeration DP (Θ(3^n) splits) is
+   replaced by greedy ordering: at n=12 the DP explores ~500k splits in
+   milliseconds, but every additional relation triples the work and the
+   planner runs on the caller's thread."
+  12)
+
+(defn- greedy-join-order
+  "Greedy left-deep join ordering for chains too large for DP.
+   Starts from the lowest-cardinality relation and repeatedly joins the
+   relation yielding the smallest estimated intermediate result, preferring
+   connected relations (shared join vars) to avoid cross products."
+  [base-plans]
+  (let [plans (vec base-plans)
+        start (apply min-key #(estimate-plan-cardinality (plans %))
+                     (range (count plans)))]
+    (loop [current (plans start)
+           remaining (disj (set (range (count plans))) start)]
+      (if (empty? remaining)
+        current
+        (let [current-vars (get-plan-vars current)
+              connected (filter #(seq (set/intersection
+                                       current-vars (get-plan-vars (plans %))))
+                                remaining)
+              candidates (if (seq connected) connected remaining)
+              best-i (apply min-key
+                            #(estimate-plan-cardinality
+                              (build-join-node current (plans %)))
+                            candidates)]
+          (recur (build-join-node current (plans best-i))
+                 (disj remaining best-i)))))))
+
 (defn- dp-optimal-join-order
   "Use dynamic programming to find optimal join order for a set of relations.
    Returns the optimal plan tree.
@@ -883,14 +937,24 @@
    Algorithm: Standard DP for join ordering (Selinger-style)
    - For each subset S of relations, find the best way to join them
    - Best[S] = min over all proper subsets S1, S2 where S1 ∪ S2 = S
-               of cost(Best[S1]) + cost(Best[S2]) + cost(join result)"
+               of cost(Best[S1]) + cost(Best[S2]) + cost(join result)
+
+   Falls back to greedy-join-order above dp-join-relation-limit relations."
   [base-plans]
   (let [n (count base-plans)]
-    (if (<= n 2)
+    (cond
+      (> n dp-join-relation-limit)
+      (do (log/debug "Join chain of" n "relations exceeds DP limit"
+                     dp-join-relation-limit "- using greedy ordering")
+          (greedy-join-order base-plans))
+
+      (<= n 2)
       ;; For 2 or fewer plans, just do simple ordering
       (if (= n 2)
         (build-join-node (first base-plans) (second base-plans))
         (first base-plans))
+
+      :else
 
       ;; DP for 3+ plans
       ;; Key: bit mask representing which plans are included
@@ -1139,11 +1203,10 @@
 ;;; ---------------------------------------------------------------------------
 ;;; LIMIT Pushdown Optimization
 ;;; ---------------------------------------------------------------------------
-;;; When a :slice (LIMIT) wraps a :join or :self-join (possibly through
-;;; transparent operators like :project, :distinct, :order), propagate
-;;; :result-limit into the join/self-join node so it can stop early.
-;;; This is critical for queries like QJ1-QJ4 where unbounded joins produce
-;;; thousands of results only to LIMIT to 100.
+;;; When a :slice (LIMIT) wraps a target operator through cardinality-
+;;; preserving operators (:project, :bind), propagate :result-limit into the
+;;; target so it can stop early. Only semantics-preserving pushdowns are
+;;; performed; the :slice above still enforces the exact offset/limit.
 
 (defn- find-effective-limit
   "Walk down from a :slice through transparent operators to find the effective limit.
@@ -1154,52 +1217,54 @@
       (when (and limit (pos? limit))
         limit))))
 
-(defn push-limit-down
-  "Push LIMIT hints into joins, self-joins, and BGPs for early termination.
-   Walks the plan tree and when a :slice with a positive limit wraps
-   operators that don't change cardinality (:project, :bind),
-   propagates :result-limit to the innermost target operator.
+(defn bgp-limit-safe?
+  "True when annotating this :bgp with :result-limit cannot change results.
 
-   ORDER BY handling: pushes through to joins/self-joins (heuristic truncation
-   of the left side) but NOT to BGPs. ORDER BY needs all input rows to sort
-   correctly, so truncating BGP results would return arbitrary rows sorted
-   instead of the correct top-N. A proper top-N combiner is future work."
+   find-bgp truncates quads BEFORE building bindings and deduplicating
+   (+set-agg), so the limit is sound only when distinct quads are guaranteed
+   to produce distinct bindings:
+   - the context position must be a constant or a variable; when it is nil
+     (no GRAPH clause) quads differing only by context collapse into one
+     binding, so truncating quads can under-produce results
+   - no variable may repeat across positions; repeated variables collapse
+     distinct quads into the same binding"
   [plan]
-  (letfn [(push-limit-joins-only [plan limit]
-            ;; Push limit only to join/self-join targets (used below ORDER BY,
-            ;; where truncating BGP input would break sort correctness but
-            ;; truncating join left-side is an acceptable heuristic).
+  (let [{:keys [s p o c]} (:pattern plan)
+        vars (filterv is-variable? [s p o c])]
+    (and (some? c)
+         (or (< (count vars) 2)
+             (apply distinct? vars)))))
+
+(defn push-limit-down
+  "Push LIMIT hints into operators that can terminate early without changing
+   results. Walks the plan tree and, when a :slice with a positive limit wraps
+   only cardinality-preserving operators (:project, :bind), annotates the
+   target operator with :result-limit.
+
+   Semantics-preserving targets:
+   - :bgp — only when `bgp-limit-safe?` holds (context bound or projected,
+     no repeated variables)
+   - :self-join — the executor truncates final output pairs after applying
+     the pair filter, so any N of them satisfy LIMIT-without-ORDER
+
+   Pushdown STOPS at operators where truncating input can change results:
+   - :join — the executor applies :result-limit to the join's LEFT INPUT
+     before probing; unmatched left rows would silently shrink the output
+   - :filter / :distinct — a truncated input can under-produce qualifying
+     rows; the former x4 / x2 multiplier heuristics were unsound and removed
+   - :order — ORDER BY needs all input rows to produce the correct top-N;
+     a distributed top-N combiner is future work (see
+     docs/rama-performance-opportunities.md, Priority 2)"
+  [plan]
+  (letfn [(push-limit [plan limit]
+            ;; Push limit to a semantics-preserving target operator
             (case (:op plan)
-              :join
-              (assoc plan
-                     :result-limit limit
-                     :left (push-limit-down (:left plan))
-                     :right (push-limit-down (:right plan)))
-
-              :self-join
-              (assoc plan :result-limit limit)
-
-              ;; Transparent operators: keep pushing (joins-only) through them
-              (:project :bind)
-              (update plan :sub-plan #(push-limit-joins-only % limit))
-
-              ;; For everything else (including :bgp), stop — ORDER BY needs all rows
-              (push-limit-down plan)))
-
-          (push-limit [plan limit]
-            ;; Push limit to any target operator (join, self-join, bgp)
-            (case (:op plan)
-              ;; Target operators: annotate with :result-limit
-              :join
-              (assoc plan
-                     :result-limit limit
-                     :left (push-limit-down (:left plan))
-                     :right (push-limit-down (:right plan)))
-
-              :self-join
-              (assoc plan :result-limit limit)
-
               :bgp
+              (if (bgp-limit-safe? plan)
+                (assoc plan :result-limit limit)
+                plan)
+
+              :self-join
               (assoc plan :result-limit limit)
 
               ;; Transparent operators (1:1 cardinality): push through unchanged
@@ -1209,20 +1274,9 @@
               :bind
               (update plan :sub-plan #(push-limit % limit))
 
-              ;; Cardinality-reducing operators: push through with safety multiplier
-              :distinct
-              (update plan :sub-plan #(push-limit % (* limit 2)))
-
-              :filter
-              (update plan :sub-plan #(push-limit % (* limit 4)))
-
-              ;; ORDER BY: can still push to joins (heuristic) but NOT to BGPs
-              ;; ORDER BY needs all rows to sort correctly; truncating BGP input
-              ;; would return arbitrary rows sorted, not the correct top-N.
-              :order
-              (update plan :sub-plan #(push-limit-joins-only % limit))
-
-              ;; For other operators, stop pushing but still recurse normally
+              ;; For all other operators (:join, :filter, :distinct, :order, ...)
+              ;; truncation is not semantics-preserving: stop pushing but keep
+              ;; scanning the subtree for nested slices.
               (push-limit-down plan)))
 
           (push-limit-down [plan]

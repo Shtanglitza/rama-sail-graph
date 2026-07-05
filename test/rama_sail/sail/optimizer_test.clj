@@ -5,7 +5,8 @@
             [rama-sail.sail.adapter :as sail]
             [rama-sail.sail.compilation :as comp]
             [rama-sail.sail.optimization :as opt])
-  (:import [org.eclipse.rdf4j.query.parser.sparql SPARQLParser]))
+  (:import [org.eclipse.rdf4j.query.parser.sparql SPARQLParser]
+           [org.eclipse.rdf4j.query.algebra ArbitraryLengthPath StatementPattern Var]))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Helper Functions
@@ -494,19 +495,53 @@
   [plan]
   (find-node plan #(= :bgp (:op %))))
 
-(deftest test-push-limit-to-bgp
-  (testing "LIMIT pushes :result-limit to BGP"
-    (let [query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+(deftest test-push-limit-to-context-bound-bgp
+  (testing "LIMIT pushes :result-limit to a BGP with a constant context"
+    (let [query "SELECT * WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } } LIMIT 10"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
         (is (some? bgp) "Plan should contain a BGP")
         (is (= 10 (:result-limit bgp))
-            "BGP should have :result-limit 10")))))
+            "Context-bound BGP should have :result-limit 10")))))
+
+(deftest test-push-limit-to-context-variable-bgp
+  (testing "LIMIT pushes :result-limit to a BGP with a context variable"
+    (let [query "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 10"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (= 10 (:result-limit bgp))
+            "Context-variable BGP should have :result-limit 10")))))
+
+(deftest test-no-push-limit-to-wildcard-context-bgp
+  (testing "LIMIT does NOT push to a BGP without a GRAPH clause"
+    ;; find-bgp truncates quads before dedup; quads differing only by
+    ;; context collapse to one binding, so truncation can under-produce.
+    (let [query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+          raw-plan (parse-and-plan query)
+          optimized (opt/optimize-plan raw-plan)]
+      (let [bgp (find-bgp-node optimized)]
+        (is (some? bgp) "Plan should contain a BGP")
+        (is (nil? (:result-limit bgp))
+            "Wildcard-context BGP should NOT have :result-limit")))))
+
+(deftest test-no-push-limit-to-repeated-variable-bgp
+  (testing "LIMIT does NOT push to a BGP with a repeated variable"
+    ;; Distinct quads collapse to the same binding when a variable repeats,
+    ;; so truncating quads can under-produce results.
+    (let [plan {:op :slice :offset 0 :limit 10
+                :sub-plan {:op :bgp
+                           :pattern {:s "?x" :p "<http://example.org/knows>"
+                                     :o "?x" :c "<http://example.org/g>"}}}
+          pushed (opt/push-limit-down plan)]
+      (is (nil? (:result-limit (:sub-plan pushed)))
+          "Repeated-variable BGP should NOT have :result-limit"))))
 
 (deftest test-push-limit-through-project-to-bgp
-  (testing "LIMIT pushes through PROJECT to BGP"
-    (let [query "SELECT ?s WHERE { ?s ?p ?o } LIMIT 10"
+  (testing "LIMIT pushes through PROJECT to a safe BGP"
+    (let [query "SELECT ?s WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } } LIMIT 10"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
@@ -524,11 +559,10 @@
         (is (nil? (:result-limit bgp))
             "BGP below ORDER BY should NOT have :result-limit")))))
 
-(deftest test-push-limit-through-order-to-join
-  (testing "LIMIT still pushes through ORDER BY to join (heuristic)"
-    ;; ORDER BY blocks pushdown to BGP (would break sort correctness)
-    ;; but allows it to join/self-join (left-side truncation heuristic).
-    ;; Plan shape: slice → project → order → join(bgp, bgp)
+(deftest test-no-push-limit-through-order-to-join
+  (testing "LIMIT does NOT push through ORDER BY to join-type operators"
+    ;; ORDER BY needs all input rows to produce the correct top-N; the old
+    ;; left-side truncation heuristic returned wrong results and was removed.
     (let [query (str prefixes "
                  SELECT ?product ?label
                  WHERE {
@@ -537,21 +571,45 @@
                  } ORDER BY ?label LIMIT 10")
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
-      ;; The join (or batch-enrich) below ORDER BY should get :result-limit
       (let [join-node (find-node optimized #(#{:join :batch-enrich :self-join} (:op %)))]
         (is (some? join-node) "Plan should contain a join-type operator")
-        (when (= :join (:op join-node))
-          (is (some? (:result-limit join-node))
-              "Join below ORDER BY should still get :result-limit (heuristic)")))
-      ;; But BGP nodes should NOT get :result-limit
+        (is (nil? (:result-limit join-node))
+            "Join-type operator below ORDER BY should NOT get :result-limit"))
       (let [bgp (find-bgp-node optimized)]
         (when bgp
           (is (nil? (:result-limit bgp))
               "BGP below ORDER BY should NOT get :result-limit"))))))
 
+(deftest test-no-push-limit-to-join
+  (testing "LIMIT does NOT annotate a :join even without ORDER BY"
+    ;; The join executor applies :result-limit to its LEFT INPUT before
+    ;; probing, so unmatched left rows would silently shrink the output.
+    (let [bgp-a {:op :bgp :pattern {:s "?s" :p "<http://example.org/a>" :o "?x" :c nil}}
+          bgp-b {:op :bgp :pattern {:s "?x" :p "<http://example.org/b>" :o "?y" :c nil}}
+          plan {:op :slice :offset 0 :limit 10
+                :sub-plan {:op :join :left bgp-a :right bgp-b :join-vars ["?x"]}}
+          pushed (opt/push-limit-down plan)]
+      (is (nil? (:result-limit (:sub-plan pushed)))
+          "Join should NOT have :result-limit"))))
+
+(deftest test-push-limit-to-self-join
+  (testing "LIMIT pushes to :self-join (output-level truncation is exact)"
+    ;; The self-join executor truncates final output pairs after applying
+    ;; the pair filter, so any N of them satisfy LIMIT-without-ORDER.
+    (let [self-join {:op :self-join
+                     :predicate "<http://example.org/p>"
+                     :join-var "?x"
+                     :left-subject "?a"
+                     :right-subject "?b"
+                     :filter {:op :lt :left "?a" :right "?b"}}
+          plan {:op :slice :offset 0 :limit 10 :sub-plan self-join}
+          pushed (opt/push-limit-down plan)]
+      (is (= 10 (:result-limit (:sub-plan pushed)))
+          "Self-join should have :result-limit 10"))))
+
 (deftest test-push-limit-through-bind
-  (testing "LIMIT pushes through BIND to BGP"
-    (let [query "SELECT * WHERE { ?s ?p ?o . BIND(?s AS ?x) } LIMIT 10"
+  (testing "LIMIT pushes through BIND to a safe BGP"
+    (let [query "SELECT * WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } BIND(?s AS ?x) } LIMIT 10"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
@@ -561,7 +619,7 @@
 
 (deftest test-push-limit-accounts-for-offset
   (testing "LIMIT accounts for OFFSET when pushing down"
-    (let [query "SELECT * WHERE { ?s ?p ?o } LIMIT 10 OFFSET 5"
+    (let [query "SELECT * WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } } LIMIT 10 OFFSET 5"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
@@ -569,26 +627,147 @@
         (is (= 15 (:result-limit bgp))
             "BGP should have :result-limit = limit + offset = 15")))))
 
-(deftest test-push-limit-through-distinct-doubles
-  (testing "LIMIT doubles when pushing through DISTINCT"
-    (let [query "SELECT DISTINCT ?s WHERE { ?s ?p ?o } LIMIT 10"
+(deftest test-no-push-limit-through-distinct
+  (testing "LIMIT does NOT push through DISTINCT"
+    ;; A truncated input can under-produce distinct rows; the old x2
+    ;; multiplier heuristic was unsound and was removed.
+    (let [query "SELECT DISTINCT ?s WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } } LIMIT 10"
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
         (is (some? bgp) "Plan should contain a BGP")
-        (is (= 20 (:result-limit bgp))
-            "BGP below DISTINCT should have :result-limit doubled to 20")))))
+        (is (nil? (:result-limit bgp))
+            "BGP below DISTINCT should NOT have :result-limit")))))
 
-(deftest test-push-limit-through-filter-multiplies
-  (testing "LIMIT multiplies by 4 when pushing through FILTER"
+(deftest test-no-push-limit-through-filter
+  (testing "LIMIT does NOT push through FILTER"
+    ;; A truncated input can under-produce qualifying rows; the old x4
+    ;; multiplier heuristic was unsound and was removed.
     (let [query (str prefixes "
-                 SELECT * WHERE { ?s ?p ?o . FILTER(?o = \"test\") } LIMIT 10")
+                 SELECT * WHERE { GRAPH <http://example.org/g> { ?s ?p ?o . FILTER(?o = \"test\") } } LIMIT 10")
           raw-plan (parse-and-plan query)
           optimized (opt/optimize-plan raw-plan)]
       (let [bgp (find-bgp-node optimized)]
         (is (some? bgp) "Plan should contain a BGP")
-        (is (= 40 (:result-limit bgp))
-            "BGP below FILTER should have :result-limit multiplied by 4 to 40")))))
+        (is (nil? (:result-limit bgp))
+            "BGP below FILTER should NOT have :result-limit")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Phase 1 correctness fixes
+;;; ---------------------------------------------------------------------------
+
+(deftest test-repeated-variable-pattern-rewrite
+  (testing "a StatementPattern with a repeated var compiles to distinct vars + sameTerm filter"
+    ;; The SPARQL parser pre-renames repeated variables itself, but the
+    ;; compiler is a public API that accepts arbitrary algebra. find-bgp
+    ;; builds bindings by successive assoc, so a repeated variable reaching
+    ;; it would be overwritten (?x <knows> ?x would match EVERY <knows> triple).
+    (let [sp (StatementPattern. (Var. "x") (Var. "p") (Var. "x"))
+          plan (comp/tuple-expr->plan sp)
+          bgp (find-bgp-node plan)
+          pattern (:pattern bgp)]
+      (is (some? bgp) "Plan should contain a BGP")
+      (is (not= (:s pattern) (:o pattern))
+          "Subject and object positions must hold distinct variables")
+      (is (= :filter (:op plan))
+          "An equality filter must constrain the renamed variable")
+      (is (= :same-term (get-in plan [:expr :type]))
+          "The equality must be sameTerm (exact term equality)")
+      (is (= "?x" (get-in plan [:expr :left :name]))
+          "Filter compares the original variable to the renamed one"))))
+
+(deftest test-repeated-variable-property-path-throws
+  (testing "an ArbitraryLengthPath with subject var = object var falls back"
+    ;; Unreachable via the SPARQL parser (it pre-renames), but the path
+    ;; executor's binding construction cannot express the equality constraint.
+    (let [x (Var. "x")
+          step (StatementPattern. (Var. "x") (Var. "p") (Var. "x2"))
+          alp (ArbitraryLengthPath. x step (Var. "x") 1)]
+      (is (thrown? UnsupportedOperationException
+                   (comp/tuple-expr->plan alp))))))
+
+(deftest test-parsed-repeated-variable-query-is-safe
+  (testing "parsed ?x <knows> ?x yields a sameTerm-filtered plan end to end"
+    ;; Documents the combined parser + compiler behavior: whether the parser
+    ;; or the compiler does the renaming, the final plan must constrain both
+    ;; positions to the same term.
+    (let [plan (parse-and-plan "SELECT ?x WHERE { ?x <http://ex/knows> ?x }")
+          bgp (find-bgp-node plan)
+          pattern (:pattern bgp)
+          filter-node (find-node plan #(= :filter (:op %)))]
+      (is (some? bgp))
+      (is (not= (:s pattern) (:o pattern)))
+      (is (= :same-term (get-in filter-node [:expr :type]))))))
+
+(deftest test-function-call-throws
+  (testing "SPARQL function calls throw so the RDF4J fallback engages"
+    ;; Compiling them used to succeed while the evaluator silently returned
+    ;; unbound — wrong results instead of a correct fallback evaluation.
+    (is (thrown? UnsupportedOperationException
+                 (parse-and-plan
+                  "SELECT ?s WHERE { ?s ?p ?o . FILTER(CONTAINS(?o, \"x\")) }")))
+    (is (thrown? UnsupportedOperationException
+                 (parse-and-plan
+                  "SELECT ?s WHERE { ?s ?p ?o . FILTER(STRLEN(?o) > 3) }")))))
+
+(deftest test-join-vars-exclude-possibly-unbound
+  (testing "join vars come from assured binding names, not possible ones"
+    ;; ?y is only bound when the OPTIONAL matches; hashing on it would drop
+    ;; or mis-handle rows where it is unbound.
+    (let [plan (parse-and-plan
+                "SELECT * WHERE {
+                   { ?s <http://ex/p> ?x OPTIONAL { ?s <http://ex/q> ?y } }
+                   ?z <http://ex/r> ?y .
+                 }")
+          join (find-node plan #(and (= :join (:op %))
+                                     (contains-op? % :left-join)))]
+      (is (some? join) "Plan should contain the outer join")
+      (is (not (some #{"?y"} (:join-vars join)))
+          "?y is only possibly bound and must not be a hash-join key"))))
+
+(deftest test-filter-not-incorporated-through-union
+  (testing "self-join filter incorporation must not cross a UNION boundary"
+    ;; Moving the filter into one union branch silently drops it for the other.
+    (let [self-join {:op :self-join :predicate "<http://ex/p>" :join-var "?o"
+                     :left-subject "?a" :right-subject "?b"}
+          other-bgp {:op :bgp :pattern {:s "?a" :p "<http://ex/q>" :o "?b" :c nil}}
+          ineq {:type :cmp :op :lt
+                :left {:type :var :name "?a"}
+                :right {:type :var :name "?b"}}
+          incorporate @#'opt/incorporate-filter-into-self-join]
+      (is (nil? (incorporate {:op :filter :expr ineq
+                              :sub-plan {:op :union :left self-join :right other-bgp}}))
+          "No incorporation through :union")
+      (is (nil? (incorporate {:op :filter :expr ineq
+                              :sub-plan {:op :left-join :left other-bgp :right self-join
+                                         :join-vars ["?a"]}}))
+          "No incorporation through :left-join")
+      (is (nil? (incorporate {:op :filter :expr ineq
+                              :sub-plan {:op :slice :offset 0 :limit 10
+                                         :sub-plan self-join}}))
+          "No incorporation through :slice")
+      (is (some? (incorporate {:op :filter :expr ineq :sub-plan self-join}))
+          "Direct incorporation still works"))))
+
+(deftest test-greedy-join-order-above-dp-limit
+  (testing "chains above the DP limit use greedy ordering and stay left-deep"
+    (let [bgps (mapv (fn [i]
+                       {:op :bgp
+                        :pattern {:s (str "?v" i)
+                                  :p (str "<http://ex/p" i ">")
+                                  :o (str "?v" (inc i))
+                                  :c nil}})
+                     (range 14))
+          greedy @#'opt/greedy-join-order
+          result (greedy bgps)]
+      (is (= :join (:op result)) "Result is a join tree")
+      (is (= 13 (count-ops result :join)) "All 14 relations joined"))))
+
+(deftest test-unknown-expr-type-blocks-filter-pushdown
+  (testing "an unknown expression type reports the poison sentinel"
+    (let [vars (opt/extract-expr-vars {:type :some-future-expr})]
+      (is (contains? vars :rama-sail.sail.optimization/unknown-vars)
+          "Unknown expr types must not report 'no variables'"))))
 
 (comment
   ;; Run tests from REPL
