@@ -81,12 +81,10 @@
    "_:looks-like-a-bnode"
    "<< <s> <p> <o> >>"                      ;; looks like an RDF-star triple term
    "  surrounding whitespace  "
-   ;; KNOWN BUG: a label containing the NUL character U+0000 (e.g. "null<NUL>char")
-   ;; does NOT round-trip. serialization/unescape-str uses U+0000 as its internal
-   ;; placeholder while unescaping: it first rewrites "\\\\" -> U+0000 and finally
-   ;; U+0000 -> "\\", so any REAL U+0000 in a stored label is corrupted into a
-   ;; backslash on parse ("null<NUL>char" -> "null\\char"). escape-str never
-   ;; escapes U+0000, so the round-trip is lossy. Excluded from the pools here.
+   ;; A label containing the NUL character U+0000 now round-trips: unescape-str
+   ;; scans in a single pass instead of using U+0000 as an internal placeholder,
+   ;; so a real NUL is preserved rather than corrupted into a backslash on parse.
+   ;; (Directly covered by test-nul-character-roundtrip.)
    "combining é (é)"])
 
 (def ^:private language-tags
@@ -146,34 +144,14 @@
 
 (defn- gen-triple-term
   "RDF-star triple value. Subject is a Resource (IRI/BNode), predicate an IRI,
-   object any simple value.
-
-   ;; KNOWN BUG: parse-triple-term-parts scans nested `<< ... >>` terms
-   ;; character-by-character without skipping over string literals, so a
-   ;; literal whose label contains \">>\" or \"<<\" INSIDE a nested (depth>=2)
-   ;; triple term corrupts the depth counter and the round-trip fails, e.g.
-   ;;   (.createTriple VF s p (.createTriple VF s2 p2 (literal \"<< <s> <p> <o> >>\")))
-   ;; Top-level triple terms are unaffected (the outer \"<< \"/\" >>\" are
-   ;; stripped positionally). Such object literals are therefore excluded from
-   ;; NESTED triple generation below (see gen-nested-safe-value)."
+   object any simple value — including nested triple terms and literals whose
+   labels contain '<<' or '>>', which now round-trip after parse-triple-term-parts
+   was fixed to skip string literals when scanning for the closing '>>'."
   ^Value [^Random rnd object-gen]
   (.createTriple VF
                  (if (zero? (.nextInt rnd 2)) (gen-iri rnd) (gen-bnode rnd))
                  (gen-iri rnd)
                  ^Value (object-gen rnd)))
-
-(defn- gen-nested-safe-value
-  "Like gen-simple-value but avoids literals containing '<<' or '>>' — see the
-   KNOWN BUG note on gen-triple-term."
-  ^Value [^Random rnd]
-  (loop []
-    (let [v (gen-simple-value rnd)]
-      (if (and (instance? org.eclipse.rdf4j.model.Literal v)
-               (let [label (.getLabel ^org.eclipse.rdf4j.model.Literal v)]
-                 (or (.contains ^String label "<<")
-                     (.contains ^String label ">>"))))
-        (recur)
-        v))))
 
 (defn- gen-value ^Value [^Random rnd]
   (let [n (.nextInt rnd 12)]
@@ -184,10 +162,12 @@
       (< n 8) (gen-typed-literal rnd)
       (< n 10) (gen-bnode rnd)
       (= n 10) (gen-triple-term rnd gen-simple-value)
-      ;; nested triple-in-triple (object is itself a triple term)
+      ;; nested triple-in-triple (object is itself a triple term). Uses the
+      ;; unrestricted generator now that nested literals containing "<<"/">>"
+      ;; round-trip (parse-triple-term-parts skips string literals).
       :else (gen-triple-term rnd
                              (fn [^Random r]
-                               (gen-triple-term r gen-nested-safe-value))))))
+                               (gen-triple-term r gen-simple-value))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Round-trip assertions
@@ -270,3 +250,38 @@
               (str "canonicalization not stable for: " (pr-str (str v))
                    "\n  first serialization:  " (pr-str s)
                    "\n  second serialization: " (pr-str (val->str v')))))))))
+
+(deftest test-nul-character-roundtrip
+  ;; Regression: unescape-str used U+0000 as an internal placeholder, corrupting
+  ;; any real NUL in a label into a backslash. The single-pass scanner preserves it.
+  (testing "a literal label containing U+0000 round-trips"
+    (assert-roundtrip! (.createLiteral VF ^String (str "null" (char 0) "char")))
+    (assert-roundtrip! (.createLiteral VF ^String (str (char 0))))
+    (assert-roundtrip! (.createLiteral VF ^String (str "a" (char 0) "b") "en"))
+    (assert-roundtrip! (.createLiteral VF ^String (str "x" (char 0) "y")
+                                       (.createIRI VF "http://ex/dt")))))
+
+(deftest test-nested-triple-term-with-delimiter-literal-roundtrip
+  ;; Regression: parse-triple-term-parts scanned nested << >> without skipping
+  ;; string literals, so a nested literal containing >> or << threw
+  ;; StringIndexOutOfBounds. The end-finder now skips literals.
+  (testing "a nested triple whose inner literal contains << or >> round-trips"
+    (let [inner (.createTriple VF
+                               (.createIRI VF "http://ex/s2")
+                               (.createIRI VF "http://ex/p2")
+                               (.createLiteral VF "has << and >> inside"))
+          outer (.createTriple VF
+                               (.createIRI VF "http://ex/s1")
+                               (.createIRI VF "http://ex/p1")
+                               inner)]
+      (assert-roundtrip! outer)))
+  (testing "a nested literal that looks exactly like a triple term round-trips"
+    (let [inner (.createTriple VF
+                               (.createIRI VF "http://ex/s2")
+                               (.createIRI VF "http://ex/p2")
+                               (.createLiteral VF "<< <s> <p> <o> >>"))
+          outer (.createTriple VF
+                               (.createBNode VF "outer")
+                               (.createIRI VF "http://ex/p1")
+                               inner)]
+      (assert-roundtrip! outer))))
