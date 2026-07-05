@@ -15,6 +15,13 @@
   [n]
   (max 0 (dec (or n 0))))
 
+(defn inc-or-init
+  "Increment a possibly-nil counter (nil counts as 0). Used with termval to
+   write a counter whose previous value was already read by a local-select> —
+   (term inc) would re-read from RocksDB a value we already hold."
+  [n]
+  (inc (or n 0)))
+
 (defn new-subject?
   "True when a quad becoming visible belongs to a subject with no prior triples."
   [becoming-visible subj-existed]
@@ -44,13 +51,13 @@
 
 		;; Case B: k4 is wildcard (Find all C for specific S,P,O)
    (case> (and> *k2 *k3 (nil? *k4)))
-   (local-select> [(keypath *k1 *k2 *k3) ALL] *pstate :> *out4)
+   (local-select> [(keypath *k1 *k2 *k3) ALL] *pstate {:allow-yield? true} :> *out4)
    (:> *k1 *k2 *k3 *out4)
 
 		;; Case C: k3, k4 are wildcards (Find all O,C for specific S,P)
    (case> (and> *k2 (nil? *k3) (nil? *k4)))
    (local-select>
-    [*k1 *k2 ALL (collect-one FIRST) LAST ALL] *pstate
+    [*k1 *k2 ALL (collect-one FIRST) LAST ALL] *pstate {:allow-yield? true}
     :> [*out3 *out4])
    (:> *k1 *k2 *out3 *out4)
 
@@ -58,7 +65,7 @@
    (case> (and> (nil? *k2) *k3 *k4))
    (local-select>
     [(keypath *k1) ALL
-     (selected? LAST *k3 ALL (pred= *k4)) FIRST] *pstate
+     (selected? LAST *k3 ALL (pred= *k4)) FIRST] *pstate {:allow-yield? true}
     :> *out2)
    (:> *k1 *out2 *k3 *k4)
 
@@ -66,14 +73,14 @@
    (case> (and> *k2 (nil? *k3) *k4))
    (local-select>
     [(keypath *k1 *k2) ALL
-     (selected? LAST ALL (pred= *k4)) FIRST] *pstate
+     (selected? LAST ALL (pred= *k4)) FIRST] *pstate {:allow-yield? true}
     :> *out3)
    (:> *k1 *k2 *out3 *k4)
 
 		; Case C3: k2 and k4 are wildcards, k3 known (Find all P for specific S,O)
    (case> (and> (nil? *k2) *k3 (nil? *k4)))
    (local-select>
-    [(keypath *k1) ALL (collect-one FIRST) LAST (keypath *k3) ALL] *pstate
+    [(keypath *k1) ALL (collect-one FIRST) LAST (keypath *k3) ALL] *pstate {:allow-yield? true}
     :> [*out2 *out4])
    (:> *k1 *out2 *k3 *out4)
 
@@ -81,7 +88,7 @@
    (case> (and> (nil? *k2) (nil? *k3) *k4))
    (local-select>
     [(keypath *k1) ALL
-     (collect-one FIRST) LAST ALL (selected? LAST ALL #{*k4}) FIRST] *pstate
+     (collect-one FIRST) LAST ALL (selected? LAST ALL #{*k4}) FIRST] *pstate {:allow-yield? true}
     :> [*out2 *out3])
    (:> *k1 *out2 *out3 *k4)
 
@@ -89,7 +96,7 @@
    (default>)
    (local-select>
     [(keypath *k1) ALL
-     (collect-one FIRST) LAST ALL (collect-one FIRST) LAST ALL] *pstate
+     (collect-one FIRST) LAST ALL (collect-one FIRST) LAST ALL] *pstate {:allow-yield? true}
     :> [*out2 *out3 *out4])
    (:> *k1 *out2 *out3 *out4)))
 
@@ -184,17 +191,21 @@
                      (|hash *p)
                      (local-select> [(keypath *p :count)] $$predicate-stats :> *prev-pred-count)
                      (nil-or-zero? *prev-pred-count :> *new-predicate)
-                     (local-transform> [(keypath *p :count) (nil->val 0) (term inc)] $$predicate-stats)
+                     ;; termval: value already read above — (term inc) would re-read
+                     (inc-or-init *prev-pred-count :> *next-pred-count)
+                     (local-transform> [(keypath *p :count) (termval *next-pred-count)] $$predicate-stats)
 
                      ;; Track distinct subjects: increment only when first triple for (pred, subject)
                      (local-select> [(keypath *p *s)] $$pred-subj-count :> *prev-subj-count)
-                     (local-transform> [(keypath *p *s) (nil->val 0) (term inc)] $$pred-subj-count)
+                     (inc-or-init *prev-subj-count :> *next-subj-count)
+                     (local-transform> [(keypath *p *s) (termval *next-subj-count)] $$pred-subj-count)
                      (<<if (nil? *prev-subj-count)
                            (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term inc)] $$predicate-stats))
 
                      ;; Track distinct objects: increment only when first triple for (pred, object)
                      (local-select> [(keypath *p *o)] $$pred-obj-count :> *prev-obj-count)
-                     (local-transform> [(keypath *p *o) (nil->val 0) (term inc)] $$pred-obj-count)
+                     (inc-or-init *prev-obj-count :> *next-obj-count)
+                     (local-transform> [(keypath *p *o) (termval *next-obj-count)] $$pred-obj-count)
                      (<<if (nil? *prev-obj-count)
                            (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term inc)] $$predicate-stats))
 
@@ -213,14 +224,16 @@
                            ;; Track type->subject occurrence count
                            (|hash *o)
                            (local-select> [(keypath *o *s)] $$type-subject-count :> *prev-ts-count)
-                           (local-transform> [(keypath *o *s) (nil->val 0) (term inc)] $$type-subject-count)
+                           (inc-or-init *prev-ts-count :> *next-ts-count)
+                           (local-transform> [(keypath *o *s) (termval *next-ts-count)] $$type-subject-count)
                            ;; Only add to type view if this is the FIRST occurrence
                            (<<if (nil? *prev-ts-count)
                                  (local-transform> [(keypath *o) NIL->SET NONE-ELEM (termval *s)] $$type-subjects))
                            ;; Track subject->type occurrence count (symmetric)
                            (|hash *s)
                            (local-select> [(keypath *s *o)] $$subject-type-count :> *prev-st-count)
-                           (local-transform> [(keypath *s *o) (nil->val 0) (term inc)] $$subject-type-count)
+                           (inc-or-init *prev-st-count :> *next-st-count)
+                           (local-transform> [(keypath *s *o) (termval *next-st-count)] $$subject-type-count)
                            ;; Only add to subject-types view if this is the FIRST occurrence
                            (<<if (nil? *prev-st-count)
                                  (local-transform> [(keypath *s) NIL->SET NONE-ELEM (termval *o)] $$subject-types))))
@@ -276,11 +289,14 @@
                      (|hash *p)
                      (local-select> [(keypath *p :count)] $$predicate-stats :> *cur-pred-count)
                      (identity (= *cur-pred-count 1) :> *pred-vanished)
-                     (local-transform> [(keypath *p :count) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
+                     ;; termval: value already read above — (term ...) would re-read
+                     (dec-floor-zero *cur-pred-count :> *next-pred-count)
+                     (local-transform> [(keypath *p :count) (termval *next-pred-count)] $$predicate-stats)
 
                      ;; Decrement distinct subjects only when last triple for (pred, subject) removed
                      (local-select> [(keypath *p *s)] $$pred-subj-count :> *cur-subj-count)
-                     (local-transform> [(keypath *p *s) (nil->val 0) (term dec-floor-zero)] $$pred-subj-count)
+                     (dec-floor-zero *cur-subj-count :> *next-subj-count)
+                     (local-transform> [(keypath *p *s) (termval *next-subj-count)] $$pred-subj-count)
                      (<<if (= *cur-subj-count 1)
                            ;; Last occurrence - decrement distinct count AND cleanup the mapping
                            (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
@@ -288,7 +304,8 @@
 
                      ;; Decrement distinct objects only when last triple for (pred, object) removed
                      (local-select> [(keypath *p *o)] $$pred-obj-count :> *cur-obj-count)
-                     (local-transform> [(keypath *p *o) (nil->val 0) (term dec-floor-zero)] $$pred-obj-count)
+                     (dec-floor-zero *cur-obj-count :> *next-obj-count)
+                     (local-transform> [(keypath *p *o) (termval *next-obj-count)] $$pred-obj-count)
                      (<<if (= *cur-obj-count 1)
                            ;; Last occurrence - decrement distinct count AND cleanup the mapping
                            (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
@@ -310,7 +327,8 @@
                            ;; Decrement type->subject occurrence count
                            (|hash *o)
                            (local-select> [(keypath *o *s)] $$type-subject-count :> *cur-ts-count)
-                           (local-transform> [(keypath *o *s) (nil->val 0) (term dec-floor-zero)] $$type-subject-count)
+                           (dec-floor-zero *cur-ts-count :> *next-ts-count)
+                           (local-transform> [(keypath *o *s) (termval *next-ts-count)] $$type-subject-count)
                            ;; Only remove from type view if this was the LAST occurrence
                            (<<if (= *cur-ts-count 1)
                                  (local-transform> [(keypath *o) (set-elem *s) NONE>] $$type-subjects)
@@ -319,7 +337,8 @@
                            ;; Decrement subject->type occurrence count (symmetric)
                            (|hash *s)
                            (local-select> [(keypath *s *o)] $$subject-type-count :> *cur-st-count)
-                           (local-transform> [(keypath *s *o) (nil->val 0) (term dec-floor-zero)] $$subject-type-count)
+                           (dec-floor-zero *cur-st-count :> *next-st-count)
+                           (local-transform> [(keypath *s *o) (termval *next-st-count)] $$subject-type-count)
                            ;; Only remove from subject-types view if this was the LAST occurrence
                            (<<if (= *cur-st-count 1)
                                  (local-transform> [(keypath *s) (set-elem *o) NONE>] $$subject-types)
@@ -332,7 +351,8 @@
                ;; 1. Read all (S, P, O) from $$cspo[c]
                (local-select> [(keypath *c) ALL (collect-one FIRST)
                                LAST ALL (collect-one FIRST)
-                               LAST ALL] $$cspo :> [*s *p *o])
+                               LAST ALL] $$cspo {:allow-yield? true}
+                              :> [*s *p *o])
                ;; 2. Check existing state
                (|hash *s)
                (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *quad-creation-time)
@@ -375,11 +395,14 @@
                      (|hash *p)
                      (local-select> [(keypath *p :count)] $$predicate-stats :> *cur-pred-count)
                      (identity (= *cur-pred-count 1) :> *pred-vanished)
-                     (local-transform> [(keypath *p :count) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
+                     ;; termval: value already read above — (term ...) would re-read
+                     (dec-floor-zero *cur-pred-count :> *next-pred-count)
+                     (local-transform> [(keypath *p :count) (termval *next-pred-count)] $$predicate-stats)
 
                      ;; Decrement distinct subjects only when last triple for (pred, subject) removed
                      (local-select> [(keypath *p *s)] $$pred-subj-count :> *cur-subj-count)
-                     (local-transform> [(keypath *p *s) (nil->val 0) (term dec-floor-zero)] $$pred-subj-count)
+                     (dec-floor-zero *cur-subj-count :> *next-subj-count)
+                     (local-transform> [(keypath *p *s) (termval *next-subj-count)] $$pred-subj-count)
                      (<<if (= *cur-subj-count 1)
                            ;; Last occurrence - decrement distinct count AND cleanup the mapping
                            (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
@@ -387,7 +410,8 @@
 
                      ;; Decrement distinct objects only when last triple for (pred, object) removed
                      (local-select> [(keypath *p *o)] $$pred-obj-count :> *cur-obj-count)
-                     (local-transform> [(keypath *p *o) (nil->val 0) (term dec-floor-zero)] $$pred-obj-count)
+                     (dec-floor-zero *cur-obj-count :> *next-obj-count)
+                     (local-transform> [(keypath *p *o) (termval *next-obj-count)] $$pred-obj-count)
                      (<<if (= *cur-obj-count 1)
                            ;; Last occurrence - decrement distinct count AND cleanup the mapping
                            (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
@@ -404,7 +428,8 @@
                            ;; Decrement type->subject occurrence count
                            (|hash *o)
                            (local-select> [(keypath *o *s)] $$type-subject-count :> *cur-ts-count)
-                           (local-transform> [(keypath *o *s) (nil->val 0) (term dec-floor-zero)] $$type-subject-count)
+                           (dec-floor-zero *cur-ts-count :> *next-ts-count)
+                           (local-transform> [(keypath *o *s) (termval *next-ts-count)] $$type-subject-count)
                            ;; Only remove from type view if this was the LAST occurrence
                            (<<if (= *cur-ts-count 1)
                                  (local-transform> [(keypath *o) (set-elem *s) NONE>] $$type-subjects)
@@ -413,7 +438,8 @@
                            ;; Decrement subject->type occurrence count (symmetric)
                            (|hash *s)
                            (local-select> [(keypath *s *o)] $$subject-type-count :> *cur-st-count)
-                           (local-transform> [(keypath *s *o) (nil->val 0) (term dec-floor-zero)] $$subject-type-count)
+                           (dec-floor-zero *cur-st-count :> *next-st-count)
+                           (local-transform> [(keypath *s *o) (termval *next-st-count)] $$subject-type-count)
                            ;; Only remove from subject-types view if this was the LAST occurrence
                            (<<if (= *cur-st-count 1)
                                  (local-transform> [(keypath *s) (set-elem *o) NONE>] $$subject-types)

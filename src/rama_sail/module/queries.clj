@@ -36,13 +36,17 @@
 
                      (default>)
                      (|all)
+                     ;; Full-partition scan: allow-yield so the traversal
+                     ;; suspends periodically instead of blocking the
+                     ;; single-threaded task for its whole duration
                      (local-select> [ALL
                                      (collect-one FIRST)
                                      LAST ALL
                                      (collect-one FIRST)
                                      LAST ALL
                                      (collect-one FIRST)
-                                     LAST ALL] $$spoc :> [*f-s *f-p *f-o *f-c]))
+                                     LAST ALL] $$spoc {:allow-yield? true}
+                                    :> [*f-s *f-p *f-o *f-c]))
                     (vector *f-s *f-p *f-o *f-c :> *quad)
                     (|origin)
                     (aggs/+vec-agg *quad :> *quads)))
@@ -128,7 +132,8 @@
 
                     (ops/explode *subjects :> *subj)
                     (|hash *subj)
-                    (local-select> [(keypath *subj *predicate) ALL (collect-one FIRST) LAST ALL] $$spoc :> [*obj *ctx])
+                    (local-select> [(keypath *subj *predicate) ALL (collect-one FIRST) LAST ALL]
+                                   $$spoc {:allow-yield? true} :> [*obj *ctx])
                     (filter> (some? *obj))
                     (<<if (some? *context)
                           (filter> (= *ctx *context))
@@ -144,7 +149,7 @@
   (<<query-topology topologies "colocated-subject-join"
                     [*left-pattern *right-pattern *subject-var :> *results]
                     (|all)
-                    (local-select> [ALL] $$spoc :> *entry)
+                    (local-select> [ALL] $$spoc {:allow-yield? true} :> *entry)
                     (key *entry :> *subj)
                     (val *entry :> *pred-map)
                     (qh/join-subject-locally *left-pattern *right-pattern *subj *pred-map :> *subj-results)
@@ -288,7 +293,8 @@
                     (local-select> [ALL (collect-one FIRST)
                                     LAST ALL (collect-one FIRST)
                                     LAST ALL (collect-one FIRST)
-                                    LAST ALL] $$cspo :> [*ctx *s *p *o])
+                                    LAST ALL] $$cspo {:allow-yield? true}
+                                   :> [*ctx *s *p *o])
                     (|origin)
                     (aggs/+set-agg *ctx :> *contexts)))
 
@@ -301,11 +307,13 @@
                           (local-select> [ALL (collect-one FIRST)
                                           LAST ALL (collect-one FIRST)
                                           LAST ALL (collect-one FIRST)
-                                          LAST ALL] $$spoc :> [*s *p *o *c])
+                                          LAST ALL] $$spoc {:allow-yield? true}
+                                         :> [*s *p *o *c])
                           (else>)
                           (local-select> [(keypath *context) ALL (collect-one FIRST)
                                           LAST ALL (collect-one FIRST)
-                                          LAST ALL] $$cspo :> [*s *p *o])
+                                          LAST ALL] $$cspo {:allow-yield? true}
+                                         :> [*s *p *o])
                           (identity *context :> *c))
                     (|origin)
                     (aggs/+count :> *count)))
@@ -321,7 +329,7 @@
 (defn get-all-predicate-stats-query-topology [topologies]
   (<<query-topology topologies "get-all-predicate-stats" [:> *all-stats]
                     (|all)
-                    (local-select> [ALL] $$predicate-stats :> *entry)
+                    (local-select> [ALL] $$predicate-stats {:allow-yield? true} :> *entry)
                     (|origin)
                     (aggs/+map-agg (first *entry) (second *entry) :> *all-stats)))
 
