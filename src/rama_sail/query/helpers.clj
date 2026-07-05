@@ -1,7 +1,8 @@
 (ns ^:no-doc rama-sail.query.helpers
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [rama-sail.query.expr :refer [eval-expr parse-numeric evaluate-filter-cond]]))
+            [rama-sail.query.expr :refer [eval-expr term-numeric-value error?
+                                          evaluate-filter-cond]]))
 
 ;; RDF type predicate IRI - used for materialized view maintenance
 (def RDF-TYPE-PREDICATE "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>")
@@ -408,11 +409,13 @@
    mutually comparable. For DESC both rank and value are inverted."
   [row order-specs]
   (mapv (fn [{:keys [expr ascending]}]
-          (let [raw (eval-expr expr row)
-                parsed (when (and (string? raw)
-                                  (not (str/starts-with? raw "<"))
-                                  (not (str/starts-with? raw "_:")))
-                         (parse-numeric raw))]
+          (let [raw* (eval-expr expr row)
+                ;; an evaluation error orders like unbound
+                raw (when-not (error? raw*) raw*)
+                parsed (when (string? raw)
+                         ;; datatype-aware numeric value; coerce to double —
+                         ;; ordering does not need exact arithmetic
+                         (some-> (term-numeric-value raw) double))]
             (cond
               ;; nil: use category to control null ordering
               (nil? raw)

@@ -36,10 +36,12 @@
 (deftest test-init-agg-state
   (testing "Initialize aggregate states"
     (is (= 0 (init-agg-state :count)))
-    (is (= 0.0 (init-agg-state :sum)))
+    ;; SUM/AVG accumulate exactly (integer/decimal tower), so the identity
+    ;; is integer 0, promoting only when a double value arrives
+    (is (= 0 (init-agg-state :sum)))
     (is (nil? (init-agg-state :min)))
     (is (nil? (init-agg-state :max)))
-    (is (= [0.0 0] (init-agg-state :avg)))))
+    (is (= [0 0] (init-agg-state :avg)))))
 
 (deftest test-update-agg-state
   (testing "Update COUNT state"
@@ -85,15 +87,24 @@
   (testing "Merge SUM states"
     (is (= 30.0 (merge-agg-states :sum 10.0 20.0))))
 
-  (testing "Merge MIN states"
-    (is (= "\"5\"" (merge-agg-states :min "\"5\"" "\"10\"")))
-    (is (= "\"5\"" (merge-agg-states :min "\"10\"" "\"5\"")))
-    (is (= "\"5\"" (merge-agg-states :min nil "\"5\"")))
-    (is (= "\"5\"" (merge-agg-states :min "\"5\"" nil))))
+  (testing "Merge MIN states (typed integers compare numerically)"
+    (let [five "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+          ten "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+      (is (= five (merge-agg-states :min five ten)))
+      (is (= five (merge-agg-states :min ten five)))
+      (is (= five (merge-agg-states :min nil five)))
+      (is (= five (merge-agg-states :min five nil)))))
 
-  (testing "Merge MAX states"
-    (is (= "\"10\"" (merge-agg-states :max "\"5\"" "\"10\"")))
-    (is (= "\"10\"" (merge-agg-states :max "\"10\"" "\"5\""))))
+  (testing "Merge MAX states (typed integers compare numerically)"
+    (let [five "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+          ten "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+      (is (= ten (merge-agg-states :max five ten)))
+      (is (= ten (merge-agg-states :max ten five)))))
+
+  (testing "Plain (untyped) literals compare as strings per SPARQL"
+    ;; "10" < "5" lexicographically — datatype-less numbers are strings
+    (is (= "\"10\"" (merge-agg-states :min "\"5\"" "\"10\"")))
+    (is (= "\"5\"" (merge-agg-states :max "\"5\"" "\"10\""))))
 
   (testing "Merge AVG states"
     (is (= [30.0 3] (merge-agg-states :avg [10.0 1] [20.0 2])))))
@@ -197,12 +208,13 @@
             [_ state2] (get-in entry2 [eng-key "?total"])]
 
         (is (= :sum agg-fn))
-        (is (= 30.0 state1))
-        (is (= 40.0 state2))
+        ;; integer inputs accumulate exactly as integers (no double coercion)
+        (is (= 30 state1))
+        (is (= 40 state2))
 
         ;; Test merging
         (let [merged-state (merge-agg-states :sum state1 state2)]
-          (is (= 70.0 merged-state)))))))
+          (is (= 70 merged-state)))))))
 
 (deftest test-finalize-group-results
   (testing "Finalize grouped aggregate results"

@@ -10,7 +10,7 @@
             [com.rpl.rama.aggs :as aggs]
             [com.rpl.rama.ops :as ops]
             [rama-sail.module.indexer :as idx]
-            [rama-sail.query.expr :refer [eval-expr evaluate-filter-cond]]
+            [rama-sail.query.expr :refer [eval-expr evaluate-filter-cond value->term-string]]
             [rama-sail.query.aggregation :as agg]
             [rama-sail.query.helpers :as qh]))
 
@@ -247,13 +247,15 @@
 ;; --- BIND Operator ---
 
 (defn apply-bindings
-  "Apply a sequence of binding expressions to a row, returning extended row."
+  "Apply a sequence of binding expressions to a row, returning extended row.
+   Boolean results become xsd:boolean literals (so BIND(BOUND(?x) AS ?b)
+   binds \"false\" instead of dropping the variable); unbound and expression
+   errors leave the variable unbound per SPARQL."
   [row bindings]
   (reduce (fn [r {:keys [var expr]}]
-            (let [val (eval-expr expr r)]
-              (if val
-                (assoc r var val)
-                r)))
+            (if-let [val (value->term-string (eval-expr expr r))]
+              (assoc r var val)
+              r))
           row
           bindings))
 
