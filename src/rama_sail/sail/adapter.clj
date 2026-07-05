@@ -301,12 +301,10 @@
                           get-all-stats-qt get-global-stats-qt
                           timeout-ms sync-config]
   ;; Transaction buffers - operations are buffered until commit
-  ;; BNode map tracks BNode IDs to their unique skolemized IDs within a transaction
   ;; sync-config: {:enabled true :module-name "..." :microbatch-count (atom 0)}
   ;; Statistics are fetched lazily on first query and cached for connection lifetime
   (let [pending-ops (atom [])  ;; Vector of [:add quad] or [:del quad] or [:clear-context quad]
         pending-ns-ops (atom [])  ;; Vector of namespace operations [:set-ns prefix iri], [:remove-ns prefix], [:clear-ns]
-        bnode-map (atom {})    ;; Maps original BNode IDs to skolemized IDs
         stats-cache (atom nil) ;; Cached {:data {...} :fetched-at millis}
         stats-lock (Object.)  ;; Lock for thread-safe stats initialization
         stats-ttl-ms 10000    ;; Stats cache TTL: 10 seconds
@@ -590,8 +588,7 @@
       (startTransactionInternal []
         (log/debug "Starting transaction - clearing buffers")
         (reset! pending-ops [])
-        (reset! pending-ns-ops [])
-        (reset! bnode-map {}))  ;; Fresh BNode mappings for each transaction
+        (reset! pending-ns-ops []))
       (commitInternal []
         (let [raw-ops @pending-ops
               ns-ops @pending-ns-ops
@@ -656,7 +653,6 @@
           ;; Only clear buffers after successful commit
           (reset! pending-ops [])
           (reset! pending-ns-ops [])
-          (reset! bnode-map {})
 
           ;; Record transaction metrics
           (metrics/inc-transaction-count "commit")
@@ -672,8 +668,7 @@
           (log/debug "Rolling back transaction - discarding" op-count "triple ops and" ns-op-count "namespace ops")
           (metrics/inc-transaction-count "rollback")
           (reset! pending-ops [])
-          (reset! pending-ns-ops [])
-          (reset! bnode-map {})))
+          (reset! pending-ns-ops [])))
       (sizeInternal [^objects contexts]
         ;; Return the number of statements in the specified contexts
         ;; Optimization: Use count topology when no pending ops (avoids full scan)

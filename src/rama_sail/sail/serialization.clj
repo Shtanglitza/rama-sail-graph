@@ -319,49 +319,6 @@
 (defn quad->tuple [^Resource s ^IRI p ^Value o ^Resource c]
   [(val->str s) (val->str p) (val->str o) (if c (val->str c) DEFAULT-CONTEXT-VAL)])
 
-;; BNode Skolemization
-;; In RDF, blank nodes are locally scoped. When _:b1 is used in one transaction
-;; and _:b1 in another, they should be distinct nodes. We achieve this by
-;; generating unique IDs per connection/transaction.
-
-(defn skolemize-bnode
-  "Get or create a skolemized ID for a blank node within a transaction.
-   The bnode-map tracks original BNode IDs to their unique skolemized IDs.
-   This ensures that within a single transaction, the same _:id refers to
-   the same node, but across transactions they are distinct."
-  [^BNode bnode bnode-map]
-  (let [original-id (.getID bnode)]
-    (if-let [skolem-id (get @bnode-map original-id)]
-      skolem-id
-      (let [new-id (str original-id "-" (java.util.UUID/randomUUID))]
-        (swap! bnode-map assoc original-id new-id)
-        new-id))))
-
-(defn skolemize-value
-  "Convert an RDF value to its canonical string representation with BNode skolemization.
-   For BNodes, uses the bnode-map to generate unique IDs per transaction.
-   For Triple terms, recursively skolemizes inner BNodes."
-  [^Value v bnode-map]
-  (cond
-    (instance? BNode v)
-    (str "_:" (skolemize-bnode v bnode-map))
-
-    (instance? Triple v)
-    (let [^Triple t v]
-      (str "<< " (skolemize-value (.getSubject t) bnode-map) " "
-           (val->str (.getPredicate t)) " "
-           (skolemize-value (.getObject t) bnode-map) " >>"))
-
-    :else (val->str v)))
-
-(defn skolemized-quad->tuple
-  "Create a quad tuple with BNode skolemization applied."
-  [^Resource s ^IRI p ^Value o ^Resource c bnode-map]
-  [(skolemize-value s bnode-map)
-   (val->str p)  ;; Predicates are always IRIs, never BNodes
-   (skolemize-value o bnode-map)
-   (if c (skolemize-value c bnode-map) DEFAULT-CONTEXT-VAL)])
-
 (defn rama-result->binding-set [rama-map]
   (let [bs (MapBindingSet.)]
     (doseq [[k v] rama-map]
