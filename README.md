@@ -46,22 +46,24 @@ You can use, modify, and ship this code in commercial products, subject to Apach
 
 ### Installation
 
+There is no published Maven/Clojars artifact yet — consume the library directly from GitHub as a git dependency.
+
 **deps.edn (git dependency):**
 ```clojure
 {:deps {io.github.Shtanglitza/rama-sail-graph
-        {:git/tag "v0.1.0" :git/sha "<sha>"}}}
+        {:git/sha "<full-40-char-commit-sha>"}}}
 ```
+Pin `:git/sha` to a commit on `main`. Add a matching `:git/tag` once release tags are published.
 
-**Leiningen (local JAR):**
-
-Download the JAR from [GitHub Releases](https://github.com/Shtanglitza/rama-sail-graph/releases) and install locally:
+**Leiningen:** Leiningen has no native git-dependency support. Clone the repo and install it into your local Maven cache:
 ```bash
-mvn install:install-file -Dfile=rama-sail-graph-0.1.0.jar -DgroupId=com.shtanglitza -DartifactId=rama-sail-graph -Dversion=0.1.0 -Dpackaging=jar
+git clone https://github.com/Shtanglitza/rama-sail-graph.git
+cd rama-sail-graph
+lein install
 ```
-
-Then add to `project.clj`:
+Then add the locally installed coordinate to `project.clj`:
 ```clojure
-[com.shtanglitza/rama-sail-graph "0.1.0"]
+[rama-sail-graph "0.2.0-SNAPSHOT"]
 ```
 
 > **Note:** Rama 1.8.0 is required at runtime. Add the [Red Planet Labs Maven repository](https://nexus.redplanetlabs.com/repository/maven-public-releases) to resolve the Rama dependency.
