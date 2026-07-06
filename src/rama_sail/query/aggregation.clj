@@ -1,35 +1,61 @@
 (ns ^:no-doc rama-sail.query.aggregation
   (:use [com.rpl.rama])
   (:require [clojure.set]
-            [rama-sail.query.expr :refer [eval-expr parse-numeric]]))
+            [rama-sail.query.expr :refer [eval-expr term-numeric-value
+                                          compare-numbers add-numbers error?]]))
 
 ;; --- GROUP BY / Aggregates ---
 
 ;; XSD type URIs for aggregate result formatting
 (def ^:private xsd-integer "http://www.w3.org/2001/XMLSchema#integer")
 (def ^:private xsd-decimal "http://www.w3.org/2001/XMLSchema#decimal")
+(def ^:private xsd-double "http://www.w3.org/2001/XMLSchema#double")
 
 (defn- format-typed-literal
   "Format a value as an RDF typed literal string."
   [value dtype]
   (str "\"" value "\"^^<" dtype ">"))
 
+(defn- integral-number? [v]
+  (or (instance? Long v) (instance? Integer v)
+      (instance? BigInteger v) (instance? clojure.lang.BigInt v)))
+
 (defn- format-numeric-result
-  "Format a numeric result, using integer type for whole numbers."
+  "Format a numeric result by its type. Exact integer sums stay integers of
+   any magnitude (no silent long overflow), decimals serialize canonically,
+   and non-finite doubles use xsd:double lexical forms instead of throwing."
   [value]
-  (if (and (number? value) (== value (Math/floor value)))
-    (format-typed-literal (long value) xsd-integer)
-    (format-typed-literal value xsd-decimal)))
+  (cond
+    (integral-number? value)
+    (format-typed-literal value xsd-integer)
+
+    (instance? BigDecimal value)
+    (format-typed-literal (.toPlainString (.stripTrailingZeros ^BigDecimal value))
+                          xsd-decimal)
+
+    (number? value)
+    (let [d (double value)]
+      (cond
+        (Double/isNaN d) (format-typed-literal "NaN" xsd-double)
+        (Double/isInfinite d) (format-typed-literal (if (pos? d) "INF" "-INF") xsd-double)
+        ;; whole in-range doubles keep the historical integer formatting
+        (and (== d (Math/floor d))
+             (<= (double Long/MIN_VALUE) d (double Long/MAX_VALUE)))
+        (format-typed-literal (long d) xsd-integer)
+        :else (format-typed-literal d xsd-decimal)))
+
+    :else (str value)))
 
 (defn- compare-rdf-terms
   "Compare two RDF term values for MIN/MAX ordering.
-   Numeric values are compared numerically; strings lexicographically.
+   Numeric literals (per datatype) compare numerically and exactly;
+   everything else compares lexicographically on the serialized form.
    Returns negative if a < b, positive if a > b, zero if equal."
   [a b]
-  (let [na (if (number? a) (double a) (when (string? a) (parse-numeric a)))
-        nb (if (number? b) (double b) (when (string? b) (parse-numeric b)))]
+  (let [na (if (number? a) a (when (string? a) (term-numeric-value a)))
+        nb (if (number? b) b (when (string? b) (term-numeric-value b)))]
     (if (and na nb)
-      (Double/compare ^double na ^double nb)
+      (compare-numbers na nb)
       (compare (str a) (str b)))))
 
 (defn- format-rdf-term-result
@@ -50,12 +76,12 @@
            :compute identity
            :format (fn [v] (format-typed-literal v xsd-integer))}
 
-   :sum {:init (constantly 0.0)
+   :sum {:init (constantly 0)
          :update (fn [state raw-value]
-                   (if-let [num-val (when (some? raw-value) (parse-numeric raw-value))]
-                     (+ state num-val)
+                   (if-let [num-val (when (string? raw-value) (term-numeric-value raw-value))]
+                     (add-numbers state num-val)
                      state))
-         :merge (fn [s1 s2] (+ (or s1 0.0) (or s2 0.0)))
+         :merge (fn [s1 s2] (add-numbers (or s1 0) (or s2 0)))
          :compute identity
          :format format-numeric-result}
 
@@ -87,19 +113,29 @@
          :compute identity
          :format format-rdf-term-result}
 
-   :avg {:init (constantly [0.0 0])
+   :avg {:init (constantly [0 0])
          :update (fn [state raw-value]
-                   (if-let [num-val (when (some? raw-value) (parse-numeric raw-value))]
-                     [(+ (first state) num-val) (inc (second state))]
+                   (if-let [num-val (when (string? raw-value) (term-numeric-value raw-value))]
+                     [(add-numbers (first state) num-val) (inc (second state))]
                      state))
          :merge (fn [s1 s2]
-                  (let [[sum1 cnt1] (or s1 [0.0 0])
-                        [sum2 cnt2] (or s2 [0.0 0])]
-                    [(+ sum1 sum2) (+ cnt1 cnt2)]))
+                  (let [[sum1 cnt1] (or s1 [0 0])
+                        [sum2 cnt2] (or s2 [0 0])]
+                    [(add-numbers sum1 sum2) (+ cnt1 cnt2)]))
          :compute (fn [state]
-                    (let [[sum cnt] (or state [0.0 0])]
-                      (when (pos? cnt) (/ sum cnt))))
-         :format (fn [v] (format-typed-literal v xsd-decimal))}})
+                    (let [[sum cnt] (or state [0 0])]
+                      (when (pos? cnt)
+                        ;; AVG of exact inputs is exact decimal (SPARQL: AVG of
+                        ;; integers is xsd:decimal); any double input → double
+                        (if (instance? Double sum)
+                          (/ ^double sum cnt)
+                          (.divide (bigdec sum) (bigdec cnt)
+                                   java.math.MathContext/DECIMAL64)))))
+         :format (fn [v]
+                   (if (instance? BigDecimal v)
+                     (format-typed-literal (.toPlainString (.stripTrailingZeros ^BigDecimal v))
+                                           xsd-decimal)
+                     (format-typed-literal v xsd-decimal)))}})
 
 (defn init-agg-state
   "Initialize state for an aggregate function.
@@ -157,16 +193,18 @@
       (str value))))
 
 (defn extract-value-for-agg
-  "Extract the value to aggregate from a binding based on agg-spec."
+  "Extract the value to aggregate from a binding based on agg-spec.
+   For COUNT(*) the value is the binding row itself, so COUNT(DISTINCT *)
+   deduplicates whole rows instead of a shared constant marker.
+   An expression evaluation error contributes nothing (treated as unbound)."
   [binding agg-spec]
   (let [arg (:arg agg-spec)]
     (if (nil? arg)
-      ;; COUNT(*) - return marker
-      ::row
-      ;; Normal case
-      (if (= :var (:type arg))
-        (get binding (:name arg))
-        (eval-expr arg binding)))))
+      binding
+      (let [v (if (= :var (:type arg))
+                (get binding (:name arg))
+                (eval-expr arg binding))]
+        (when-not (error? v) v)))))
 
 (defn build-group-entry
   "Build a single group entry with aggregate states from one binding.

@@ -131,17 +131,42 @@
 ;;; -----------------------------------------------------------------------------
 
 (defn- unescape-str
-  "Unescape N-Triples escape sequences. Process escaped backslashes first
-   using a placeholder to avoid interference with other escape sequences.
-   E.g., '\\\\n' (escaped backslash + n) should become '\\n' (backslash + n),
-   not backslash + newline."
-  [s]
-  (-> s
-      (str/replace "\\\\" "\u0000")  ; placeholder for escaped backslash
-      (str/replace "\\\"" "\"")
-      (str/replace "\\n" "\n")
-      (str/replace "\\r" "\r")
-      (str/replace "\u0000" "\\")))
+  "Unescape N-Triples escape sequences in a single left-to-right pass. A
+   backslash escapes the next character: \\\\ -> \\, \\\" -> \", \\n -> newline,
+   \\r -> CR; any other backslash is passed through literally (matching the
+   sequences escape-str produces). Scanning in one pass — rather than swapping a
+   sentinel char in and out — means a literal that itself contains U+0000 (or any
+   other character) survives unchanged, instead of a real NUL being rewritten to
+   a backslash by the old placeholder trick."
+  [^String s]
+  (let [len (count s)
+        sb (StringBuilder. len)]
+    (loop [i 0]
+      (if (>= i len)
+        (.toString sb)
+        (let [ch (.charAt s i)]
+          (if (and (= ch \\) (< (inc i) len))
+            (case (.charAt s (inc i))
+              \n (do (.append sb \newline) (recur (+ i 2)))
+              \r (do (.append sb \return) (recur (+ i 2)))
+              \" (do (.append sb \") (recur (+ i 2)))
+              \\ (do (.append sb \\) (recur (+ i 2)))
+              ;; Unknown escape: keep the backslash, process the next char normally.
+              (do (.append sb \\) (recur (inc i))))
+            (do (.append sb ch)
+                (recur (inc i)))))))))
+
+(defn- skip-string-literal
+  "Given the index of an opening double-quote in `s`, return the index just past
+   the matching closing quote, honouring `\\\"` escapes. If the literal is
+   unterminated, returns `len`."
+  [^String s ^long start ^long len]
+  (loop [j (inc start)]
+    (cond
+      (>= j len) len
+      (= (.charAt s j) \\) (recur (+ j 2)) ;; skip the escaped char
+      (= (.charAt s j) \") (inc j)
+      :else (recur (inc j)))))
 
 (defn- parse-triple-term-parts
   "Parse the inner content of a triple term (<< s p o >>) into three N-Triples term strings.
@@ -162,10 +187,15 @@
             (and (< (inc pos) len)
                  (= ch \<)
                  (= (.charAt inner (inc pos)) \<))
-            (let [;; Find matching >> accounting for nesting
+            (let [;; Find matching >> accounting for nesting. Skip over string
+                  ;; literals so a literal that contains "<<" or ">>" does not
+                  ;; corrupt the depth count (would otherwise mis-locate the end
+                  ;; and throw StringIndexOutOfBounds downstream).
                   end (loop [i (+ pos 2) depth 1]
                         (cond
                           (>= i (dec len)) (inc len) ;; malformed, return past end
+                          (= (.charAt inner i) \")
+                          (recur (skip-string-literal inner i len) depth)
                           (and (= (.charAt inner i) \<)
                                (< (inc i) len)
                                (= (.charAt inner (inc i)) \<))
@@ -288,49 +318,6 @@
 
 (defn quad->tuple [^Resource s ^IRI p ^Value o ^Resource c]
   [(val->str s) (val->str p) (val->str o) (if c (val->str c) DEFAULT-CONTEXT-VAL)])
-
-;; BNode Skolemization
-;; In RDF, blank nodes are locally scoped. When _:b1 is used in one transaction
-;; and _:b1 in another, they should be distinct nodes. We achieve this by
-;; generating unique IDs per connection/transaction.
-
-(defn skolemize-bnode
-  "Get or create a skolemized ID for a blank node within a transaction.
-   The bnode-map tracks original BNode IDs to their unique skolemized IDs.
-   This ensures that within a single transaction, the same _:id refers to
-   the same node, but across transactions they are distinct."
-  [^BNode bnode bnode-map]
-  (let [original-id (.getID bnode)]
-    (if-let [skolem-id (get @bnode-map original-id)]
-      skolem-id
-      (let [new-id (str original-id "-" (java.util.UUID/randomUUID))]
-        (swap! bnode-map assoc original-id new-id)
-        new-id))))
-
-(defn skolemize-value
-  "Convert an RDF value to its canonical string representation with BNode skolemization.
-   For BNodes, uses the bnode-map to generate unique IDs per transaction.
-   For Triple terms, recursively skolemizes inner BNodes."
-  [^Value v bnode-map]
-  (cond
-    (instance? BNode v)
-    (str "_:" (skolemize-bnode v bnode-map))
-
-    (instance? Triple v)
-    (let [^Triple t v]
-      (str "<< " (skolemize-value (.getSubject t) bnode-map) " "
-           (val->str (.getPredicate t)) " "
-           (skolemize-value (.getObject t) bnode-map) " >>"))
-
-    :else (val->str v)))
-
-(defn skolemized-quad->tuple
-  "Create a quad tuple with BNode skolemization applied."
-  [^Resource s ^IRI p ^Value o ^Resource c bnode-map]
-  [(skolemize-value s bnode-map)
-   (val->str p)  ;; Predicates are always IRIs, never BNodes
-   (skolemize-value o bnode-map)
-   (if c (skolemize-value c bnode-map) DEFAULT-CONTEXT-VAL)])
 
 (defn rama-result->binding-set [rama-map]
   (let [bs (MapBindingSet.)]

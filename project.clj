@@ -1,4 +1,4 @@
-(defproject rama-sail-graph "0.1.0-SNAPSHOT"
+(defproject rama-sail-graph "0.2.0-SNAPSHOT"
   :description "Rama module that integrates with RDF4J SAIL API for RDF quad storage and SPARQL query evaluation"
   :url "https://github.com/Shtanglitza/rama-sail-graph"
   :license {:name "Apache-2.0"
@@ -59,7 +59,7 @@
                         :dependencies [[org.eclipse.rdf4j/rdf4j-sail-testsuite "5.2.2"
                                         :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic]]
                                        [org.junit.platform/junit-platform-console-standalone "1.10.0"]]}
-             :provided {:dependencies [[com.rpl/rama "1.6.0"]
+             :provided {:dependencies [[com.rpl/rama "1.8.0"]
                                        [org.clojure/clojure "1.12.4"]]}
              :scale    {:jvm-opts ["-Xss8m" "-Xms12g" "-Xmx12g"]}
              :sparql-uberjar {:aot [rama-sail.server.sparql]

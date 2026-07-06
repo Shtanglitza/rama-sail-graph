@@ -3,8 +3,7 @@
             [rama-sail.sail.adapter :as sail]
             [rama-sail.sail.serialization :as ser]
             [rama-sail.sail.compilation :as comp]
-            [rama-sail.module.queries :as queries]
-            [taoensso.nippy :as nippy])
+            [rama-sail.module.queries :as queries])
   (:import [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.model.vocabulary XSD]
            [org.eclipse.rdf4j.model Literal Triple]
@@ -19,7 +18,7 @@
 (def escape-str @#'ser/escape-str)
 (def unescape-str @#'ser/unescape-str)
 
-(deftest test-nippy-serialization
+(deftest test-ntriples-roundtrip
 
   (testing "IRI Serialization"
     (let [iri (.createIRI VF "http://example.com/foo")
@@ -475,124 +474,40 @@
 ;;; Context IDs Pending State Logic Tests (Audit Fix #4)
 ;;; ---------------------------------------------------------------------------
 
+(def ^:private compute-pending-net-state @#'sail/compute-pending-net-state)
+
 (deftest test-context-ids-clear-then-add
   (testing "Context cleared then added should be included in result"
-    ;; This tests the composite pending state logic that handles clear+add sequences
-    ;; The bug was that mixing :cleared keyword with numeric counts caused exceptions
-    (let [;; Simulate the pending-state reduce from getContextIDsInternal
-          compute-pending-state
-          (fn [pending-ops]
-            (reduce
-             (fn [state [op [_s _p _o ctx]]]
-               (let [{:keys [cleared? net-count] :or {cleared? false net-count 0}}
-                     (get state ctx {:cleared? false :net-count 0})]
-                 (case op
-                   :add (assoc state ctx
-                               (if cleared?
-                                 {:cleared? true :net-count (inc net-count)}
-                                 {:cleared? false :net-count (inc net-count)}))
-                   :del (assoc state ctx
-                               {:cleared? cleared? :net-count (dec net-count)})
-                   :clear-context (assoc state ctx {:cleared? true :net-count 0})
-                   state)))
-             {}
-             pending-ops))
+    ;; getContextIDsInternal includes a context when it has net-visible adds,
+    ;; even if the context was cleared earlier in the same transaction.
+    (let [ctx "<http://example.org/graph1>"
+          pending-ops [[:clear-context [nil nil nil ctx]]
+                       [:add ["<s>" "<p>" "<o>" ctx]]]
+          {:keys [adds cleared-contexts]} (compute-pending-net-state pending-ops)
+          contexts-with-adds (into #{} (map (fn [[_s _p _o c]] c)) adds)]
 
-          ;; Test case: clear then add to same context
-          pending-ops [[:clear-context [nil nil nil "<http://example.org/graph1>"]]
-                       [:add ["<s>" "<p>" "<o>" "<http://example.org/graph1>"]]]
-          state (compute-pending-state pending-ops)
-          {:keys [cleared? net-count]} (get state "<http://example.org/graph1>")]
-
-      ;; Context should be marked as cleared but have positive net-count from post-clear adds
-      (is (true? cleared?) "Context should be marked as cleared")
-      (is (= 1 net-count) "Net count should be 1 (one add after clear)")
-
-      ;; The context should be INCLUDED in results because net-count > 0
-      (is (and cleared? (pos? net-count))
-          "Clear+Add sequence should result in context being included")))
+      (is (contains? cleared-contexts ctx) "Context should be marked as cleared")
+      (is (contains? contexts-with-adds ctx)
+          "Clear+Add sequence should leave a net-visible add, so the context is included")))
 
   (testing "Context cleared only should be excluded from result"
-    (let [compute-pending-state
-          (fn [pending-ops]
-            (reduce
-             (fn [state [op [_s _p _o ctx]]]
-               (let [{:keys [cleared? net-count] :or {cleared? false net-count 0}}
-                     (get state ctx {:cleared? false :net-count 0})]
-                 (case op
-                   :add (assoc state ctx
-                               (if cleared?
-                                 {:cleared? true :net-count (inc net-count)}
-                                 {:cleared? false :net-count (inc net-count)}))
-                   :del (assoc state ctx
-                               {:cleared? cleared? :net-count (dec net-count)})
-                   :clear-context (assoc state ctx {:cleared? true :net-count 0})
-                   state)))
-             {}
-             pending-ops))
+    (let [ctx "<http://example.org/graph1>"
+          pending-ops [[:clear-context [nil nil nil ctx]]]
+          {:keys [adds cleared-contexts]} (compute-pending-net-state pending-ops)]
 
-          pending-ops [[:clear-context [nil nil nil "<http://example.org/graph1>"]]]
-          state (compute-pending-state pending-ops)
-          {:keys [cleared? net-count]} (get state "<http://example.org/graph1>")]
-
-      (is (true? cleared?) "Context should be marked as cleared")
-      (is (= 0 net-count) "Net count should be 0 (no adds after clear)")
-
-      ;; The context should be EXCLUDED because cleared with no adds
-      (is (and cleared? (<= net-count 0))
-          "Clear-only should result in context being excluded")))
+      (is (contains? cleared-contexts ctx) "Context should be marked as cleared")
+      (is (empty? adds)
+          "Clear-only should leave no net-visible adds, so the context is excluded")))
 
   (testing "Add then clear sequence should exclude context"
-    (let [compute-pending-state
-          (fn [pending-ops]
-            (reduce
-             (fn [state [op [_s _p _o ctx]]]
-               (let [{:keys [cleared? net-count] :or {cleared? false net-count 0}}
-                     (get state ctx {:cleared? false :net-count 0})]
-                 (case op
-                   :add (assoc state ctx
-                               (if cleared?
-                                 {:cleared? true :net-count (inc net-count)}
-                                 {:cleared? false :net-count (inc net-count)}))
-                   :del (assoc state ctx
-                               {:cleared? cleared? :net-count (dec net-count)})
-                   :clear-context (assoc state ctx {:cleared? true :net-count 0})
-                   state)))
-             {}
-             pending-ops))
+    (let [ctx "<http://example.org/graph1>"
+          pending-ops [[:add ["<s>" "<p>" "<o>" ctx]]
+                       [:clear-context [nil nil nil ctx]]]
+          {:keys [adds cleared-contexts]} (compute-pending-net-state pending-ops)]
 
-          ;; Add then clear - clear should reset the count
-          pending-ops [[:add ["<s>" "<p>" "<o>" "<http://example.org/graph1>"]]
-                       [:clear-context [nil nil nil "<http://example.org/graph1>"]]]
-          state (compute-pending-state pending-ops)
-          {:keys [cleared? net-count]} (get state "<http://example.org/graph1>")]
-
-      (is (true? cleared?) "Context should be marked as cleared")
-      (is (= 0 net-count) "Net count should be 0 (clear resets)")
-
-      ;; The context should be EXCLUDED because clear came after add
-      (is (and cleared? (<= net-count 0))
-          "Add+Clear should result in context being excluded"))))
-
-;;; ---------------------------------------------------------------------------
-;;; sizeInternal Duplicate Context Deduplication Tests (Audit Fix #3)
-;;; ---------------------------------------------------------------------------
-
-(deftest test-sizeInternal-duplicate-context-deduplication
-  (testing "sizeInternal should deduplicate context IDs to avoid double-counting"
-    ;; The fast path for specific contexts should not count the same context twice
-    ;; if the caller passes duplicate context IDs in the array
-    (let [;; Simulate the deduplication logic from sizeInternal
-          contexts ["<http://example.org/graph1>"
-                    "<http://example.org/graph1>"  ;; duplicate
-                    "<http://example.org/graph2>"]
-          ;; This is what the fixed code does
-          unique-ctx-strs (distinct contexts)]
-      (is (= 2 (count unique-ctx-strs))
-          "Duplicate contexts should be removed")
-      (is (= #{"<http://example.org/graph1>" "<http://example.org/graph2>"}
-             (set unique-ctx-strs))
-          "Unique contexts should be preserved"))))
+      (is (contains? cleared-contexts ctx) "Context should be marked as cleared")
+      (is (empty? adds)
+          "Add+Clear should remove the pending add, so the context is excluded"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; compute-pending-net-state Unit Tests
@@ -602,28 +517,7 @@
   (testing "Add then delete same quad results in empty net-visible state"
     ;; This tests the core model used by both getContextIDsInternal and clearInternal.
     ;; When you add a quad then delete the exact same quad, they should cancel out.
-    (let [;; Replicate compute-pending-net-state logic
-          compute-pending-net-state
-          (fn [pending-ops]
-            (reduce (fn [state [op quad]]
-                      (case op
-                        :add (-> state
-                                 (update :adds conj quad)
-                                 (update :dels disj quad))
-                        :del (-> state
-                                 (update :adds disj quad)
-                                 (update :dels conj quad))
-                        :clear-context
-                        (let [ctx (nth quad 3)]
-                          (-> state
-                              (update :adds (fn [adds]
-                                              (into #{} (remove #(= (nth % 3) ctx) adds))))
-                              (update :cleared-contexts (fnil conj #{}) ctx)))
-                        state))
-                    {:adds #{} :dels #{} :cleared-contexts #{}}
-                    pending-ops))
-
-          ;; Scenario: Add then delete SAME quad - add should be removed from adds
+    (let [;; Scenario: Add then delete SAME quad - add should be removed from adds
           ;; The del goes to dels (indicating intent to delete from committed too)
           quad ["<s>" "<p>" "<o>" "<http://example.org/graph>"]
           pending-ops [[:add quad] [:del quad]]
@@ -635,21 +529,7 @@
       (is (= #{quad} dels) "Del should be in dels (to delete from committed if present)")))
 
   (testing "Add then delete DIFFERENT quad in same context - add remains visible"
-    (let [compute-pending-net-state
-          (fn [pending-ops]
-            (reduce (fn [state [op quad]]
-                      (case op
-                        :add (-> state
-                                 (update :adds conj quad)
-                                 (update :dels disj quad))
-                        :del (-> state
-                                 (update :adds disj quad)
-                                 (update :dels conj quad))
-                        state))
-                    {:adds #{} :dels #{}}
-                    pending-ops))
-
-          ;; Scenario: Add one quad, delete a DIFFERENT (non-existent) quad
+    (let [;; Scenario: Add one quad, delete a DIFFERENT (non-existent) quad
           add-quad ["<s>" "<p>" "<o>" "<http://example.org/graph>"]
           del-quad ["<other>" "<other>" "<other>" "<http://example.org/graph>"]
           pending-ops [[:add add-quad] [:del del-quad]]
@@ -659,66 +539,13 @@
       (is (= #{del-quad} dels) "The unrelated del should be in dels")))
 
   (testing "Clear then add to same context - add is visible"
-    (let [compute-pending-net-state
-          (fn [pending-ops]
-            (reduce (fn [state [op quad]]
-                      (case op
-                        :add (-> state
-                                 (update :adds conj quad)
-                                 (update :dels disj quad))
-                        :del (-> state
-                                 (update :adds disj quad)
-                                 (update :dels conj quad))
-                        :clear-context
-                        (let [ctx (nth quad 3)]
-                          (-> state
-                              (update :adds (fn [adds]
-                                              (into #{} (remove #(= (nth % 3) ctx) adds))))
-                              (update :cleared-contexts (fnil conj #{}) ctx)))
-                        state))
-                    {:adds #{} :dels #{} :cleared-contexts #{}}
-                    pending-ops))
-
-          ctx "<http://example.org/graph>"
+    (let [ctx "<http://example.org/graph>"
           add-quad ["<s>" "<p>" "<o>" ctx]
           pending-ops [[:clear-context [nil nil nil ctx]] [:add add-quad]]
           {:keys [adds cleared-contexts]} (compute-pending-net-state pending-ops)]
 
       (is (= #{add-quad} adds) "Add after clear should be in net-visible adds")
       (is (contains? cleared-contexts ctx) "Context should be marked as cleared"))))
-
-;;; ---------------------------------------------------------------------------
-;;; clearInternal Net-Visible Context Tests
-;;; ---------------------------------------------------------------------------
-
-(deftest test-clearInternal-uses-net-visible-adds
-  (testing "clear-all extracts pending-only contexts from net-visible adds"
-    ;; clearInternal should use compute-pending-net-state to get net-visible adds,
-    ;; not raw :add operations. This avoids queueing unnecessary clears.
-    (let [;; Replicate the logic from clearInternal
-          compute-pending-net-state
-          (fn [pending-ops]
-            (reduce (fn [state [op quad]]
-                      (case op
-                        :add (-> state (update :adds conj quad) (update :dels disj quad))
-                        :del (-> state (update :adds disj quad) (update :dels conj quad))
-                        state))
-                    {:adds #{} :dels #{}}
-                    pending-ops))
-
-          ;; Scenario: Add then delete same quad in pending-only context
-          ;; Net result: context has NO visible adds
-          quad ["<s>" "<p>" "<o>" "<http://example.org/pending-only>"]
-          pending-ops [[:add quad] [:del quad]]
-          {:keys [adds]} (compute-pending-net-state pending-ops)
-          committed-set #{}
-          pending-only (->> adds
-                            (map (fn [[_s _p _o ctx]] ctx))
-                            (remove (fn [ctx] (contains? committed-set ctx)))
-                            set)]
-
-      (is (empty? adds) "Net-visible adds should be empty")
-      (is (empty? pending-only) "No pending-only contexts to clear"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; compute-commit-ops ordering tests
@@ -1086,6 +913,37 @@
         (is (contains? zmc ["B" "B"]))
         (is (contains? zmc ["C" "C"]))
         (is (contains? zmc ["A" "C"]))))))
+
+(deftest test-path-materialization-limit
+  ;; C5: property-path helpers must fail fast instead of materializing an
+  ;; unbounded working set on one task.
+  (testing "check-path-limit! passes under the cap and throws over it"
+    (binding [queries/*path-materialization-limit* 5]
+      (is (= 3 (queries/check-path-limit! 3 "edges")))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"materialization limit"
+                            (queries/check-path-limit! 6 "edges")))))
+
+  (testing "extract-path-edges caps the edge set"
+    (let [rows (for [i (range 20)] {"?s" (str "n" i) "?o" (str "n" (inc i))})]
+      (binding [queries/*path-materialization-limit* 10]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"path edges"
+                              (queries/extract-path-edges rows "?s" "?o"))))
+      (binding [queries/*path-materialization-limit* 100]
+        (is (= 20 (count (queries/extract-path-edges rows "?s" "?o")))))))
+
+  (testing "collect-all-nodes caps the node set"
+    (let [quads (for [i (range 20)] [(str "s" i) "p" (str "o" i) "c"])]
+      (binding [queries/*path-materialization-limit* 10]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"path nodes"
+                              (queries/collect-all-nodes quads))))))
+
+  (testing "compute-transitive-closure caps the closure output (O(n^2) blowup)"
+    ;; A complete-ish chain of 40 nodes yields ~40*40/2 reachable pairs, over a
+    ;; small cap — this is the DoS shape the guard exists to stop.
+    (let [edges (set (for [i (range 40)] [(str "n" i) (str "n" (inc i))]))]
+      (binding [queries/*path-materialization-limit* 50]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"path pairs"
+                              (queries/compute-transitive-closure edges)))))))
 
 (comment
 

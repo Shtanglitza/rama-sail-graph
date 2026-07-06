@@ -23,7 +23,6 @@
 (def ^:dynamic *repo* nil)
 (def ^:dynamic *ipc* nil)
 (def ^:dynamic *depot* nil)
-(def ^:dynamic *mb-counter* nil)
 (def ^:dynamic *handler* nil)
 
 (defn sparql-fixture [f]
@@ -34,20 +33,25 @@
           repo  (SailRepository. sail)]
       (.init repo)
       (try
-        (binding [*repo*       repo
-                  *ipc*        ipc
-                  *depot*      depot
-                  *mb-counter* (atom 0)
-                  *handler*    (sparql/build-app repo)]
+        (binding [*repo*    repo
+                  *ipc*     ipc
+                  *depot*   depot
+                  *handler* (sparql/build-app repo)]
           (f))
         (finally (.shutDown repo))))))
 
 (use-fixtures :once sparql-fixture)
 
 (defn wait-mb!
-  [n]
-  (swap! *mb-counter* + n)
-  (rtest/wait-for-microbatch-processed-count *ipc* module-name "indexer" @*mb-counter*))
+  "Barrier: wait until the indexer has processed every depot record appended so
+   far, deriving the exact target from the depot partitions' end-offsets. Robust
+   to out-of-band appends (e.g. via SPARQL UPDATE) that a manually incremented
+   counter would miss — see CLAUDE.md."
+  []
+  (let [num-partitions (:num-partitions (rama/foreign-object-info *depot*))
+        total (reduce + (for [part (range num-partitions)]
+                          (:end-offset (rama/foreign-depot-partition-info *depot* part))))]
+    (rtest/wait-for-microbatch-processed-count *ipc* module-name "indexer" total)))
 
 (defn load-triples!
   "Load triples into the store via depot append."
@@ -55,7 +59,7 @@
   (let [now (System/currentTimeMillis)]
     (doseq [[s p o] triples]
       (rama/foreign-append! *depot* [:add [s p o "<http://default>"] now]))
-    (wait-mb! (count triples))))
+    (wait-mb!)))
 
 ;; ---------------------------------------------------------------------------
 ;; Helper: simulate Ring request
@@ -186,6 +190,70 @@
                            :headers {}})]
       (is (= 204 (:status resp)))
       (is (= "*" (get-in resp [:headers "Access-Control-Allow-Origin"]))))))
+
+(deftest test-cors-origin-configurable
+  (testing "A configured CORS origin is reflected instead of the wildcard (C4)"
+    (let [app (sparql/build-app *repo* {:cors-origin "https://app.example"})
+          resp (app {:request-method :get :uri "/sparql"
+                     :query-string "query=SELECT%20*%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20LIMIT%201"
+                     :headers {"accept" "application/sparql-results+json"}})]
+      (is (= "https://app.example"
+             (get-in resp [:headers "Access-Control-Allow-Origin"]))))))
+
+;; ---------------------------------------------------------------------------
+;; Security: SPARQL Update gating (finding C4)
+;; ---------------------------------------------------------------------------
+
+(defn- post-update
+  "POST a SPARQL Update. Defaults to application/sparql-update body; pass
+   :form? true to use the form-encoded `update=` CSRF simple-request vector."
+  [handler update-str & {:keys [auth form?]}]
+  (let [headers (cond-> {"accept" "*/*"}
+                  (not form?) (assoc "content-type" "application/sparql-update")
+                  form?       (assoc "content-type" "application/x-www-form-urlencoded")
+                  auth        (assoc "authorization" auth))
+        body (if form?
+               (str "update=" (java.net.URLEncoder/encode update-str "UTF-8"))
+               update-str)]
+    (handler {:request-method :post :uri "/sparql"
+              :headers headers
+              :body (ByteArrayInputStream. (.getBytes ^String body "UTF-8"))})))
+
+(deftest test-update-rejected-in-read-only-mode
+  (testing "Default (read-only) handler rejects a SPARQL Update body with 403"
+    (let [resp (post-update *handler* "DELETE WHERE { ?s ?p ?o }")]
+      (is (= 403 (:status resp)))
+      (is (str/includes? (body-str resp) "read-only"))))
+
+  (testing "The form-encoded CSRF vector is also rejected with 403"
+    ;; A form POST is a CORS 'simple request'; this is the exact drive-by hole.
+    (let [resp (post-update *handler* "DROP ALL" :form? true)]
+      (is (= 403 (:status resp))))))
+
+(deftest test-update-requires-valid-token
+  (let [app (sparql/build-app *repo* {:allow-updates true :auth-token "s3cret"})]
+    (testing "Enabled updates without a token are 401"
+      (let [resp (post-update app "INSERT DATA { <http://ex/a> <http://ex/b> <http://ex/c> }")]
+        (is (= 401 (:status resp)))
+        (is (= "Bearer" (get-in resp [:headers "WWW-Authenticate"])))))
+
+    (testing "A wrong token is 401"
+      (let [resp (post-update app "INSERT DATA { <http://ex/a> <http://ex/b> <http://ex/c> }"
+                              :auth "Bearer nope")]
+        (is (= 401 (:status resp)))))))
+
+(deftest test-update-authorized-round-trips
+  (testing "An authorized INSERT DATA writes data that a later SELECT sees"
+    (let [s (str "<http://ex.org/upd-" (System/nanoTime) ">")
+          app (sparql/build-app *repo* {:allow-updates true :auth-token "s3cret"})
+          upd (post-update app (str "INSERT DATA { " s " <http://ex.org/p> \"v\" }")
+                           :auth "Bearer s3cret")]
+      (is (= 200 (:status upd)))
+      (wait-mb!) ; ensure the out-of-band UPDATE write is indexed before reading
+      (let [resp (get-request (str "SELECT ?o WHERE { " s " <http://ex.org/p> ?o }"))
+            bindings (get-in (parse-json-body resp) ["results" "bindings"])]
+        (is (= 200 (:status resp)))
+        (is (= "v" (get-in (first bindings) ["o" "value"])))))))
 
 (deftest test-root-endpoint
   (testing "GET / returns welcome message"

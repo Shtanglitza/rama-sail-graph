@@ -26,11 +26,6 @@
 ;; Default query timeout: 60 seconds
 (def DEFAULT-QUERY-TIMEOUT-MS 60000)
 
-;; Global map of [module-name topology-name] -> microbatch counter atom
-;; Used for sync-commits mode to track microbatch expectations across SAIL instances
-;; Separate counters for each topology (indexer, ns-indexer) since they have independent counts
-(defonce ^:private microbatch-counters (atom {}))
-
 (defn- estimate-query-complexity
   "Estimate query complexity by counting operators in the plan.
    Returns a map with :joins, :bgps, :optionals counts for complexity assessment."
@@ -306,12 +301,10 @@
                           get-all-stats-qt get-global-stats-qt
                           timeout-ms sync-config]
   ;; Transaction buffers - operations are buffered until commit
-  ;; BNode map tracks BNode IDs to their unique skolemized IDs within a transaction
   ;; sync-config: {:enabled true :module-name "..." :microbatch-count (atom 0)}
   ;; Statistics are fetched lazily on first query and cached for connection lifetime
   (let [pending-ops (atom [])  ;; Vector of [:add quad] or [:del quad] or [:clear-context quad]
         pending-ns-ops (atom [])  ;; Vector of namespace operations [:set-ns prefix iri], [:remove-ns prefix], [:clear-ns]
-        bnode-map (atom {})    ;; Maps original BNode IDs to skolemized IDs
         stats-cache (atom nil) ;; Cached {:data {...} :fetched-at millis}
         stats-lock (Object.)  ;; Lock for thread-safe stats initialization
         stats-ttl-ms 10000    ;; Stats cache TTL: 10 seconds
@@ -333,8 +326,10 @@
                                (if fresh?
                                  (:data cached)
                                  (try
-                                   (let [pred-stats (rama/foreign-invoke-query get-all-stats-qt)
-                                         global-stats (rama/foreign-invoke-query get-global-stats-qt)
+                                   ;; Bounded by the query timeout: a hung stats topology
+                                   ;; must not block every evaluating thread on stats-lock
+                                   (let [pred-stats (invoke-query-with-timeout get-all-stats-qt timeout-ms)
+                                         global-stats (invoke-query-with-timeout get-global-stats-qt timeout-ms)
                                          stats {:predicate-stats (or pred-stats {})
                                                 :global-stats (or global-stats {})}]
                                      (reset! stats-cache {:data stats :fetched-at now})
@@ -528,14 +523,19 @@
                                  results (invoke-query-with-timeout query-qt timeout-ms plan)]
                               ;; Filter out results that are in the pending delete set
                              (when (seq results)
-                               (if (and s p o)
-                                  ;; Fully bound — check if this exact quad is pending-deleted
-                                 (let [c-val-for-del (or actual-c-val DEFAULT-CONTEXT-VAL)]
-                                   (not (contains? dels [(val->str s) (val->str p) (val->str o) c-val-for-del])))
-                                  ;; Partially bound — at least one result exists that isn't deleted
-                                  ;; For wildcards we'd need to check each result; use getStatements as fallback
+                               (if (and s p o actual-c-val)
+                                  ;; Fully bound INCLUDING context — check the exact quad
+                                 (not (contains? dels [(val->str s) (val->str p) (val->str o) actual-c-val]))
+                                  ;; Wildcard context or partially bound — the ASK may have
+                                  ;; matched a quad in ANY graph, so enumerate the matches and
+                                  ;; require one that survives pending deletes AND pending
+                                  ;; context clears (read-your-own-writes for named graphs)
                                  (let [stmts (execute-bgp-query query-qt timeout-ms s p o actual-c-val s-val p-val o-val)
-                                       live-stmts (remove #(contains? dels (statement->quad %)) stmts)]
+                                       live-stmts (remove (fn [st]
+                                                            (let [quad (statement->quad st)]
+                                                              (or (contains? dels quad)
+                                                                  (contains? cleared-contexts (nth quad 3)))))
+                                                          stmts)]
                                    (seq live-stmts))))))))
                      check-ctxs))))))
 
@@ -561,14 +561,14 @@
                                       :when (matches-query-pattern? quad s-str p-str o-str ctx-str)]
                                   (quad->statement quad))
 
-              ;; Query committed statements from Rama
-              committed-statements (if (array-empty? contexts)
-                                     (execute-bgp-query query-qt timeout-ms s p o nil s-val p-val o-val)
-                                     (mapcat (fn [c]
-                                               (execute-bgp-query query-qt timeout-ms s p o
-                                                                  (if c (val->str c) DEFAULT-CONTEXT-VAL)
-                                                                  s-val p-val o-val))
-                                             contexts))
+              ;; Query committed statements from Rama. ctx-strs is already
+              ;; deduplicated ([nil] for the wildcard case), so an explicit
+              ;; duplicate context — getStatements(s,p,o, g, g) — no longer
+              ;; yields duplicate statements.
+              committed-statements (mapcat (fn [c-str]
+                                             (execute-bgp-query query-qt timeout-ms s p o
+                                                                c-str s-val p-val o-val))
+                                           ctx-strs)
 
               ;; Filter out committed statements from cleared contexts
               filtered-committed (if (empty? cleared-contexts)
@@ -588,8 +588,7 @@
       (startTransactionInternal []
         (log/debug "Starting transaction - clearing buffers")
         (reset! pending-ops [])
-        (reset! pending-ns-ops [])
-        (reset! bnode-map {}))  ;; Fresh BNode mappings for each transaction
+        (reset! pending-ns-ops []))
       (commitInternal []
         (let [raw-ops @pending-ops
               ns-ops @pending-ns-ops
@@ -622,12 +621,18 @@
           ;; Even with 0 triple ops, we must sync to ensure any pending microbatches
           ;; from previous commits (e.g., other SAIL instances) are fully visible.
           ;; Without this barrier, list-contexts may see stale PState data.
+          ;;
+          ;; wait-for-microbatch-processed-count counts DEPOT RECORDS processed
+          ;; since topology start. The exact barrier target is therefore the sum
+          ;; of the depot partitions' end-offsets — everything appended so far,
+          ;; by this SAIL instance or any other client. No shared counter needed.
           (when (:enabled sync-config)
-            (let [counter (:indexer-count sync-config)
-                  module-name (:module-name sync-config)
-                  new-count (swap! counter + op-count)]
-              (let [wait-fn (requiring-resolve 'com.rpl.rama.test/wait-for-microbatch-processed-count)]
-                (wait-fn ipc module-name "indexer" new-count))))
+            (let [module-name (:module-name sync-config)
+                  num-partitions (:num-partitions (rama/foreign-object-info triple-depot))
+                  total (reduce + (for [part (range num-partitions)]
+                                    (:end-offset (rama/foreign-depot-partition-info triple-depot part))))
+                  wait-fn (requiring-resolve 'com.rpl.rama.test/wait-for-microbatch-processed-count)]
+              (wait-fn ipc module-name "indexer" total)))
 
           ;; Commit namespace operations with tracking
           (when (pos? ns-op-count)
@@ -637,17 +642,17 @@
                 (swap! committed-ns-ops inc))))
           ;; In sync mode, ALWAYS wait for ns-indexer too (same reasoning as indexer above)
           (when (and (:enabled sync-config) (pos? ns-op-count))
-            (let [counter (:ns-indexer-count sync-config)
-                  module-name (:module-name sync-config)
-                  new-count (swap! counter + ns-op-count)]
-              (log/debug "Sync mode: waiting for ns-indexer microbatch count" new-count "(+" ns-op-count "ops)")
-              (let [wait-fn (requiring-resolve 'com.rpl.rama.test/wait-for-microbatch-processed-count)]
-                (wait-fn ipc module-name "ns-indexer" new-count))))
+            (let [module-name (:module-name sync-config)
+                  num-partitions (:num-partitions (rama/foreign-object-info ns-depot))
+                  total (reduce + (for [part (range num-partitions)]
+                                    (:end-offset (rama/foreign-depot-partition-info ns-depot part))))
+                  wait-fn (requiring-resolve 'com.rpl.rama.test/wait-for-microbatch-processed-count)]
+              (log/debug "Sync mode: waiting for ns-indexer record count" total)
+              (wait-fn ipc module-name "ns-indexer" total)))
 
           ;; Only clear buffers after successful commit
           (reset! pending-ops [])
           (reset! pending-ns-ops [])
-          (reset! bnode-map {})
 
           ;; Record transaction metrics
           (metrics/inc-transaction-count "commit")
@@ -663,8 +668,7 @@
           (log/debug "Rolling back transaction - discarding" op-count "triple ops and" ns-op-count "namespace ops")
           (metrics/inc-transaction-count "rollback")
           (reset! pending-ops [])
-          (reset! pending-ns-ops [])
-          (reset! bnode-map {})))
+          (reset! pending-ns-ops [])))
       (sizeInternal [^objects contexts]
         ;; Return the number of statements in the specified contexts
         ;; Optimization: Use count topology when no pending ops (avoids full scan)
@@ -872,20 +876,12 @@
          ns-depot            (rama/foreign-depot ipc module-name "*namespace-depot")
          get-ns-qt           (rama/foreign-query ipc module-name "get-namespace")
          list-ns-qt          (rama/foreign-query ipc module-name "list-namespaces")
-         ;; Sync config for synchronous commits in test mode
-         ;; Use separate global counters per [module-name topology-name] to persist across SAIL instances
-         ;; Each topology (indexer, ns-indexer) has its own independent microbatch count
+         ;; Sync config for synchronous commits in test mode. The barrier target
+         ;; is derived from depot end-offsets at commit time (see commitInternal),
+         ;; so no cross-instance counters are needed.
          sync-config (when sync-commits
-                       (let [get-or-create-counter (fn [topo-name]
-                                                     (let [key [module-name topo-name]]
-                                                       (get (swap! microbatch-counters
-                                                                   update key
-                                                                   (fn [existing] (or existing (atom 0))))
-                                                            key)))]
-                         {:enabled true
-                          :module-name module-name
-                          :indexer-count (get-or-create-counter "indexer")
-                          :ns-indexer-count (get-or-create-counter "ns-indexer")}))]
+                       {:enabled true
+                        :module-name module-name})]
      (proxy [AbstractSail] []
        (getConnectionInternal []
          (log/debug "Opening new SAIL connection")

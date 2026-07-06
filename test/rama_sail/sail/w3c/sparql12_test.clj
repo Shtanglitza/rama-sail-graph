@@ -124,7 +124,7 @@
         (case query-type
           :select (rc/run-select-test conn query-string result-path)
           :construct (rc/run-construct-test conn query-string result-path)
-          :ask {:pass? false :message "ASK queries not yet supported"}))
+          :ask (rc/run-ask-test conn query-string result-path)))
       (finally
         (.close conn)))))
 
@@ -192,4 +192,8 @@
                          (if (pos? testable) (* 100.0 (/ pass testable)) 0.0))))
       (println)
       ;; Assert no unexpected failures
-      (is (zero? fail) (format "%d unexpected test failures" fail)))))
+      (is (zero? fail) (format "%d unexpected test failures" fail))
+      ;; An unexpected pass means a feature landed: shrink expected-failures
+      ;; instead of letting the skip list rot
+      (is (zero? unexpected-pass)
+          (format "%d unexpected passes - remove them from expected-failures" unexpected-pass)))))

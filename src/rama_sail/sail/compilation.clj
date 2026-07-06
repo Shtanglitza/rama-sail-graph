@@ -235,6 +235,17 @@
    :right (tuple-expr->plan (.getRightArg u))})
 
 (defmethod tuple-expr->plan Projection [^Projection p]
+  ;; CONSTRUCT (and SELECT (?x AS ?y)) produce ALIASING projections that
+  ;; rename source vars (?s -> ?subject). The :project operator only filters
+  ;; variables — projecting a name the sub-plan never binds would silently
+  ;; return empty rows. Fall back to RDF4J for aliased projections.
+  (doseq [^org.eclipse.rdf4j.query.algebra.ProjectionElem elem
+          (.getElements (.getProjectionElemList p))]
+    (let [alias (.orElse (.getProjectionAlias elem) nil)]
+      (when (and alias (not= alias (.getName elem)))
+        (throw (UnsupportedOperationException.
+                (str "RamaSail does not yet support aliasing projections: "
+                     (.getName elem) " AS " alias))))))
   {:op :project
    :vars (binding-names->vars (.getBindingNames p))
    :sub-plan (tuple-expr->plan (.getArg p))})

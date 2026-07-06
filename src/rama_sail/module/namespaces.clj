@@ -9,12 +9,14 @@
 (defn namespace-depot-partition-key
   "Partition key for namespace depot operations.
    Hash by prefix for set/remove operations to ensure same prefix goes to same task.
-   Returns nil for clear operations (handled specially in SAIL layer)."
+   Clear operations use a constant key — hash-by silently DROPS records whose
+   extracted key is nil, so the key must never be nil. The record lands on one
+   deterministic task and the topology broadcasts it to all partitions with |all."
   [[op & args]]
   (case op
     :set-ns (first args)      ;; hash by prefix
     :remove-ns (first args)   ;; hash by prefix
-    :clear-ns nil))
+    :clear-ns "clear-ns"))
 
 (defn setup-namespace-topology
   "Sets up the namespace storage microbatch topology with its PState and ETL sources.
@@ -39,22 +41,27 @@
                 (local-transform> [(keypath *prefix) NONE>] $$namespaces)
 
                 (case> (= *op :clear-ns))
-                ;; [:clear-ns] - clear all namespaces
+                ;; [:clear-ns] - clear all namespaces.
+                ;; The depot routes this record to one task (constant partition
+                ;; key — it must never be nil), so broadcast before wiping:
+                ;; every task holds a partition of $$namespaces.
+                ;; NOTE: do NOT use local-clear> here — it kills the worker
+                ;; when used inside a microbatch topology (verified empirically;
+                ;; see test history for details).
+                (|all)
                 (local-transform> [MAP-VALS NONE>] $$namespaces)))))
 
 (defn register-namespace-query-topologies
   "Registers query topologies for namespace lookups.
    Call from within a defmodule body."
   [topologies]
-  ;; Get a single namespace by prefix
+  ;; Get a single namespace by prefix. The depot partitions :set-ns/:remove-ns
+  ;; by prefix, so the owning task is deterministic — one targeted lookup
+  ;; instead of a broadcast to every task.
   (<<query-topology topologies "get-namespace" [*prefix :> *iri]
-                    (|all)
-                    (local-select> [(keypath *prefix) (view identity)] $$namespaces :> *val)
-                    (filter> (some? *val))
-                    (|origin)
-                    ;; Collect all non-nil values (should be at most one)
-                    (aggs/+vec-agg *val :> *vals)
-                    (first *vals :> *iri))
+                    (|hash *prefix)
+                    (local-select> [(keypath *prefix) (view identity)] $$namespaces :> *iri)
+                    (|origin))
 
   ;; List all namespaces as a map of prefix -> IRI
   (<<query-topology topologies "list-namespaces" [:> *namespaces]

@@ -13,7 +13,6 @@
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
             [rama-sail.metrics :as metrics]
-            [rama-sail.metrics-server :as metrics-server]
             [rama-sail.server.connection :as conn]
             [ring.adapter.jetty :as jetty]
             [ring.middleware.params :refer [wrap-params]])
@@ -236,81 +235,119 @@
 ;; Ring Handlers
 ;; ---------------------------------------------------------------------------
 
+(def default-server-options
+  "Default security posture for the SPARQL endpoint.
+   Read-only unless updates are explicitly enabled — a form-encoded POST is a
+   CORS 'simple request', so any web page could otherwise fire a destructive
+   `DELETE WHERE { ?s ?p ?o }` at a reachable server (finding C4)."
+  {:allow-updates false   ; SPARQL Update rejected with 403 unless true
+   :auth-token    nil     ; when set, updates require `Authorization: Bearer <token>`
+   :cors-origin   "*"})   ; Access-Control-Allow-Origin value
+
+(defn- authorized-update?
+  "An update is authorized only when updates are enabled and, if an auth token
+   is configured, the request carries a matching Bearer token. A configured
+   token is a non-simple request header, so a cross-site simple POST cannot
+   supply it — closing the CSRF hole even when updates are enabled."
+  [request {:keys [allow-updates auth-token]}]
+  (and allow-updates
+       (or (nil? auth-token)
+           (= (get-in request [:headers "authorization"])
+              (str "Bearer " auth-token)))))
+
 (defn make-sparql-handler
   "Create the SPARQL Protocol Ring handler.
-   Takes a SailRepository that must already be initialized."
-  [^SailRepository repo]
-  (fn [request]
-    (let [query-str (extract-query request)
-          accept (get-in request [:headers "accept"] "*/*")]
-      (cond
-        (str/blank? query-str)
-        {:status 400
-         :headers {"Content-Type" "text/plain;charset=utf-8"}
-         :body "Missing query parameter. Use ?query= or POST with application/sparql-query body."}
+   Takes a SailRepository that must already be initialized and a server-options
+   map (see `default-server-options`)."
+  ([^SailRepository repo] (make-sparql-handler repo default-server-options))
+  ([^SailRepository repo options]
+   (let [{:keys [allow-updates] :as opts} (merge default-server-options options)]
+     (fn [request]
+       (let [query-str (extract-query request)
+             accept (get-in request [:headers "accept"] "*/*")]
+         (cond
+           (str/blank? query-str)
+           {:status 400
+            :headers {"Content-Type" "text/plain;charset=utf-8"}
+            :body "Missing query parameter. Use ?query= or POST with application/sparql-query body."}
 
-        :else
-        (let [conn (.getConnection repo)]
-          (try
-            (if (update-request? request)
-              ;; SPARQL Update
-              (let [update (.prepareUpdate conn QueryLanguage/SPARQL query-str)]
-                (execute-update update))
-              ;; SPARQL Query — detect type by preparing it
-              (let [query (.prepareQuery conn QueryLanguage/SPARQL query-str)]
-                (cond
-                  (instance? TupleQuery query)
-                  (execute-tuple-query query accept)
+           ;; SPARQL Update requested but updates are disabled (read-only default)
+           (and (update-request? request) (not allow-updates))
+           {:status 403
+            :headers {"Content-Type" "text/plain;charset=utf-8"}
+            :body "SPARQL Update is disabled. Server is read-only; start with --allow-updates to enable."}
 
-                  (instance? GraphQuery query)
-                  (execute-graph-query query accept)
+           ;; Updates enabled but this request is not authorized (missing/wrong token)
+           (and (update-request? request) (not (authorized-update? request opts)))
+           {:status 401
+            :headers {"Content-Type" "text/plain;charset=utf-8"
+                      "WWW-Authenticate" "Bearer"}
+            :body "Unauthorized. SPARQL Update requires a valid Bearer token."}
 
-                  (instance? BooleanQuery query)
-                  (execute-boolean-query query accept)
+           :else
+           (let [conn (.getConnection repo)]
+             (try
+               (if (update-request? request)
+                 ;; SPARQL Update (authorized above)
+                 (let [update (.prepareUpdate conn QueryLanguage/SPARQL query-str)]
+                   (execute-update update))
+                 ;; SPARQL Query — detect type by preparing it
+                 (let [query (.prepareQuery conn QueryLanguage/SPARQL query-str)]
+                   (cond
+                     (instance? TupleQuery query)
+                     (execute-tuple-query query accept)
 
-                  :else
-                  {:status 400
-                   :headers {"Content-Type" "text/plain;charset=utf-8"}
-                   :body "Unsupported query type."})))
-            (catch org.eclipse.rdf4j.query.MalformedQueryException e
-              (log/warn "Malformed SPARQL query:" (.getMessage e))
-              {:status 400
-               :headers {"Content-Type" "text/plain;charset=utf-8"}
-               :body (str "Malformed query: " (.getMessage e))})
-            (catch org.eclipse.rdf4j.query.QueryInterruptedException e
-              (log/warn "Query timeout:" (.getMessage e))
-              {:status 408
-               :headers {"Content-Type" "text/plain;charset=utf-8"}
-               :body "Query execution timed out."})
-            (catch Exception e
-              (log/error e "SPARQL query execution error")
-              {:status 500
-               :headers {"Content-Type" "text/plain;charset=utf-8"}
-               :body (str "Internal error: " (.getMessage e))})
-            (finally
-              (.close conn))))))))
+                     (instance? GraphQuery query)
+                     (execute-graph-query query accept)
+
+                     (instance? BooleanQuery query)
+                     (execute-boolean-query query accept)
+
+                     :else
+                     {:status 400
+                      :headers {"Content-Type" "text/plain;charset=utf-8"}
+                      :body "Unsupported query type."})))
+               (catch org.eclipse.rdf4j.query.MalformedQueryException e
+                 (log/warn "Malformed SPARQL query:" (.getMessage e))
+                 {:status 400
+                  :headers {"Content-Type" "text/plain;charset=utf-8"}
+                  :body (str "Malformed query: " (.getMessage e))})
+               (catch org.eclipse.rdf4j.query.QueryInterruptedException e
+                 (log/warn "Query timeout:" (.getMessage e))
+                 ;; 503, not 408: the client's request was not itself slow to
+                 ;; arrive; the server gave up evaluating it (server-side condition).
+                 {:status 503
+                  :headers {"Content-Type" "text/plain;charset=utf-8"}
+                  :body "Query execution timed out."})
+               (catch Exception e
+                 (log/error e "SPARQL query execution error")
+                 {:status 500
+                  :headers {"Content-Type" "text/plain;charset=utf-8"}
+                  :body (str "Internal error: " (.getMessage e))})
+               (finally
+                 (.close conn))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Middleware
 ;; ---------------------------------------------------------------------------
 
 (defn wrap-cors
-  "Add CORS headers to allow cross-origin requests from gdotv and browsers."
-  [handler]
-  (fn [request]
-    (if (= (:request-method request) :options)
-      ;; Preflight
-      {:status 204
-       :headers {"Access-Control-Allow-Origin" "*"
-                 "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-                 "Access-Control-Allow-Headers" "Content-Type, Accept, Authorization"
-                 "Access-Control-Max-Age" "86400"}}
-      ;; Normal request
-      (let [response (handler request)]
-        (update response :headers merge
-                {"Access-Control-Allow-Origin" "*"
-                 "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
-                 "Access-Control-Allow-Headers" "Content-Type, Accept, Authorization"})))))
+  "Add CORS headers to allow cross-origin requests from gdotv and browsers.
+   `cors-origin` is the Access-Control-Allow-Origin value (default \"*\"). Set a
+   specific origin when SPARQL Update is enabled so a wildcard does not expose
+   the mutating endpoint to arbitrary web pages (finding C4)."
+  ([handler] (wrap-cors handler "*"))
+  ([handler cors-origin]
+   (let [cors-headers {"Access-Control-Allow-Origin"  cors-origin
+                       "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
+                       "Access-Control-Allow-Headers" "Content-Type, Accept, Authorization"}]
+     (fn [request]
+       (if (= (:request-method request) :options)
+         ;; Preflight
+         {:status 204
+          :headers (assoc cors-headers "Access-Control-Max-Age" "86400")}
+         ;; Normal request
+         (update (handler request) :headers merge cors-headers))))))
 
 (defn wrap-request-logging
   "Log incoming SPARQL requests."
@@ -328,41 +365,48 @@
 ;; ---------------------------------------------------------------------------
 
 (defn build-app
-  "Build the full Ring application with middleware."
-  [^SailRepository repo]
-  (-> (fn [request]
-        (case (:uri request)
-          "/sparql"  ((make-sparql-handler repo) request)
-          "/health"  {:status 200
-                      :headers {"Content-Type" "text/plain;charset=utf-8"}
-                      :body "OK"}
-          "/metrics" (try
-                       {:status 200
-                        :headers {"Content-Type" "text/plain; version=0.0.4; charset=utf-8"}
-                        :body (metrics/metrics-text)}
-                       (catch Exception e
-                         (log/error e "Error serving metrics")
-                         {:status 500
-                          :headers {"Content-Type" "text/plain;charset=utf-8"}
-                          :body "Internal error"}))
-          "/"        {:status 200
-                      :headers {"Content-Type" "text/plain;charset=utf-8"}
-                      :body "Rama Sail SPARQL Endpoint. Query at /sparql\n\nEndpoints:\n  /sparql  - SPARQL Protocol\n  /health  - Health check\n  /metrics - Prometheus metrics"}
-          {:status 404
-           :headers {"Content-Type" "text/plain;charset=utf-8"}
-           :body "Not found. SPARQL endpoint is at /sparql"}))
-      wrap-params
-      wrap-cors
-      wrap-request-logging))
+  "Build the full Ring application with middleware.
+   `options` (see `default-server-options`) controls update authorization and
+   the CORS origin; defaults to a read-only, wildcard-CORS posture."
+  ([^SailRepository repo] (build-app repo default-server-options))
+  ([^SailRepository repo options]
+   (let [opts (merge default-server-options options)
+         sparql-handler (make-sparql-handler repo opts)]
+     (-> (fn [request]
+           (case (:uri request)
+             "/sparql"  (sparql-handler request)
+             "/health"  {:status 200
+                         :headers {"Content-Type" "text/plain;charset=utf-8"}
+                         :body "OK"}
+             "/metrics" (try
+                          {:status 200
+                           :headers {"Content-Type" "text/plain; version=0.0.4; charset=utf-8"}
+                           :body (metrics/metrics-text)}
+                          (catch Exception e
+                            (log/error e "Error serving metrics")
+                            {:status 500
+                             :headers {"Content-Type" "text/plain;charset=utf-8"}
+                             :body "Internal error"}))
+             "/"        {:status 200
+                         :headers {"Content-Type" "text/plain;charset=utf-8"}
+                         :body "Rama Sail SPARQL Endpoint. Query at /sparql\n\nEndpoints:\n  /sparql  - SPARQL Protocol\n  /health  - Health check\n  /metrics - Prometheus metrics"}
+             {:status 404
+              :headers {"Content-Type" "text/plain;charset=utf-8"}
+              :body "Not found. SPARQL endpoint is at /sparql"}))
+         wrap-params
+         (wrap-cors (:cors-origin opts))
+         wrap-request-logging))))
 
 (defn start-sparql-server!
   "Start the SPARQL Protocol HTTP server.
-   Takes a SailRepository and port number.
+   Takes a SailRepository, port number, and optional server-options map
+   (see `default-server-options`).
    Returns the Jetty server instance."
-  [^SailRepository repo port]
-  (let [app (build-app repo)]
-    (log/info (str "Starting SPARQL endpoint on port " port "..."))
-    (jetty/run-jetty app {:port port :join? false})))
+  ([^SailRepository repo port] (start-sparql-server! repo port default-server-options))
+  ([^SailRepository repo port options]
+   (let [app (build-app repo options)]
+     (log/info (str "Starting SPARQL endpoint on port " port "..."))
+     (jetty/run-jetty app {:port port :join? false}))))
 
 (defn stop-sparql-server!
   "Stop the Jetty server."
@@ -375,20 +419,31 @@
 ;; CLI Entry Point
 ;; ---------------------------------------------------------------------------
 
+(defn- parse-long-arg
+  "parse-long but fail fast with a clear message instead of NPE/nil on bad input."
+  [flag val]
+  (or (and val (parse-long val))
+      (throw (ex-info (str "Flag " flag " requires an integer value, got: " (pr-str val)) {}))))
+
 (defn- parse-args
-  "Parse CLI arguments into a config map."
+  "Parse CLI arguments into a config map.
+   Value flags consume the next arg; `--allow-updates` is a boolean flag."
   [args]
   (loop [args (seq args)
-         config {:mode "ipc" :port 7200 :rama-port 1973}]
+         config {:mode "ipc" :port 7200 :rama-port 1973
+                 :allow-updates false :auth-token nil :cors-origin "*"}]
     (if-not args
       config
-      (let [[flag val & rest] args]
+      (let [[flag val & more] args]
         (case flag
-          "--port"      (recur rest (assoc config :port (parse-long val)))
-          "--mode"      (recur rest (assoc config :mode val))
-          "--host"      (recur rest (assoc config :host val))
-          "--rama-port" (recur rest (assoc config :rama-port (parse-long val)))
-          ;; skip unknown flags
+          "--port"          (recur more (assoc config :port (parse-long-arg flag val)))
+          "--mode"          (recur more (assoc config :mode val))
+          "--host"          (recur more (assoc config :host val))
+          "--rama-port"     (recur more (assoc config :rama-port (parse-long-arg flag val)))
+          "--allow-updates" (recur (next args) (assoc config :allow-updates true))
+          "--auth-token"    (recur more (assoc config :auth-token val))
+          "--cors-origin"   (recur more (assoc config :cors-origin val))
+          ;; skip unknown flags (advance by one)
           (recur (next args) config))))))
 
 (defn -main [& args]
@@ -407,8 +462,21 @@
                                   {:host (or (:host config) "localhost")
                                    :port (:rama-port config)})))
         repo (:repo conn-state)
-        server (start-sparql-server! repo (:port config))]
+        server-options {:allow-updates (:allow-updates config)
+                        :auth-token    (:auth-token config)
+                        :cors-origin   (:cors-origin config)}
+        server (start-sparql-server! repo (:port config) server-options)]
 
+    ;; Surface the security posture and warn on the risky combination:
+    ;; writable + wildcard CORS + no token = any web page can mutate the store.
+    (println (str "Updates: " (if (:allow-updates config) "ENABLED" "disabled (read-only)")))
+    (when (:allow-updates config)
+      (if (:auth-token config)
+        (println "Update auth: Bearer token required")
+        (println "Update auth: NONE — anyone who can reach this port can modify data"))
+      (when (and (= "*" (:cors-origin config)) (not (:auth-token config)))
+        (println "WARNING: updates enabled with wildcard CORS and no --auth-token; any web")
+        (println "         page can issue mutating requests. Set --auth-token and/or --cors-origin.")))
     (println (str "SPARQL endpoint ready at http://localhost:" (:port config) "/sparql"))
     (println (str "Health check at http://localhost:" (:port config) "/health"))
     (println (str "Prometheus metrics at http://localhost:" (:port config) "/metrics"))
