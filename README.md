@@ -36,7 +36,7 @@ rama-sail-graph integrates the [Rama](https://redplanetlabs.com/rama) distribute
 
 - Java 17+
 - [Leiningen](https://leiningen.org/)
-- Rama 1.6.0 (see [Rama installation](https://redplanetlabs.com/docs))
+- Rama 1.8.0 (see [Rama installation](https://redplanetlabs.com/docs))
 
 ### Open Source And Commercial Use
 
@@ -64,7 +64,7 @@ Then add to `project.clj`:
 [com.shtanglitza/rama-sail-graph "0.1.0"]
 ```
 
-> **Note:** Rama 1.6.0 is required at runtime. Add the [Red Planet Labs Maven repository](https://nexus.redplanetlabs.com/repository/maven-public-releases) to resolve the Rama dependency.
+> **Note:** Rama 1.8.0 is required at runtime. Add the [Red Planet Labs Maven repository](https://nexus.redplanetlabs.com/repository/maven-public-releases) to resolve the Rama dependency.
 
 ### Build & Test
 
@@ -94,17 +94,35 @@ lein test :only rama-sail.sail.w3c.sparql11-property-path-test
 ### SPARQL HTTP Endpoint
 
 ```bash
-# Start with in-process cluster (dev mode)
+# Start with in-process cluster (dev mode). Read-only by default.
 lein run -m rama-sail.server.sparql -- --port 7200 --mode ipc
 
 # Start with external Rama cluster
 lein run -m rama-sail.server.sparql -- --port 7200 --mode cluster --host localhost --rama-port 1973
 
+# Enable SPARQL UPDATE (off by default), require a Bearer token, and restrict CORS
+lein run -m rama-sail.server.sparql -- --port 7200 --mode ipc \
+  --allow-updates --auth-token s3cret --cors-origin https://app.example
+
 # Query
 curl -G http://localhost:7200/sparql --data-urlencode "query=SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+
+# Update (only when the server was started with --allow-updates + --auth-token)
+curl -X POST http://localhost:7200/sparql \
+  -H "Authorization: Bearer s3cret" \
+  -H "Content-Type: application/sparql-update" \
+  --data 'INSERT DATA { <http://ex/a> <http://ex/b> <http://ex/c> }'
 ```
 
-> **Note:** The SPARQL endpoint is intended for development and internal use. It does not currently include authentication, rate limiting, or transport security.
+Server flags:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--allow-updates` | off | Enable SPARQL UPDATE; otherwise UPDATE returns `403`. |
+| `--auth-token <t>` | none | When set, UPDATE requires `Authorization: Bearer <t>` (else `401`). |
+| `--cors-origin <o>` | `*` | Value for `Access-Control-Allow-Origin`; set a specific origin when updates are enabled. |
+
+> **Note:** The endpoint is **read-only by default** — a form-encoded POST is a CORS "simple request", so leaving UPDATE open would let any web page issue `DELETE WHERE { ?s ?p ?o }`. Enable writes explicitly with `--allow-updates`, and gate them with `--auth-token` and a non-wildcard `--cors-origin`. The endpoint still provides no rate limiting or transport security (TLS); front it with a reverse proxy for internet-facing deployments.
 
 ## Usage
 
@@ -359,7 +377,7 @@ lein uberjar
 # From the Rama installation directory
 cd $RAMA_HOME
 ./rama deploy --action launch \
-  --jar /path/to/rama-sail-graph/target/rama-sail-graph-0.1.0-SNAPSHOT-standalone.jar \
+  --jar /path/to/rama-sail-graph/target/rama-sail-graph-0.2.0-SNAPSHOT-standalone.jar \
   --module "rama-sail.core/RdfStorageModule" \
   --tasks 4 --threads 2 --workers 1
 
@@ -419,7 +437,7 @@ These benchmark results were recorded on this development machine:
 - CPU: 10 cores (4 performance, 6 efficiency)
 - Memory: 24 GB
 - OS: macOS 26.4 
-- Runtime/config: Rama 1.6.0, single-node cluster, 6 GB heap, 4 tasks, 2 threads
+- Runtime/config: Rama 1.8.0, single-node cluster, 6 GB heap, 4 tasks, 2 threads
 - Benchmark settings: 50 iterations, 5 warmup
 
 #### 6K Triples (100 products)

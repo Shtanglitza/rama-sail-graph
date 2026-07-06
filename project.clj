@@ -1,4 +1,4 @@
-(defproject rama-sail-graph "0.1.0-SNAPSHOT"
+(defproject rama-sail-graph "0.2.0-SNAPSHOT"
   :description "Rama module that integrates with RDF4J SAIL API for RDF quad storage and SPARQL query evaluation"
   :url "https://github.com/Shtanglitza/rama-sail-graph"
   :license {:name "Apache-2.0"
