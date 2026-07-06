@@ -3,9 +3,13 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+> **Note:** This project is not published to Maven Central or Clojars and has no git
+> tags yet. Consume it via a `:git/sha`-pinned [git dependency](README.md#installation).
+> The headings below are development milestones, not tagged releases.
+
+## Unreleased
 
 ### Security
 - **SPARQL UPDATE endpoint is now read-only by default.** Previously the HTTP endpoint
@@ -57,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Dead BNode-skolemization machinery and the unused `bnode-map` transaction atom.
 
-## [0.1.0] - 2026-04-05
+## 0.1.0 — Initial implementation
 
 ### Added
 - Quad storage with four index PStates (SPOC, POSC, OSPC, CSPO)
@@ -75,6 +79,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Namespace prefix management with SPARQL Protocol support
 - Physical deletes with index removal across all four indices
 - Composable module building blocks for extending the base module
-
-[Unreleased]: https://github.com/Shtanglitza/rama-sail-graph/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Shtanglitza/rama-sail-graph/releases/tag/v0.1.0
