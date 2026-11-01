@@ -630,6 +630,75 @@
       (is (= [[:clear-context [nil nil nil ctx]]] result)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; assign-commit-tx-times (Phase 6, D1): bounded commit stamps
+;;; ---------------------------------------------------------------------------
+
+(def ^:private assign-commit-tx-times @#'sail/assign-commit-tx-times)
+
+(defn- clear-op [ctx] [:clear-context [nil nil nil ctx]])
+(defn- add-op [i ctx] [:add [(str "<s" i ">") "<p>" "<o>" ctx]])
+
+(defn- stamps-respect-clear-order?
+  "Invariant the indexer relies on (:clear-context deletes iff clear-tx >= creation-tx):
+   an op AFTER a clear stamps strictly later; an op BEFORE a clear never stamps later."
+  [records]
+  (let [indexed (map-indexed vector records)]
+    (every? true?
+            (for [[i [op _ t]] indexed
+                  [j [op2 _ t2]] indexed
+                  :when (and (= op :clear-context) (not= op2 :clear-context))]
+              (if (< i j) (> t2 t) (>= t t2))))))
+
+(deftest test-assign-commit-tx-times-bulk-commit-is-not-future-dated
+  (testing "D1 regression: a 60k-op commit must not stamp quads up to 60s in the future"
+    ;; The old scheme stamped op i at tx-time + i ms, so a DROP/CLEAR issued a few
+    ;; seconds after a bulk load (clear-tx < creation-tx) skipped most of its quads.
+    (let [tx 1000000
+          ops (mapv #(add-op % "<g>") (range 60000))
+          records (assign-commit-tx-times ops tx)]
+      (is (= 60000 (count records)))
+      (is (every? #(= tx (nth % 2)) records)
+          "A commit with no clears stamps every op with the commit time")
+      (is (= (map (fn [[op q]] [op q]) records) ops)
+          "Ops and their order are preserved"))))
+
+(deftest test-assign-commit-tx-times-clear-epochs
+  (testing "clears then adds (compute-commit-ops' shape): exactly two stamps"
+    (let [tx 500
+          ops (concat (map clear-op ["<g1>" "<g2>" "<g3>"])
+                      (map #(add-op % "<g1>") (range 1000)))
+          records (assign-commit-tx-times ops tx)]
+      (is (= #{500 501} (set (map #(nth % 2) records))))
+      (is (every? #(= 500 (nth % 2)) (take 3 records)) "Clears share the commit stamp")
+      (is (every? #(= 501 (nth % 2)) (drop 3 records)) "Post-clear ops stamp strictly later")
+      (is (stamps-respect-clear-order? records))))
+
+  (testing "end-to-end with compute-commit-ops: CLEAR GRAPH g; re-add into g"
+    (let [records (assign-commit-tx-times
+                   (compute-commit-ops [(clear-op "<g>") (add-op 1 "<g>") (add-op 2 "<g>")])
+                   42)]
+      (is (= [[:clear-context [nil nil nil "<g>"] 42]] (take 1 records)))
+      (is (every? #(= 43 (nth % 2)) (rest records)))))
+
+  (testing "interleaved clears and ops: invariant holds, offset bounded by clear runs"
+    (let [rng (java.util.Random. 6)]
+      (dotimes [_ 200]
+        (let [ops (vec (for [i (range (inc (.nextInt rng 40)))]
+                         (if (< (.nextInt rng 10) 3)
+                           (clear-op (str "<g" (.nextInt rng 3) ">"))
+                           (add-op i (str "<g" (.nextInt rng 3) ">")))))
+              records (assign-commit-tx-times ops 0)
+              clear-runs (count (filter (fn [[a b]] (and (= :clear-context (first a))
+                                                         (not= :clear-context (first b))))
+                                        (partition 2 1 ops)))]
+          (is (stamps-respect-clear-order? records) (pr-str ops))
+          (is (<= (apply max (map #(nth % 2) records)) clear-runs)
+              "Future offset is bounded by clear->op boundaries, not by op count")))))
+
+  (testing "empty commit"
+    (is (= [] (assign-commit-tx-times [] 7)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; RDF-star Triple Term Serialization Tests
 ;;; ---------------------------------------------------------------------------
 

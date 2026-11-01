@@ -10,8 +10,10 @@
   (:require [clojure.test :refer :all]
             [com.rpl.rama :as rama]
             [com.rpl.rama.test :as rtest]
+            [com.rpl.rama.path :refer [keypath]]
             [rama-sail.core :refer [RdfStorageModule]]
-            [rama-sail.sail.adapter :as rsail])
+            [rama-sail.sail.adapter :as rsail]
+            [rama-sail.sail.serialization :as ser])
   (:import (org.eclipse.rdf4j.model Resource)
            [org.eclipse.rdf4j.query BindingSet]
            [org.eclipse.rdf4j.model Literal]
@@ -693,3 +695,144 @@
               (.close conn))))
         (finally
           (.shutDown repo))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Phase 6 data-loss regressions (D1-D3)
+;;; ---------------------------------------------------------------------------
+
+(defn- with-conn
+  "Run (f conn) against a fresh RamaSail repository on the shared IPC."
+  [f]
+  (let [repo (SailRepository. (rsail/create-rama-sail *ipc* module-name))]
+    (.init repo)
+    (try
+      (let [^SailRepositoryConnection conn (.getConnection repo)]
+        (try (f conn) (finally (.close conn))))
+      (finally (.shutDown repo)))))
+
+(defn- sparql-count
+  "Number of solutions of a SELECT query (exercises the Rama query path / posc index)."
+  [^SailRepositoryConnection conn ^String sparql]
+  (with-open [iter (.evaluate (.prepareTupleQuery conn sparql))]
+    (count (iterator-seq iter))))
+
+(deftest test-clear-then-readd-existing-quads-persists
+  (testing "D2: CLEAR GRAPH g + re-INSERT the SAME already-committed quads, one transaction"
+    ;; The 'replace graph' pattern (Graph Store PUT, DROP+INSERT DATA). The re-add of
+    ;; an already-visible quad used to be a no-op that left its old creation stamp,
+    ;; so when it ran before the clear in the same microbatch (clear and add live on
+    ;; different partitions) the clear (clear-tx >= old stamp) deleted it.
+    (with-conn
+      (fn [^SailRepositoryConnection conn]
+        (let [ctx (.createIRI VF (unique-iri "readd-ctx"))
+              p (.createIRI VF (unique-iri "readd-p"))
+              n 60
+              quads (vec (for [i (range n)]
+                           [(.createIRI VF (unique-iri (str "readd-s" i)))
+                            (.createLiteral VF (str "v" i))]))]
+          (.begin conn)
+          (doseq [[s o] quads] (.add conn s p o (into-array Resource [ctx])))
+          (.commit conn)
+          (wait-mb!)
+          (is (= n (count-statements conn nil nil nil [ctx])))
+
+          (.begin conn)
+          (.clear conn (into-array Resource [ctx]))
+          (doseq [[s o] quads] (.add conn s p o (into-array Resource [ctx])))
+          (.commit conn)
+          (wait-mb!)
+
+          (is (= n (count-statements conn nil nil nil [ctx]))
+              "Every re-added quad must survive the clear that preceded it")
+          (is (= n (sparql-count conn (str "SELECT ?s ?o WHERE { GRAPH <" ctx "> { ?s <" p "> ?o } }")))
+              "Predicate-index (posc) view must agree with the context index")
+
+          (testing "a later clear still removes the refreshed quads"
+            (.begin conn)
+            (.clear conn (into-array Resource [ctx]))
+            (.commit conn)
+            (wait-mb!)
+            (is (= 0 (count-statements conn nil nil nil [ctx])))))))))
+
+(deftest test-bulk-commit-then-clear-removes-everything
+  (testing "D1: a CLEAR issued right after a large commit removes ALL of its quads"
+    ;; Each op used to be stamped tx-time + op-index ms, so a 5000-op commit was
+    ;; dated up to 5 s into the future and an immediate CLEAR (clear-tx < stamp)
+    ;; skipped every quad stamped after the clear's wall-clock time.
+    (with-conn
+      (fn [^SailRepositoryConnection conn]
+        (let [ctx (.createIRI VF (unique-iri "bulk-ctx"))
+              p (.createIRI VF "http://ex/bulk-p")
+              n 5000]
+          (.begin conn)
+          (dotimes [i n]
+            (.add conn (.createIRI VF (str "http://ex/bulk-s-" i)) p
+                  (.createLiteral VF (long i)) (into-array Resource [ctx])))
+          (.commit conn)
+          (let [committed-at (System/currentTimeMillis)]
+            (wait-mb!)
+            (is (= n (count-statements conn nil p nil [ctx])))
+
+            ;; Deterministic check (the clear below only catches the bug when depot
+            ;; appends outpace 1/ms): every quad of the commit carries ONE stamp,
+            ;; and none is dated after the commit returned.
+            (let [tx-times (rama/foreign-pstate *ipc* module-name "$$quad-tx-time")
+                  stamp (fn [i] (rama/foreign-select-one
+                                 [(keypath (str "<http://ex/bulk-s-" i ">") (ser/val->str p)
+                                           (ser/val->str (.createLiteral VF (long i)))
+                                           (ser/val->str ctx))]
+                                 tx-times))
+                  first-stamp (stamp 0)
+                  last-stamp (stamp (dec n))]
+              (is (some? first-stamp))
+              (is (= first-stamp last-stamp)
+                  "All ops of a clear-free commit share the commit stamp (was tx-time + op-index)")
+              (is (<= last-stamp committed-at)
+                  "No quad may be stamped in the future")))
+
+          (.begin conn)
+          (.clear conn (into-array Resource [ctx]))
+          (.commit conn)
+          (wait-mb!)
+          (is (= 0 (count-statements conn nil nil nil [ctx]))
+              "No quad of the bulk commit may survive the subsequent clear"))))))
+
+(deftest test-remove-default-graph-wildcard-spares-named-graph-pending-adds
+  (testing "D3: remove(s, *, *, (Resource) null) targets ONLY the default graph"
+    ;; A null context entry means the default graph. It was mapped to nil, which
+    ;; the pending-add matcher treats as 'any graph', so the remove also cancelled
+    ;; uncommitted adds of the same subject in every named graph.
+    (with-conn
+      (fn [^SailRepositoryConnection conn]
+        (let [s (.createIRI VF (unique-iri "nullctx-s"))
+              p (.createIRI VF "http://ex/nullctx-p")
+              o (.createLiteral VF "named")
+              o-def (.createLiteral VF "default")
+              g (.createIRI VF (unique-iri "nullctx-g"))
+              default-only (into-array Resource [nil])]
+          (.begin conn)
+          (.add conn s p o (into-array Resource [g]))
+          (.add conn s p o-def (into-array Resource []))
+          (.remove conn s nil nil default-only)
+          (is (= 1 (count-statements conn s nil nil [g]))
+              "Pending named-graph add must survive a default-graph remove (RYOW)")
+          (is (= 0 (count-statements conn s nil nil [nil]))
+              "Pending default-graph add is removed")
+          (.commit conn)
+          (wait-mb!)
+          (is (= 1 (count-statements conn s p o [g]))
+              "Named-graph quad must be committed")
+          (is (= 0 (count-statements conn s nil nil [nil]))
+              "Default-graph quad must not be committed")
+
+          (testing "same rule for committed data"
+            (.begin conn)
+            (.add conn s p o-def (into-array Resource []))
+            (.commit conn)
+            (wait-mb!)
+            (.begin conn)
+            (.remove conn s nil nil default-only)
+            (.commit conn)
+            (wait-mb!)
+            (is (= 1 (count-statements conn s nil nil [g])))
+            (is (= 0 (count-statements conn s nil nil [nil])))))))))
