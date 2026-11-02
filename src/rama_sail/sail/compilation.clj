@@ -8,7 +8,7 @@
             Order OrderElem
             Group GroupElem Count Sum Avg Min Max
             If Regex In ListMemberOperator IsURI IsBNode IsLiteral IsNumeric Lang LangMatches Datatype SameTerm
-            TripleRef ValueExprTripleRef]
+            TripleRef ValueExprTripleRef StatementPattern$Scope]
            [org.eclipse.rdf4j.query BindingSet]))
 
 ;;; -----------------------------------------------------------------------------
@@ -94,11 +94,18 @@
         c-var (.getContextVar sp)
         ;; SPARQL semantics: no GRAPH clause = match ALL contexts (wildcard = nil)
         ;; GRAPH <uri> = match specific context
-        ;; GRAPH ?var = match any context, binding the variable
+        ;; GRAPH ?var = match any NAMED context, binding the variable
         c-val (when c-var (get-val c-var))
         {:keys [pattern filters]} (rewrite-repeated-vars
                                    [[:s s-val] [:p p-val] [:o o-val] [:c c-val]])
-        bgp {:op :bgp :pattern pattern}]
+        ;; GRAPH ?g ranges over named graphs only (SPARQL 1.1 §13.3); RDF4J marks
+        ;; it with Scope/NAMED_CONTEXTS. find-bgp itself keeps "variable context =
+        ;; every graph incl. default" (the SAIL's getStatements relies on it), so
+        ;; the restriction travels as an explicit pattern flag.
+        named-only? (and (is-variable? (:c pattern))
+                         (= StatementPattern$Scope/NAMED_CONTEXTS (.getScope sp)))
+        bgp {:op :bgp :pattern (cond-> pattern
+                                 named-only? (assoc :named-graphs-only true))}]
     (if (seq filters)
       {:op :filter
        :sub-plan bgp
@@ -295,6 +302,16 @@
   ;; EmptySet produces zero rows — used for contradictions or pruned branches.
   {:op :empty})
 
+(defn- reject-graph-scoped-path!
+  "Property-path topologies (:zero-length-path / :arbitrary-length-path)
+   carry no graph: inside GRAPH <g> / GRAPH ?g they would range over every
+   graph (incl. the default graph) and drop the ?g binding. Fall back to
+   RDF4J for graph-scoped paths until the topologies thread a context."
+  [^Var context-var]
+  (when context-var
+    (throw (UnsupportedOperationException.
+            "RamaSail does not yet support property paths inside GRAPH"))))
+
 (defmethod tuple-expr->plan ZeroLengthPath [^ZeroLengthPath zlp]
   ;; :p? path — matches zero-length (subject = object) or one step.
   ;; RDF4J represents :p? as Union(ZeroLengthPath, StatementPattern).
@@ -305,6 +322,7 @@
                     (str "?" (.getName v))))
         s-val (get-val (.getSubjectVar zlp))
         o-val (get-val (.getObjectVar zlp))]
+    (reject-graph-scoped-path! (.getContextVar zlp))
     ;; path-results-to-bindings builds bindings by successive assoc, so a
     ;; shared subject/object variable would be overwritten instead of
     ;; constrained to equality. Fall back to RDF4J for that shape.
@@ -327,6 +345,7 @@
         min-length (.getMinLength alp)
         ;; Extract the predicate from the path expression (usually a StatementPattern)
         path-expr (.getPathExpression alp)
+        _ (reject-graph-scoped-path! (.getContextVar alp))
         step-plan (tuple-expr->plan path-expr)]
     ;; Same repeated-variable limitation as ZeroLengthPath (see above).
     (when (and (is-variable? s-val) (= s-val o-val))
@@ -573,10 +592,12 @@
 (defn- substitute-in-pattern
   "Substitute bound variables in a BGP pattern with their constant values."
   [pattern bindings-map]
-  {:s (substitute-var (:s pattern) bindings-map)
-   :p (substitute-var (:p pattern) bindings-map)
-   :o (substitute-var (:o pattern) bindings-map)
-   :c (substitute-var (:c pattern) bindings-map)})
+  ;; assoc (not a fresh map) so pattern flags such as :named-graphs-only survive
+  (assoc pattern
+         :s (substitute-var (:s pattern) bindings-map)
+         :p (substitute-var (:p pattern) bindings-map)
+         :o (substitute-var (:o pattern) bindings-map)
+         :c (substitute-var (:c pattern) bindings-map)))
 
 (defn- substitute-in-expr
   "Substitute bound variables in a value expression."

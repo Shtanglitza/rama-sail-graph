@@ -210,3 +210,95 @@
 (deftest test-named-graph
   (assert-equivalent!
    "SELECT ?s ?o WHERE { GRAPH <http://ex/g> { ?s <http://ex/inGraph> ?o } }"))
+
+;;; ---------------------------------------------------------------------------
+;;; Phase 6 wrong-results regressions (W1-W3). Besides raw-vs-optimized
+;;; equivalence, these assert the EXPECTED answer: a bug present in both
+;;; plans (W2, W3) is invisible to equivalence alone.
+;;; ---------------------------------------------------------------------------
+
+(defn- pairs-of [results]
+  (frequencies (map (juxt #(get % "?a") #(get % "?b")) results)))
+
+(deftest test-plain-self-join-keeps-reflexive-rows
+  ;; W1: the optimizer turns this into :self-join, which used to drop every
+  ;; ?a = ?b row. Cities: NYC x3 -> 9 pairs, LA x2 -> 4 pairs.
+  (let [{:keys [raw opt opt-plan]} (assert-equivalent!
+                                    "SELECT ?a ?b WHERE {
+                                       ?a <http://ex/city> ?c .
+                                       ?b <http://ex/city> ?c }")]
+    (is (= :self-join (get-in opt-plan [:sub-plan :op]))
+        "the optimized plan must exercise the :self-join operator")
+    (is (= 13 (count raw)) (str "raw: " (pr-str (pairs-of raw))))
+    (is (= 13 (count opt)) (str "optimized: " (pr-str (pairs-of opt))))
+    (is (contains? (pairs-of opt) [(iri "alice") (iri "alice")]))))
+
+(deftest test-self-join-on-unique-objects
+  ;; W1: every age is distinct, so each triple joins only with itself —
+  ;; 5 rows, previously 0 on the optimized path.
+  (let [{:keys [opt]} (assert-equivalent!
+                       "SELECT ?a ?b WHERE {
+                          ?a <http://ex/age> ?x .
+                          ?b <http://ex/age> ?x }")]
+    (is (= 5 (count opt)))
+    (is (every? (fn [[a b]] (= a b)) (keys (pairs-of opt))))))
+
+(deftest test-self-join-non-strict-and-ne-filters
+  ;; W1: <= / >= keep the equal pair, != drops it. Cities: NYC {alice bob
+  ;; carol}, LA {dave eve}.
+  ;;   <=, >= : NYC 3 equal + 3 ordered, LA 2 equal + 1 ordered -> 9
+  ;;   !=     : NYC 6 ordered pairs, LA 2                       -> 8
+  (doseq [[op expected] [["<=" 9] [">=" 9] ["!=" 8]]]
+    (testing op
+      (let [{:keys [opt]} (assert-equivalent!
+                           (str "SELECT ?a ?b WHERE {
+                                   ?a <http://ex/city> ?c .
+                                   ?b <http://ex/city> ?c .
+                                   FILTER(?a " op " ?b) }"))]
+        (is (= expected (count opt))
+            (str op " -> " (pr-str (pairs-of opt))))))))
+
+(deftest test-distinct-order-by-limit-keeps-order
+  ;; W2: plan is (:slice (:distinct (:project (:order ...)))); DISTINCT used
+  ;; to be an unordered set, so LIMIT returned arbitrary rows.
+  (testing "DISTINCT + ORDER BY DESC + LIMIT over duplicated values"
+    (let [sparql "SELECT DISTINCT ?name WHERE { ?s <http://ex/name> ?name }
+                  ORDER BY DESC(?name) LIMIT 2"
+          {:keys [raw opt]} (assert-equivalent! sparql)]
+      (doseq [[label results] [["raw" raw] ["optimized" opt]]]
+        (is (= [(str-lit "Eve") (str-lit "Carol")] (mapv #(get % "?name") results))
+            (str label " plan: " (pr-str results))))))
+  (testing "DISTINCT + ORDER BY + LIMIT over a projected sort key"
+    (let [sparql "SELECT DISTINCT ?s ?age WHERE { ?s <http://ex/age> ?age }
+                  ORDER BY ?age LIMIT 3"
+          {:keys [raw opt]} (assert-equivalent! sparql)]
+      (doseq [[label results] [["raw" raw] ["optimized" opt]]]
+        (is (= [19 25 30] (mapv age-of results))
+            (str label " plan: " (pr-str results))))))
+  (testing "DISTINCT + ORDER BY without LIMIT returns rows in order"
+    (let [{:keys [raw opt]} (assert-equivalent!
+                             "SELECT DISTINCT ?c WHERE { ?s <http://ex/city> ?c } ORDER BY ?c")]
+      (doseq [[label results] [["raw" raw] ["optimized" opt]]]
+        (is (= [(str-lit "LA") (str-lit "NYC")] (mapv #(get % "?c") results))
+            (str label " plan: " (pr-str results)))))))
+
+(deftest test-graph-var-excludes-default-graph
+  ;; W3: GRAPH ?g ranges over NAMED graphs only. 27 of the 29 quads live in
+  ;; the default graph; only the two <http://ex/g> quads may match.
+  (let [g (iri "g")
+        expected {{"?g" g "?s" (iri "alice")} 1
+                  {"?g" g "?s" (iri "bob")} 1}]
+    (testing "unbounded"
+      (let [{:keys [raw opt]} (assert-equivalent!
+                               "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }")]
+        (is (= expected (frequencies raw)))
+        (is (= expected (frequencies opt)))))
+    (testing "LIMIT is applied AFTER the default-graph exclusion"
+      (let [{:keys [raw opt]} (assert-equivalent!
+                               "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 2")]
+        (is (= expected (frequencies raw)))
+        (is (= expected (frequencies opt)))))
+    (testing "a constant-predicate pattern inside GRAPH ?g"
+      (let [{:keys [opt]} (assert-equivalent!
+                           "SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s <http://ex/city> ?o } }")]
+        (is (empty? opt) "all city triples are in the default graph")))))

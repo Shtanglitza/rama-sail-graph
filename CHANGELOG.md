@@ -40,6 +40,15 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   use no-read `termval` writes.
 
 ### Fixed
+- **Wrong results: self-joins dropped every `?a = ?b` row.** `?a :p ?o . ?b :p ?o` (and the
+  same with `FILTER(?a <= ?b)` / `>=`) never returned a triple joined with itself, so a
+  predicate with unique objects returned no rows at all. Module-side change: redeploy the module.
+- **Wrong results: `SELECT DISTINCT … ORDER BY … LIMIT n` returned arbitrary rows.** DISTINCT
+  discarded the ORDER BY order; it now keeps the first occurrence of each row in order.
+  Module-side change.
+- **Wrong results: `GRAPH ?g { … }` also matched the default graph** (with `?g` left unbound).
+  It now ranges over named graphs only; property paths inside `GRAPH` fall back to RDF4J
+  until the path operators carry a graph. Module-side change.
 - Repeated variables in a pattern (`?x <knows> ?x`) no longer match everything.
 - ORDER BY no longer crashes on mixed-type columns; term-type ordering follows the spec.
 - Self-join FILTER rewrite no longer moves filters incorrectly through UNION / OPTIONAL / SLICE.

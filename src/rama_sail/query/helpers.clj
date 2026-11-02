@@ -74,6 +74,25 @@
              (hash-index-candidates hash-idx binding join-vars))))
 
 ;;; ---------------------------------------------------------------------------
+;;; DISTINCT / GRAPH-scope Helpers
+;;; ---------------------------------------------------------------------------
+
+(defn distinct-preserving-order
+  "SPARQL DISTINCT that keeps the first occurrence of each solution in input
+   order, so an ORDER BY below it survives (and a LIMIT above it takes the
+   true top-k)."
+  [bindings]
+  (into [] (distinct) bindings))
+
+(defn drop-default-graph-quads
+  "Remove quads stored in the default graph. `GRAPH ?g { ... }` ranges over
+   NAMED graphs only (SPARQL 1.1 §13.3); the default graph is not a named
+   graph, so its quads must not match — previously they did, with ?g bound
+   to the internal default-graph sentinel (and then silently unbound)."
+  [quads default-context]
+  (into [] (remove #(= default-context (nth % 3))) quads))
+
+;;; ---------------------------------------------------------------------------
 ;;; Self-Join Helpers
 ;;; ---------------------------------------------------------------------------
 
@@ -133,10 +152,13 @@
                     {left-subject s1
                      right-subject s2
                      join-var join-value}))
-                ;; Standard: generate all pairs (not= i j), apply filter
+                ;; Standard: generate ALL ordered pairs, including the
+                ;; reflexive i = j pair — `?a :p ?o . ?b :p ?o` matches
+                ;; ?a = ?b (every triple joins with itself). Only the filter
+                ;; may exclude it (:ne / strict :lt :gt reject equal subjects;
+                ;; :le / :ge / no filter keep them).
                 (for [i (range n)
                       j (range n)
-                      :when (not= i j)
                       :let [s1 (subject-vec i)
                             s2 (subject-vec j)]
                       :when (apply-inequality-filter s1 s2 filter-spec left-subject right-subject)]
@@ -160,32 +182,42 @@
    {}
    bgp-results))
 
+(defn- reflexive-pairs-excluded?
+  "True when the self-join filter rejects every s1 = s2 pair (strict
+   inequality or !=), so single-subject groups can yield nothing."
+  [filter-spec]
+  (contains? #{:lt :gt :ne} (:op filter-spec)))
+
 (defn process-subject-groups
   "Process grouped subjects and generate all valid self-join pairs.
-   When result-limit is non-nil, stops after collecting that many pairs."
+   When result-limit is non-nil, stops after collecting that many pairs.
+
+   A group of ONE subject still yields the reflexive pair (?a = ?b) unless
+   the filter is strict (:lt / :gt / :ne) — skipping singleton groups
+   unconditionally silently dropped those rows."
   ([groups left-subject right-subject join-var filter-spec]
    (process-subject-groups groups left-subject right-subject join-var filter-spec nil))
   ([groups left-subject right-subject join-var filter-spec result-limit]
-   (if result-limit
-     ;; With limit: use reduce to short-circuit once we have enough
-     (reduce
-      (fn [acc [join-value subjects]]
-        (if (>= (count acc) result-limit)
-          (reduced acc)
-          (if (> (count subjects) 1)
-            (let [remaining (- result-limit (count acc))
-                  pairs (generate-self-join-pairs subjects join-value left-subject right-subject join-var filter-spec remaining)]
-              (into acc pairs))
-            acc)))
-      []
-      groups)
-     ;; Without limit: original behavior
-     (into []
-           (mapcat
-            (fn [[join-value subjects]]
-              (when (> (count subjects) 1)
-                (generate-self-join-pairs subjects join-value left-subject right-subject join-var filter-spec nil))))
-           groups))))
+   (let [min-group-size (if (reflexive-pairs-excluded? filter-spec) 2 1)]
+     (if result-limit
+       ;; With limit: use reduce to short-circuit once we have enough
+       (reduce
+        (fn [acc [join-value subjects]]
+          (if (>= (count acc) result-limit)
+            (reduced acc)
+            (if (>= (count subjects) min-group-size)
+              (let [remaining (- result-limit (count acc))
+                    pairs (generate-self-join-pairs subjects join-value left-subject right-subject join-var filter-spec remaining)]
+                (into acc pairs))
+              acc)))
+        []
+        groups)
+       (into []
+             (mapcat
+              (fn [[join-value subjects]]
+                (when (>= (count subjects) min-group-size)
+                  (generate-self-join-pairs subjects join-value left-subject right-subject join-var filter-spec nil))))
+             groups)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Batch Enrich Helpers
