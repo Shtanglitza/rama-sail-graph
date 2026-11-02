@@ -36,7 +36,7 @@ rama-sail-graph integrates the [Rama](https://redplanetlabs.com/rama) distribute
 
 - Java 17+
 - [Leiningen](https://leiningen.org/)
-- Rama 1.8.0 (see [Rama installation](https://redplanetlabs.com/docs))
+- Rama 1.9.0 (see [Rama installation](https://redplanetlabs.com/docs))
 
 ### Open Source And Commercial Use
 
@@ -66,7 +66,7 @@ Then add the locally installed coordinate to `project.clj`:
 [rama-sail-graph "0.2.0-SNAPSHOT"]
 ```
 
-> **Note:** Rama 1.8.0 is required at runtime. Add the [Red Planet Labs Maven repository](https://nexus.redplanetlabs.com/repository/maven-public-releases) to resolve the Rama dependency.
+> **Note:** Rama 1.9.0 is required at runtime. Add the [Red Planet Labs Maven repository](https://nexus.redplanetlabs.com/repository/maven-public-releases) to resolve the Rama dependency.
 
 ### Build & Test
 

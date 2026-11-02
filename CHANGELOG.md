@@ -28,7 +28,7 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Generative N-Triples serialization round-trip suite and metamorphic optimizer-equivalence suite.
 
 ### Changed
-- Upgraded Rama 1.6.0 → 1.8.0. (Run `lein clean` after changing the Rama dependency to clear
+- Upgraded Rama 1.6.0 → 1.9.0 (1.9.0 fixes a yielding `local-select>` in a microbatch topology reading a closed RocksDB instance; the indexer yields on large scans). (Run `lein clean` after changing the Rama dependency to clear
   stale AOT bytecode.)
 - **Expression engine rebuilt** with a typed numeric tower (Long/BigInteger/BigDecimal/Double)
   and SPARQL three-valued logic / type-error semantics. Behavior changes: plain/untyped literals
