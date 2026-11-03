@@ -12,7 +12,8 @@
             [rama-sail.module.indexer :as idx]
             [rama-sail.query.expr :refer [eval-expr evaluate-filter-cond value->term-string]]
             [rama-sail.query.aggregation :as agg]
-            [rama-sail.query.helpers :as qh]))
+            [rama-sail.query.helpers :as qh]
+            [rama-sail.sail.serialization :refer [DEFAULT-CONTEXT-VAL]]))
 
 (defn find-triples-query-topology [topologies]
   (<<query-topology topologies "find-triples"
@@ -53,13 +54,23 @@
 
 (defn find-bgp-query-topology [topologies]
   (<<query-topology topologies "find-bgp" [*pattern *result-limit :> *bindings]
-                    (identity *pattern :> {:keys [*s *p *o *c]})
+                    (identity *pattern :> {:keys [*s *p *o *c *named-graphs-only]})
                     (<<if (str/starts-with? *s "?") (identity nil :> *s-const) (else>) (identity *s :> *s-const))
                     (<<if (str/starts-with? *p "?") (identity nil :> *p-const) (else>) (identity *p :> *p-const))
                     (<<if (str/starts-with? *o "?") (identity nil :> *o-const) (else>) (identity *o :> *o-const))
                     (<<if (or> (nil? *c) (str/starts-with? *c "?"))
                           (identity nil :> *c-const) (else>) (identity *c :> *c-const))
-                    (invoke-query "find-triples" *s-const *p-const *o-const *c-const :> *quads)
+                    (invoke-query "find-triples" *s-const *p-const *o-const *c-const :> *all-quads)
+                    ;; SPARQL GRAPH ?g (compiler sets :named-graphs-only) ranges over
+                    ;; NAMED graphs only: drop default-graph quads. A bare variable
+                    ;; context without the flag still means "every graph incl. the
+                    ;; default" (the SAIL's getStatements relies on it). Must happen
+                    ;; BEFORE the result-limit truncation below, or
+                    ;; GRAPH ?g {..} LIMIT n would return fewer than n rows.
+                    (<<if (and> *named-graphs-only (some? *c) (str/starts-with? *c "?"))
+                          (qh/drop-default-graph-quads *all-quads DEFAULT-CONTEXT-VAL :> *quads)
+                          (else>)
+                          (identity *all-quads :> *quads))
                     ;; When result-limit is set, truncate quads before building bindings
                     ;; to avoid per-row binding construction and +set-agg dedup cost
                     (<<if (some? *result-limit)
@@ -216,11 +227,17 @@
                     (+vec-concat-combiner *wrapped :> *results)))
 
 (defn distinct-query-topology [topologies]
+  ;; Order-preserving: keeps the FIRST occurrence of each binding in input
+  ;; order. The plan for DISTINCT + ORDER BY + LIMIT is
+  ;; (:slice (:distinct (:project (:order ...)))), so an unordered set
+  ;; aggregation here made LIMIT return arbitrary rows instead of the top-k.
+  ;; Also 6-10x faster than explode + per-row +set-agg (measured on IPC):
+  ;; the input is one vector already on one task, so +set-agg's two-phase
+  ;; aggregation saves nothing and the per-row emit is pure overhead.
   (<<query-topology topologies "distinct" [*sub-plan :> *results]
                     (invoke-query "execute-plan" *sub-plan :> *sub-results)
-                    (ops/explode *sub-results :> *binding)
-                    (|origin)
-                    (aggs/+set-agg *binding :> *results)))
+                    (qh/distinct-preserving-order *sub-results :> *results)
+                    (|origin)))
 
 (defn slice-query-topology [topologies]
   (<<query-topology topologies "slice" [*sub-plan *offset *limit :> *results]

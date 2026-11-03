@@ -131,3 +131,65 @@
              (vec (sort-rows specs-asc))))
       (is (= [{"?v" "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"} {}]
              (vec (sort-rows specs-desc)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Self-join pair generation (W1: reflexive ?a = ?b pairs)
+;;; ---------------------------------------------------------------------------
+
+(defn- sj-pairs
+  "Run process-subject-groups over `groups` and return the [left right]
+   subject pairs (a seq, so multiplicity is observable)."
+  [groups filter-spec & [limit]]
+  (->> (qh/process-subject-groups groups "?a" "?b" "?o" filter-spec limit)
+       (map (juxt #(get % "?a") #(get % "?b")))))
+
+(deftest test-self-join-keeps-reflexive-pairs
+  (let [groups {"\"NYC\"" ["<x>" "<y>"]
+                "\"LA\"" ["<z>"]}]
+    (testing "no filter: every triple joins with itself (n² pairs per group)"
+      (is (= #{["<x>" "<x>"] ["<x>" "<y>"] ["<y>" "<x>"] ["<y>" "<y>"] ["<z>" "<z>"]}
+             (set (sj-pairs groups nil))))
+      (is (= 5 (count (sj-pairs groups nil)))))
+    (testing "a predicate whose objects are all unique still yields one row per triple"
+      (is (= #{["<p>" "<p>"] ["<q>" "<q>"]}
+             (set (sj-pairs {"\"1\"" ["<p>"] "\"2\"" ["<q>"]} nil)))))
+    (testing ":le / :ge keep the equal pair"
+      (is (= #{["<x>" "<x>"] ["<x>" "<y>"] ["<y>" "<y>"] ["<z>" "<z>"]}
+             (set (sj-pairs groups {:op :le :left "?a" :right "?b"}))))
+      (is (= #{["<x>" "<x>"] ["<y>" "<x>"] ["<y>" "<y>"] ["<z>" "<z>"]}
+             (set (sj-pairs groups {:op :ge :left "?a" :right "?b"})))))
+    (testing ":ne / :lt / :gt reject the equal pair"
+      (is (= #{["<x>" "<y>"] ["<y>" "<x>"]}
+             (set (sj-pairs groups {:op :ne :left "?a" :right "?b"}))))
+      (is (= #{["<x>" "<y>"]}
+             (set (sj-pairs groups {:op :lt :left "?a" :right "?b"}))))
+      (is (= #{["<y>" "<x>"]}
+             (set (sj-pairs groups {:op :gt :left "?a" :right "?b"})))))
+    (testing "result-limit path agrees with the unlimited path"
+      (is (= 5 (count (sj-pairs groups nil 100))))
+      (is (= 3 (count (sj-pairs groups nil 3))))
+      (is (= 1 (count (sj-pairs {"\"LA\"" ["<z>"]} nil 10)))
+          "singleton groups count toward the limit too"))))
+
+;;; ---------------------------------------------------------------------------
+;;; DISTINCT order preservation (W2) / GRAPH ?g scope (W3)
+;;; ---------------------------------------------------------------------------
+
+(deftest test-distinct-preserving-order
+  (let [rows [{"?n" "\"Eve\""} {"?n" "\"Carol\""} {"?n" "\"Eve\""}
+              {"?n" "\"Bob\""} {"?n" "\"Carol\""} {"?n" "\"Alice\""}]]
+    (is (= [{"?n" "\"Eve\""} {"?n" "\"Carol\""} {"?n" "\"Bob\""} {"?n" "\"Alice\""}]
+           (qh/distinct-preserving-order rows))
+        "first occurrence of each solution, in input (ORDER BY) order")
+    (is (= [] (qh/distinct-preserving-order [])))
+    (is (vector? (qh/distinct-preserving-order (seq rows))))))
+
+(deftest test-drop-default-graph-quads
+  (let [dc "::default::"
+        quads [["<s1>" "<p>" "<o>" dc]
+               ["<s2>" "<p>" "<o>" "<g1>"]
+               ["<s3>" "<p>" "<o>" dc]
+               ["<s4>" "<p>" "<o>" "<g2>"]]]
+    (is (= [["<s2>" "<p>" "<o>" "<g1>"] ["<s4>" "<p>" "<o>" "<g2>"]]
+           (qh/drop-default-graph-quads quads dc)))
+    (is (= [] (qh/drop-default-graph-quads [] dc)))))
