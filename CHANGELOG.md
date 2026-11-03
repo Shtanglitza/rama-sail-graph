@@ -28,7 +28,7 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Generative N-Triples serialization round-trip suite and metamorphic optimizer-equivalence suite.
 
 ### Changed
-- Upgraded Rama 1.6.0 → 1.8.0. (Run `lein clean` after changing the Rama dependency to clear
+- Upgraded Rama 1.6.0 → 1.9.0 (1.9.0 fixes a yielding `local-select>` in a microbatch topology reading a closed RocksDB instance; the indexer yields on large scans). (Run `lein clean` after changing the Rama dependency to clear
   stale AOT bytecode.)
 - **Expression engine rebuilt** with a typed numeric tower (Long/BigInteger/BigDecimal/Double)
   and SPARQL three-valued logic / type-error semantics. Behavior changes: plain/untyped literals
@@ -50,6 +50,15 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Data loss: `remove(s, null, null, (Resource) null)` inside a transaction also cancelled
   uncommitted adds of matching statements in every named graph**; a null context now means
   the default graph only.
+- **Wrong results: self-joins dropped every `?a = ?b` row.** `?a :p ?o . ?b :p ?o` (and the
+  same with `FILTER(?a <= ?b)` / `>=`) never returned a triple joined with itself, so a
+  predicate with unique objects returned no rows at all. Module-side change: redeploy the module.
+- **Wrong results: `SELECT DISTINCT … ORDER BY … LIMIT n` returned arbitrary rows.** DISTINCT
+  discarded the ORDER BY order; it now keeps the first occurrence of each row in order.
+  Module-side change.
+- **Wrong results: `GRAPH ?g { … }` also matched the default graph** (with `?g` left unbound).
+  It now ranges over named graphs only; property paths inside `GRAPH` fall back to RDF4J
+  until the path operators carry a graph. Module-side change.
 - Repeated variables in a pattern (`?x <knows> ?x`) no longer match everything.
 - ORDER BY no longer crashes on mixed-type columns; term-type ordering follows the spec.
 - Self-join FILTER rewrite no longer moves filters incorrectly through UNION / OPTIONAL / SLICE.

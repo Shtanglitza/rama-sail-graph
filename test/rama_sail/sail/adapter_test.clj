@@ -15,6 +15,12 @@
 (def val->str ser/val->str)
 (def str->val ser/str->val)
 (def tuple-expr->plan comp/tuple-expr->plan)
+
+(defn- sparql->plan
+  "Parse a SPARQL query with RDF4J's parser and compile its tuple expression."
+  [sparql]
+  (tuple-expr->plan
+   (.getTupleExpr (.parseQuery (org.eclipse.rdf4j.query.parser.sparql.SPARQLParser.) sparql nil))))
 (def escape-str @#'ser/escape-str)
 (def unescape-str @#'ser/unescape-str)
 
@@ -1017,3 +1023,29 @@
 (comment
 
   (run-tests 'rama-sail.sail.adapter-test))
+(deftest test-graph-scoped-property-paths-fall-back
+  ;; The path topologies carry no graph: inside GRAPH they would range over
+  ;; every graph (incl. the default graph) and drop ?g. They must fail fast
+  ;; so the SAIL falls back to RDF4J's evaluator (W3).
+  (testing "paths outside GRAPH still compile to native path plans"
+    (is (some? (sparql->plan "SELECT * WHERE { ?a <http://ex/p>+ ?b }")))
+    (is (some? (sparql->plan "SELECT * WHERE { ?a <http://ex/p>* ?b }"))))
+  (doseq [q ["SELECT * WHERE { GRAPH ?g { ?a <http://ex/p>+ ?b } }"
+             "SELECT * WHERE { GRAPH ?g { ?a <http://ex/p>* ?b } }"
+             "SELECT * WHERE { GRAPH <http://ex/g> { ?a <http://ex/p>+ ?b } }"
+             "SELECT * WHERE { GRAPH <http://ex/g> { ?a <http://ex/p>? ?b } }"]]
+    (testing q
+      (is (thrown? UnsupportedOperationException (sparql->plan q))))))
+
+(deftest test-graph-var-pattern-is-named-graphs-only
+  ;; W3: only SPARQL `GRAPH ?g` restricts to named graphs. A bare variable
+  ;; context in find-bgp keeps meaning "every graph incl. the default" — the
+  ;; SAIL's getStatements depends on that — so the compiler marks the pattern.
+  (let [pattern-of (fn [q] (let [plan (sparql->plan q)]
+                             (or (:pattern plan) (get-in plan [:sub-plan :pattern]))))]
+    (is (true? (:named-graphs-only
+                (pattern-of "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }"))))
+    (is (nil? (:named-graphs-only
+               (pattern-of "SELECT * WHERE { ?s ?p ?o }"))))
+    (is (nil? (:named-graphs-only
+               (pattern-of "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }"))))))
