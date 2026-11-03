@@ -71,6 +71,11 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   string order, while the same FILTER evaluated normally is a type error for them. Ordering
   is now applied only between IRIs, matching the expression engine. Module-side change:
   redeploy the module.
+- **Query planning could crash with `ArithmeticException: long overflow`.** The cost model's
+  capped multiplication fell back to checked long arithmetic, so two large estimates (e.g. a
+  cross product inside a join chain) overflowed instead of capping. BSBM QJ1/QJ3 failed to plan
+  whenever no statistics were available (e.g. a fresh store). Estimates are now capped in
+  floating point.
 - Repeated variables in a pattern (`?x <knows> ?x`) no longer match everything.
 - ORDER BY no longer crashes on mixed-type columns; term-type ordering follows the spec.
 - Self-join FILTER rewrite no longer moves filters incorrectly through UNION / OPTIONAL / SLICE.

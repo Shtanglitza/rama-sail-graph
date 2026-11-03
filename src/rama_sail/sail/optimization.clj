@@ -83,7 +83,30 @@
 
 (def ^:private empty-scope {:always #{} :maybe #{} :unknown? false})
 
-(defn plan-var-scope
+;; Per-planning-pass memo of plan-var-scope, keyed by plan node IDENTITY.
+;; Guards and the cost model ask for the same sub-plans' scopes over and over
+;; (DP estimates every subset; each :join estimate needs both children's
+;; vars), so without the memo the analysis is recomputed from the leaves each
+;; time (measured: ~2.5x slower planning for BSBM Q2/Q5). Identity keys avoid
+;; hashing whole plan trees; plans are immutable, so entries never go stale.
+(def ^:dynamic ^java.util.IdentityHashMap *scope-cache* nil)
+
+(defn with-scope-cache*
+  "Call f with a plan-var-scope memo bound, reusing an enclosing one."
+  [f]
+  (if *scope-cache*
+    (f)
+    (binding [*scope-cache* (java.util.IdentityHashMap.)]
+      (f))))
+
+(defmacro with-scope-cache
+  "Evaluate body with a plan-var-scope memo bound (see *scope-cache*)."
+  [& body]
+  `(with-scope-cache* (fn [] ~@body)))
+
+(declare plan-var-scope)
+
+(defn- compute-plan-var-scope
   "Return {:always #{..} :maybe #{..} :unknown? bool} for a plan.
 
    :always   - variables bound in every solution the plan produces
@@ -144,6 +167,18 @@
       (:singleton :empty) empty-scope
       ;; Unmodelled operator: claim nothing, poison :maybe
       {:always #{} :maybe #{} :unknown? true})))
+
+(defn plan-var-scope
+  "Return {:always #{..} :maybe #{..} :unknown? bool} for a plan (see
+   `compute-plan-var-scope`). Memoized per node within `with-scope-cache`."
+  [plan]
+  (if-let [^java.util.IdentityHashMap cache *scope-cache*]
+    (if (.containsKey cache plan)
+      (.get cache plan)
+      (let [scope (compute-plan-var-scope plan)]
+        (.put cache plan scope)
+        scope))
+    (compute-plan-var-scope plan)))
 
 (defn always-bound-vars
   "Variables bound in every solution of `plan`."
@@ -1351,14 +1386,15 @@
    5. Transform property-lookup joins to batch-enrich
    6. Push LIMIT into joins and self-joins for early termination"
   [plan]
-  (let [optimized (-> plan
+  (let [optimized (with-scope-cache
+                    (-> plan
                       push-filters-down
                       flatten-left-join-chains
                       optimize-join-chains
                       transform-self-join
                       use-type-view
                       apply-batch-enrich
-                      push-limit-down)]
+                      push-limit-down))]
     (when (log/enabled? :debug)
       (let [self-joins-before (count-ops plan :self-join)
             self-joins-after (count-ops optimized :self-join)
@@ -1376,16 +1412,19 @@
 (def ^:const MAX-CARDINALITY 1000000000000)
 
 (defn- safe-multiply-cardinalities
-  "Multiply cardinalities with overflow protection and capping.
-   Returns a long that won't overflow."
+  "Multiply cardinalities with overflow protection and capping at
+   MAX-CARDINALITY. Returns a long.
+
+   The running product stays a double throughout: coercing it back to a long
+   between steps made the next `*` a checked long multiplication, which threw
+   ArithmeticException (long overflow) once two capped estimates (1e12 x 1e12)
+   met — crashing query planning instead of capping. That happened e.g. for
+   BSBM QJ1/QJ3 planned without statistics."
   [& nums]
-  (reduce (fn [acc n]
-            (let [result (double (* acc n))]
-              (if (> result MAX-CARDINALITY)
-                MAX-CARDINALITY
-                (long result))))
-          1.0
-          nums))
+  (long (reduce (fn [^double acc n]
+                  (min (* acc (double n)) (double MAX-CARDINALITY)))
+                1.0
+                nums)))
 
 (defn- equi-join-selectivity
   "Calculate join selectivity for equi-joins on shared variables.

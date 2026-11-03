@@ -2,7 +2,9 @@
   "Tests for query plan optimizations: self-join detection, filter pushdown,
    cardinality-based join ordering."
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.string :as str]
             [clojure.walk]
+            [rama-sail.bench.bsbm.infra.query-templates :as qt]
             [rama-sail.sail.adapter :as sail]
             [rama-sail.sail.compilation :as comp]
             [rama-sail.sail.optimization :as opt])
@@ -884,3 +886,50 @@
                                                    FILTER(?a != ?b) }")))
           sj (find-node plan #(= :self-join (:op %)))]
       (is (= :ne (get-in sj [:filter :op])) (pr-str plan)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Cost-model overflow and the plan-var-scope memo
+;;; ---------------------------------------------------------------------------
+
+(deftest test-cardinality-estimate-caps-instead-of-overflowing
+  ;; Two capped (1e12) estimates multiplied used to throw ArithmeticException
+  ;; (long overflow) from a checked long `*`, crashing query planning.
+  ;; Disjoint variables per pattern: genuine cross products, each estimated at
+  ;; total-triples (1e9); (1e9 x 1e9) is capped, then capped x capped.
+  (let [huge (fn [v] {:op :bgp :pattern {:s (str "?s" v) :p (str "?p" v) :o (str "?o" v) :c nil}})
+        cross {:op :join
+               :left {:op :join :left (huge "a") :right (huge "b") :join-vars []}
+               :right {:op :join :left (huge "c") :right (huge "d") :join-vars []}
+               :join-vars []}]
+    (binding [opt/*global-stats* {:total-triples 1000000000}]
+      (is (= 1000000000000 (opt/estimate-plan-cardinality cross))))))
+
+(deftest test-bsbm-join-queries-plan-without-stats
+  ;; QJ1 / QJ3 crashed planning (long overflow) whenever no statistics were
+  ;; bound, e.g. on a fresh store.
+  (let [subs* {"%ProductXYZ%" "<http://ex/Product1>" "%ProductType%" "<http://ex/ProductType1>"
+               "%ProductFeature1%" "<http://ex/F1>" "%ProductFeature2%" "<http://ex/F2>"
+               "%OfferXYZ%" "<http://ex/Offer1>" "%x%" "10" "%y%" "500" "%Name%" "\"V\""
+               "%currentDate%" "\"2008-06-20\"^^<http://www.w3.org/2001/XMLSchema#date>"}]
+    (doseq [t qt/all-benchmark-templates]
+      (testing (:name t)
+        (let [q (reduce (fn [s [k v]] (str/replace s k v)) (:template t) subs*)]
+          (is (map? (binding [opt/*predicate-stats* nil opt/*global-stats* nil]
+                      (opt/optimize-plan (parse-and-plan q))))))))))
+
+(deftest test-scope-memo-is-transparent
+  ;; The identity memo must never change an answer: same scope, and the same
+  ;; optimized plan, with and without an enclosing cache.
+  (let [plans [(parse-and-plan (str W7 "SELECT * { ?s :name ?n OPTIONAL { ?s :alt ?x } ?s :p ?x FILTER(?x != ?n) }"))
+               (parse-and-plan (str W7 "SELECT * { { ?s :p ?x } UNION { ?s :q ?w } OPTIONAL { ?s :r ?z } }"))
+               (parse-and-plan (str W7 "SELECT ?o { { SELECT ?o { ?a :p ?o . ?b :p ?o } } FILTER(?a != ?b) }"))]]
+    (doseq [p plans]
+      (is (= (opt/plan-var-scope p) (opt/with-scope-cache (opt/plan-var-scope p))))
+      (is (= (opt/optimize-plan p) (opt/with-scope-cache (opt/optimize-plan p)))))
+    (testing "the memo is keyed by identity: equal-but-distinct nodes are separate entries"
+      (opt/with-scope-cache
+        (let [a {:op :bgp :pattern {:s "?s" :p "<p>" :o "?o" :c nil}}
+              b (into {} a)]
+          (opt/plan-var-scope a)
+          (opt/plan-var-scope b)
+          (is (= 2 (.size ^java.util.IdentityHashMap opt/*scope-cache*))))))))
