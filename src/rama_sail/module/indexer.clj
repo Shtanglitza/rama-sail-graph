@@ -168,8 +168,17 @@
                ;; microbatch observes the entry and is NOT "becoming visible".
                ;; (Previously the write happened 4 hops later, so concurrent
                ;; duplicates each saw nil and permanently double-counted stats.)
-               (<<if *becoming-visible
-                     (local-transform> [(keypath *s *p *o *c) (termval *tx-time)] $$quad-tx-time))
+               ;;
+               ;; A re-add of an already-visible quad must still advance its
+               ;; creation stamp to max(existing, tx): a :clear-context of the same
+               ;; context (different partition, so unordered relative to this add
+               ;; within a microbatch) deletes iff clear-tx >= creation-tx. Without
+               ;; the refresh, "CLEAR GRAPH g; re-INSERT unchanged quads into g"
+               ;; deleted those quads whenever the add happened to run first.
+               ;; Existing stamp already read above -> termval is a pure write.
+               (<<if (or> *becoming-visible (> *tx-time *existing-tx-time))
+                     (local-transform> [(keypath *s *p *o *c) (termval *tx-time)] $$quad-tx-time)
+                     (else>))
 
                ;; Subject visibility must be sampled BEFORE the $$spoc insert on
                ;; this same task: a brand-new subject means :total-subjects grows.

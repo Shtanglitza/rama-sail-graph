@@ -230,6 +230,31 @@
     ;; Flush remaining pending ops (these are post-clear or uncleared ops)
     (into output (map (fn [[q op]] [op q])) pending)))
 
+(defn- assign-commit-tx-times
+  "Turn net commit ops into depot records `[op quad tx-time]`.
+
+   The indexer's :clear-context deletes a quad iff `clear-tx >= creation-tx`, and
+   a clear and an add of the same quad land on different partitions (context vs
+   subject), so their relative order inside a microbatch is decided only by these
+   stamps. Within one commit the only ordering that matters is clear-vs-quad-op:
+   an op AFTER a clear must stamp strictly later; an op BEFORE a clear must not
+   stamp later. So the stamp is `tx-time + epoch`, where the epoch advances only
+   at a clear -> quad-op boundary. Consecutive clears share a stamp, and so do
+   consecutive quad ops.
+
+   With compute-commit-ops' output shape ([clears..., quad-ops...]) this yields at
+   most two stamps, tx-time and tx-time+1, regardless of commit size. (Stamping
+   `tx-time + op-index` future-dated an N-op commit by N ms, so a CLEAR/DROP
+   issued shortly after a bulk load skipped most of its quads.)"
+  [ops tx-time]
+  (first
+   (reduce (fn [[records epoch prev-clear?] [op-type quad]]
+             (let [clear? (= op-type :clear-context)
+                   epoch (if (and prev-clear? (not clear?)) (inc epoch) epoch)]
+               [(conj records [op-type quad (+ tx-time epoch)]) epoch clear?]))
+           [[] 0 false]
+           ops)))
+
 (defn- find-matching-pending-adds
   "Find pending add operations matching a removal pattern."
   [pending-ops s-str p-str o-str c-str]
@@ -402,8 +427,13 @@
                   (swap! pending-ops conj [:del quad])))
               ;; Some wildcards - must query to find matching statements for each context
               (doseq [c contexts]
-                (log/trace "Removing with wildcards from context" (when c (val->str c)))
-                (buffer-pending-deletions! (when c (val->str c)))
+                ;; A null entry in `contexts` means the DEFAULT graph, not "any graph":
+                ;; map it to DEFAULT-CONTEXT-VAL. (nil is the wildcard in
+                ;; matches-removal-pattern?, so passing nil here used to delete
+                ;; matching pending adds from EVERY named graph.)
+                (let [c-str (if c (val->str c) DEFAULT-CONTEXT-VAL)]
+                  (log/trace "Removing with wildcards from context" c-str)
+                  (buffer-pending-deletions! c-str))
                 (buffer-committed-deletions! (.getStatements ^AbstractSailConnection this s p o false (into-array Resource [c]))))))))
 
       (evaluateInternal [^TupleExpr tuple-expr ^Dataset dataset ^BindingSet bindings include-inferred]
@@ -607,15 +637,14 @@
               tx-time (System/currentTimeMillis)]
           (log/debug "Committing transaction with" op-count "net triple ops (from" (count raw-ops) "raw) and" ns-op-count "namespace ops at tx-time" tx-time)
 
-          ;; Commit triple operations with tracking for partial failure diagnosis
-          ;; Each operation gets an incrementing tx-time to preserve ordering within
-          ;; the transaction. This ensures "last write wins" semantics when the same
-          ;; quad is added and deleted in the same transaction.
+          ;; Commit triple operations with tracking for partial failure diagnosis.
+          ;; Stamps come from assign-commit-tx-times: bounded clear/add epochs,
+          ;; NOT one millisecond per op (which future-dated bulk commits so that a
+          ;; later CLEAR/DROP skipped most of their quads).
           (when (pos? op-count)
             (errors/with-transaction-error-handling "triple-commit" committed-triple-ops op-count
-              (doseq [[idx [op-type quad]] (map-indexed vector ops)]
-                ;; Append tx-time as third element with per-op offset for ordering
-                (rama/foreign-append! triple-depot [op-type quad (+ tx-time idx)])
+              (doseq [record (assign-commit-tx-times ops tx-time)]
+                (rama/foreign-append! triple-depot record)
                 (swap! committed-triple-ops inc))))
           ;; In sync mode, ALWAYS wait for microbatch processing to complete.
           ;; Even with 0 triple ops, we must sync to ensure any pending microbatches

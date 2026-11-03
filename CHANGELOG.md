@@ -40,6 +40,16 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   use no-read `termval` writes.
 
 ### Fixed
+- **Data loss: CLEAR/DROP after a bulk commit left most quads behind.** Each op of a commit
+  was stamped one millisecond later than the previous one, dating large commits seconds into
+  the future, so a subsequent clear (which deletes only quads not newer than itself) skipped
+  them. A commit now uses at most two stamps regardless of size.
+- **Data loss: `CLEAR GRAPH g` + re-inserting unchanged quads in one transaction deleted
+  them** (the "replace graph" pattern). Re-adding an existing quad now refreshes its creation
+  stamp. Module-side change: redeploy the module.
+- **Data loss: `remove(s, null, null, (Resource) null)` inside a transaction also cancelled
+  uncommitted adds of matching statements in every named graph**; a null context now means
+  the default graph only.
 - **Wrong results: self-joins dropped every `?a = ?b` row.** `?a :p ?o . ?b :p ?o` (and the
   same with `FILTER(?a <= ?b)` / `>=`) never returned a triple joined with itself, so a
   predicate with unique objects returned no rows at all. Module-side change: redeploy the module.
