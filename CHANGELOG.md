@@ -26,6 +26,7 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Library infrastructure: CI workflows (unit + integration + W3C conformance), API stability
   boundaries, this changelog, and community/validation docs.
 - Generative N-Triples serialization round-trip suite and metamorphic optimizer-equivalence suite.
+- Differential test suite against RDF4J's MemoryStore (`memorystore-parity-test`, runs in CI).
 
 ### Changed
 - Upgraded Rama 1.6.0 → 1.9.0 (1.9.0 fixes a yielding `local-select>` in a microbatch topology reading a closed RocksDB instance; the indexer yields on large scans). (Run `lein clean` after changing the Rama dependency to clear
@@ -59,6 +60,17 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Wrong results: `GRAPH ?g { … }` also matched the default graph** (with `?g` left unbound).
   It now ranges over named graphs only; property paths inside `GRAPH` fall back to RDF4J
   until the path operators carry a graph. Module-side change.
+- **Wrong results: the optimizer treated variables that may be unbound as always bound.**
+  Four rewrites could change answers on queries with OPTIONAL, UNION, BIND, VALUES or
+  subqueries: a FILTER pushed onto an OPTIONAL side (dropping rows); a property lookup
+  rewritten so it overwrote an OPTIONAL-bound value or dropped rows whose lookup variable was
+  unbound; join reordering keying hash joins on possibly-unbound variables; and a self-join
+  FILTER folded into a subquery that hides its variables. All rewrites now use one shared
+  always-bound / possibly-bound analysis. Client-side only.
+- **Wrong results: self-join `<`/`<=`/`>`/`>=` paired blank nodes and triple terms** by
+  string order, while the same FILTER evaluated normally is a type error for them. Ordering
+  is now applied only between IRIs, matching the expression engine. Module-side change:
+  redeploy the module.
 - Repeated variables in a pattern (`?x <knows> ?x`) no longer match everything.
 - ORDER BY no longer crashes on mixed-type columns; term-type ordering follows the spec.
 - Self-join FILTER rewrite no longer moves filters incorrectly through UNION / OPTIONAL / SLICE.

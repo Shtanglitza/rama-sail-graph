@@ -66,129 +66,143 @@
       ;; Unknown type: poison the result so callers cannot prove safety
       #{::unknown-vars})))
 
-(defn extract-plan-vars
-  "Extract all variables that a plan produces in its output bindings.
-   Returns a set of variable strings."
+;;; --- Variable scope: always-bound vs possibly-bound ---
+;;;
+;;; Every optimizer guard that moves or rewrites an operator must know, per
+;;; plan, which variables are bound in EVERY solution (:always) and which may be
+;;; bound in SOME solution (:maybe, a superset of :always). Conflating the two
+;;; was the shared root cause of W7: filters pushed onto an OPTIONAL side,
+;;; batch-enrich overwriting/dropping possibly-bound vars, DP hash keys on
+;;; possibly-unbound vars.
+
+(defn- vars-scope
+  "Scope of a leaf that binds every listed variable in every solution."
+  [terms]
+  (let [vs (into #{} (filter is-variable?) terms)]
+    {:always vs :maybe vs :unknown? false}))
+
+(def ^:private empty-scope {:always #{} :maybe #{} :unknown? false})
+
+(defn plan-var-scope
+  "Return {:always #{..} :maybe #{..} :unknown? bool} for a plan.
+
+   :always   - variables bound in every solution the plan produces
+   :maybe    - variables bound in at least one possible solution (⊇ :always)
+   :unknown? - the plan contains an operator this function does not model;
+               callers must then refuse any rewrite that relies on :maybe
+               (see `may-bind?`)."
   [plan]
-  (case (:op plan)
-    :bgp
-    (let [pattern (:pattern plan)]
-      (into #{}
-            (filter is-variable?)
-            [(:s pattern) (:p pattern) (:o pattern) (:c pattern)]))
+  (let [sub #(plan-var-scope (:sub-plan plan))
+        both (fn [l r] {:always (set/union (:always l) (:always r))
+                        :maybe (set/union (:maybe l) (:maybe r))
+                        :unknown? (or (:unknown? l) (:unknown? r))})]
+    (case (:op plan)
+      :bgp (let [{:keys [s p o c]} (:pattern plan)] (vars-scope [s p o c]))
+      :join (both (plan-var-scope (:left plan)) (plan-var-scope (:right plan)))
+      ;; OPTIONAL: only the base side is guaranteed
+      :left-join (let [l (plan-var-scope (:left plan))
+                       r (plan-var-scope (:right plan))]
+                   (assoc (both l r) :always (:always l)))
+      :multi-left-join (let [b (plan-var-scope (:base plan))
+                             opts (map #(plan-var-scope (:plan %)) (:optionals plan))]
+                         (assoc (reduce both b opts) :always (:always b)))
+      ;; UNION: guaranteed only if both branches bind it; possible if either does
+      :union (let [l (plan-var-scope (:left plan))
+                   r (plan-var-scope (:right plan))]
+               (assoc (both l r) :always (set/intersection (:always l) (:always r))))
+      (:filter :distinct :slice :order :ask) (sub)
+      ;; Projection bounds the scope: a projected var the sub-plan never binds
+      ;; is unbound, a hidden var is out of scope.
+      :project (let [vs (set (:vars plan))]
+                 {:always (set/intersection vs (:always (sub)))
+                  :maybe vs
+                  :unknown? false})
+      ;; BIND outputs may be unbound (the expression can raise a type error)
+      :bind (update (sub) :maybe into (map :var (:bindings plan)))
+      :group (let [gv (set (:group-vars plan))]
+               {:always (set/intersection gv (:always (sub)))
+                :maybe (into gv (map :name (:aggregates plan)))
+                :unknown? false})
+      ;; VALUES: UNDEF cells are absent from the row map -> only possibly bound
+      :values (let [vs (set (:vars plan))
+                    rows (:bindings plan)]
+                {:always (if (seq rows)
+                           (reduce set/intersection vs (map (comp set keys) rows))
+                           #{})
+                 :maybe vs
+                 :unknown? false})
+      :type-lookup (vars-scope [(:subject-var plan)])
+      :self-join (vars-scope [(:left-subject plan) (:right-subject plan) (:join-var plan)])
+      ;; batch-enrich has inner-join semantics: it binds object-var in every row
+      :batch-enrich (let [s (sub)]
+                      (-> s
+                          (update :always conj (:object-var plan))
+                          (update :maybe conj (:object-var plan))))
+      :triple-ref (vars-scope [(:subject-var plan) (:predicate-var plan)
+                               (:object-var plan) (:expr-var plan)])
+      (:zero-length-path :arbitrary-length-path) (vars-scope [(:subject plan) (:object plan)])
+      (:singleton :empty) empty-scope
+      ;; Unmodelled operator: claim nothing, poison :maybe
+      {:always #{} :maybe #{} :unknown? true})))
 
-    :join
-    (into (extract-plan-vars (:left plan))
-          (extract-plan-vars (:right plan)))
+(defn always-bound-vars
+  "Variables bound in every solution of `plan`."
+  [plan]
+  (:always (plan-var-scope plan)))
 
-    :left-join
-    (into (extract-plan-vars (:left plan))
-          (extract-plan-vars (:right plan)))
-
-    :union
-    ;; Union produces intersection of both sides' vars
-    (clojure.set/intersection
-     (extract-plan-vars (:left plan))
-     (extract-plan-vars (:right plan)))
-
-    :filter
-    (extract-plan-vars (:sub-plan plan))
-
-    :project
-    (set (:vars plan))
-
-    :distinct
-    (extract-plan-vars (:sub-plan plan))
-
-    :slice
-    (extract-plan-vars (:sub-plan plan))
-
-    :bind
-    (into (extract-plan-vars (:sub-plan plan))
-          (map :var (:bindings plan)))
-
-    :order
-    (extract-plan-vars (:sub-plan plan))
-
-    :group
-    (into (set (:group-vars plan))
-          (map :name (:aggregates plan)))
-
-    :ask
-    (extract-plan-vars (:sub-plan plan))
-
-    :values
-    (set (:vars plan))
-
-    :type-lookup
-    ;; Type lookup produces just the subject variable
-    #{(:subject-var plan)}
-
-    :self-join
-    ;; Self-join produces both subject variables and the join variable
-    #{(:left-subject plan) (:right-subject plan) (:join-var plan)}
-
-    :batch-enrich
-    ;; Batch-enrich adds the object variable to sub-plan's variables
-    (conj (extract-plan-vars (:sub-plan plan)) (:object-var plan))
-
-    :multi-left-join
-    (reduce (fn [vars opt]
-              (into vars (extract-plan-vars (:plan opt))))
-            (extract-plan-vars (:base plan))
-            (:optionals plan))
-
-    :triple-ref
-    (into #{}
-          (filter is-variable?)
-          [(:subject-var plan) (:predicate-var plan) (:object-var plan) (:expr-var plan)])
-
-    :singleton
-    #{}
-
-    :empty
-    #{}
-
-    :zero-length-path
-    (into #{}
-          (filter is-variable?)
-          [(:subject plan) (:object plan)])
-
-    :arbitrary-length-path
-    (into #{}
-          (filter is-variable?)
-          [(:subject plan) (:object plan)])
-
-    ;; Default
-    #{}))
+(defn may-bind?
+  "True when `scope` (from `plan-var-scope`) may bind variable `v` — also true
+   whenever the scope contains an unmodelled operator."
+  [scope v]
+  (or (:unknown? scope) (contains? (:maybe scope) v)))
 
 ;;; --- Filter Pushdown Optimization ---
 
+(defn- filter-pushable-into?
+  "A filter over Join(S, Other) may move onto S only if it evaluates the same on
+   S's solutions as on the joined ones: every filter var must be either always
+   bound in S (the joined value equals S's) or never bound by Other (the joined
+   binding state equals S's). A var only possibly bound in S but bound by Other
+   breaks this — e.g. FILTER(?x != ?n) pushed onto an OPTIONAL side that may
+   leave ?x unbound while the other side binds it."
+  [filter-vars s-scope other-scope]
+  (and (not (:unknown? s-scope))
+       (every? #(or (contains? (:always s-scope) %)
+                    (not (may-bind? other-scope %)))
+               filter-vars)))
+
 (defn- push-filter-into-join
   "Try to push a filter into a join's children.
-   Returns {:pushed-left plan, :pushed-right plan, :remaining-filters [exprs]}."
+   Returns {:pushed-left plan, :pushed-right plan, :remaining-filters [exprs]}.
+
+   Pushes onto exactly one side: the side whose variables cover the filter and
+   for which the move is semantics-preserving (`filter-pushable-into?`). A
+   filter both sides could take, or that spans both, stays above the join."
   [filter-expr join-plan]
   (let [left (:left join-plan)
         right (:right join-plan)
-        left-vars (extract-plan-vars left)
-        right-vars (extract-plan-vars right)
-        filter-vars (extract-expr-vars filter-expr)]
+        left-scope (plan-var-scope left)
+        right-scope (plan-var-scope right)
+        filter-vars (extract-expr-vars filter-expr)
+        covers? (fn [scope] (set/subset? filter-vars (:maybe scope)))]
     (cond
       ;; Filter can be pushed to left side only
-      (and (clojure.set/subset? filter-vars left-vars)
-           (not (clojure.set/subset? filter-vars right-vars)))
+      (and (covers? left-scope)
+           (not (covers? right-scope))
+           (filter-pushable-into? filter-vars left-scope right-scope))
       {:pushed-left {:op :filter :sub-plan left :expr filter-expr}
        :pushed-right right
        :remaining-filters []}
 
       ;; Filter can be pushed to right side only
-      (and (clojure.set/subset? filter-vars right-vars)
-           (not (clojure.set/subset? filter-vars left-vars)))
+      (and (covers? right-scope)
+           (not (covers? left-scope))
+           (filter-pushable-into? filter-vars right-scope left-scope))
       {:pushed-left left
        :pushed-right {:op :filter :sub-plan right :expr filter-expr}
        :remaining-filters []}
 
-      ;; Filter spans both sides - keep it above the join
+      ;; Filter spans both sides, or moving it would change its meaning
       :else
       {:pushed-left left
        :pushed-right right
@@ -399,19 +413,22 @@
    :join (inner), :filter, :project, :distinct, :order, :bind. It must NOT
    descend through :union (the filter would be dropped for the other branch),
    :left-join (moving a filter into or below OPTIONAL changes its scope), or
-   :slice (filter-after-limit is not filter-before-limit)."
-  [plan path]
+   :slice (filter-after-limit is not filter-before-limit).
+
+   A :project is crossed only when it exposes every filter variable: a var it
+   projects away is a DIFFERENT (unbound) variable outside the subquery, so
+   `{ {SELECT ?o {?a :p ?o . ?b :p ?o}} FILTER(?a != ?b) }` must not fold the
+   outer filter into the inner self-join."
+  [plan path filter-vars]
   (when plan
-    (case (:op plan)
-      :self-join [path plan]
-      :join (or (find-self-join-in-plan (:left plan) (conj path :left))
-                (find-self-join-in-plan (:right plan) (conj path :right)))
-      :filter (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
-      :project (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
-      :distinct (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
-      :order (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
-      :bind (find-self-join-in-plan (:sub-plan plan) (conj path :sub-plan))
-      nil)))
+    (let [down #(find-self-join-in-plan (% plan) (conj path %) filter-vars)]
+      (case (:op plan)
+        :self-join [path plan]
+        :join (or (down :left) (down :right))
+        (:filter :distinct :order :bind) (down :sub-plan)
+        :project (when (set/subset? filter-vars (set (:vars plan)))
+                   (down :sub-plan))
+        nil))))
 
 (defn- is-self-join-inequality?
   "Check if an expression is an inequality filter that applies to self-join subjects."
@@ -432,8 +449,9 @@
   "If a filter is an inequality on self-join subjects, incorporate it into the self-join."
   [plan]
   (when (= :filter (:op plan))
-    (let [[path self-join] (find-self-join-in-plan (:sub-plan plan) [])
-          expr (:expr plan)]
+    (let [expr (:expr plan)
+          [path self-join] (find-self-join-in-plan (:sub-plan plan) []
+                                                   (extract-expr-vars expr))]
       (when (and self-join
                  (nil? (:filter self-join))  ;; Self-join doesn't already have a filter
                  (is-self-join-inequality? expr self-join))
@@ -702,28 +720,34 @@
 
 (defn- transform-to-batch-enrich
   "Transform a join with property lookup into batch-enrich.
-   Pattern: join(sub-plan, bgp(?var pred ?result)) where ?var is in join-vars
-   Becomes: batch-enrich(sub-plan, pred, ?var, ?result)"
+   Pattern: join(sub-plan, bgp(?var pred ?result))
+   Becomes: batch-enrich(sub-plan, pred, ?var, ?result)
+
+   Decided from the sub-plan's variable scope, not from :join-vars (which the
+   DP planner and the compiler compute differently):
+   - ?var must be bound in EVERY sub-plan solution: batch-enrich looks values
+     up by ?var and drops rows where it is unbound, whereas the join would
+     pair such a row with every lookup row (SPARQL compatibility).
+   - ?result must NOT be bound by ANY sub-plan solution: the merge assoc's the
+     looked-up value, silently overwriting (instead of equality-checking) an
+     existing binding, e.g. one coming from an OPTIONAL."
   [join-plan]
   (let [left (:left join-plan)
-        right (:right join-plan)
-        join-vars (:join-vars join-plan)]
-    ;; Check if right side is a property lookup BGP
+        right (:right join-plan)]
     (when-let [lookup-var (is-property-lookup-bgp? right)]
-      (when (some #(= lookup-var %) join-vars)
-        (let [pattern (:pattern right)
-              object-var (:o pattern)]
-          ;; CRITICAL: Object var must NOT be in join-vars
-          ;; If object-var is also a join variable, the merge would overwrite it
-          ;; without enforcing equality, violating join semantics.
-          ;; Such patterns must use standard join to properly check equality constraints.
-          (when-not (some #(= object-var %) join-vars)
-            {:op :batch-enrich
-             :sub-plan left
-             :predicate (:p pattern)
-             :subject-var lookup-var
-             :object-var object-var
-             :context (:c pattern)}))))))
+      (let [left-scope (plan-var-scope left)
+            object-var (get-in right [:pattern :o])]
+        (when (and (not (:unknown? left-scope))
+                   (contains? (:always left-scope) lookup-var)
+                   (not (may-bind? left-scope object-var))
+                   ;; ?var p ?var: object and lookup var coincide; keep the join
+                   (not= lookup-var object-var))
+          {:op :batch-enrich
+           :sub-plan left
+           :predicate (get-in right [:pattern :p])
+           :subject-var lookup-var
+           :object-var object-var
+           :context (get-in right [:pattern :c])})))))
 
 (defn apply-batch-enrich
   "Apply batch-enrich transformation to joins where applicable.
@@ -849,52 +873,22 @@
             (vec (reverse all-plans))))))))
 
 (defn get-plan-vars
-  "Extract all variables a plan MAY produce (possibly-bound semantics: a :union
-   contributes the vars of EITHER branch). Contrast `extract-plan-vars`, which
-   uses guaranteed-bound (:union = intersection) semantics. Used for join-var
-   detection, where a variable bound in some rows can still participate in a join."
+  "Variables a plan MAY bind (possibly-bound semantics, the :maybe view of
+   `plan-var-scope`). Used for connectivity and cost heuristics, where a
+   variable bound in only some rows still indicates a related relation. Never
+   use it for hash-join keys or rewrite guards — see `always-bound-vars`."
   [plan]
-  (case (:op plan)
-    :bgp (let [p (:pattern plan)]
-           (set (filter is-variable? [(:s p) (:p p) (:o p) (:c p)])))
-    :join (set/union (get-plan-vars (:left plan)) (get-plan-vars (:right plan)))
-    :left-join (set/union (get-plan-vars (:left plan)) (get-plan-vars (:right plan)))
-    :union (set/union (get-plan-vars (:left plan)) (get-plan-vars (:right plan)))
-    :filter (get-plan-vars (:sub-plan plan))
-    :project (set (:vars plan))
-    ;; :bind adds its computed vars on top of the sub-plan; the default
-    ;; sub-plan recursion alone would drop them.
-    :bind (into (get-plan-vars (:sub-plan plan)) (map :var (:bindings plan)))
-    ;; :group produces only its grouping keys and aggregate outputs — NOT the
-    ;; sub-plan's vars, which the default clause would wrongly return.
-    :group (into (set (:group-vars plan)) (map :name (:aggregates plan)))
-    :self-join #{(:left-subject plan) (:right-subject plan) (:join-var plan)}
-    :values (set (:vars plan))
-    :type-lookup #{(:subject-var plan)}
-    :batch-enrich (set/union (get-plan-vars (:sub-plan plan))
-                             #{(:object-var plan)})
-    :multi-left-join (reduce (fn [vars opt]
-                               (set/union vars (get-plan-vars (:plan opt))))
-                             (get-plan-vars (:base plan))
-                             (:optionals plan))
-    :triple-ref (set (filter is-variable?
-                             [(:subject-var plan) (:predicate-var plan)
-                              (:object-var plan) (:expr-var plan)]))
-    :singleton #{}
-    :empty #{}
-    :zero-length-path (set (filter is-variable? [(:subject plan) (:object plan)]))
-    :arbitrary-length-path (set (filter is-variable? [(:subject plan) (:object plan)]))
-    ;; Default: recursively collect from sub-plan
-    (if (:sub-plan plan)
-      (get-plan-vars (:sub-plan plan))
-      #{})))
+  (:maybe (plan-var-scope plan)))
 
 (defn- compute-join-vars-for-plans
-  "Compute join variables between two plans."
+  "Hash-join key variables between two plans: those bound in EVERY solution of
+   both sides (the compiler's getAssuredBindingNames semantics). A possibly-
+   bound shared var must not be a key — rows lacking it are compatible with
+   every row of the other side; the executor's compatibility check still
+   enforces equality on all shared vars."
   [left-plan right-plan]
-  (let [left-vars (get-plan-vars left-plan)
-        right-vars (get-plan-vars right-plan)]
-    (vec (set/intersection left-vars right-vars))))
+  (vec (set/intersection (always-bound-vars left-plan)
+                         (always-bound-vars right-plan))))
 
 (defn- build-join-node
   "Build a join node between two plans with computed join variables."
@@ -1507,7 +1501,12 @@
     :join
     (let [left-card (estimate-plan-cardinality (:left plan))
           right-card (estimate-plan-cardinality (:right plan))
-          num-join-vars (count (:join-vars plan))
+          ;; Selectivity counts every shared var, incl. possibly-bound ones:
+          ;; :join-vars holds only always-bound hash keys, and counting just
+          ;; those would make joins on optional vars look like cross products.
+          num-join-vars (max (count (:join-vars plan))
+                             (count (set/intersection (get-plan-vars (:left plan))
+                                                      (get-plan-vars (:right plan)))))
           selectivity (equi-join-selectivity left-card right-card num-join-vars)]
       (safe-multiply-cardinalities left-card right-card selectivity))
 

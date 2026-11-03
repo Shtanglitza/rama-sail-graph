@@ -71,6 +71,21 @@
      [(iri "carol") (iri "city") (str-lit "NYC") dc]
      [(iri "dave")  (iri "city") (str-lit "LA")  dc]
      [(iri "eve")   (iri "city") (str-lit "LA")  dc]
+     ;; W7 fodder (default graph, predicates unused elsewhere): carol has :w7p
+     ;; but no :w7alt; dave's :w7alt and :w7p values conflict; x1 has no :w7r
+     ;; (?s stays unbound), x2 :w7r carol.
+     [(iri "carol") (iri "w7p")   (iri "v")   dc]
+     [(iri "dave")  (iri "w7alt") (iri "v1")  dc]
+     [(iri "dave")  (iri "w7p")   (iri "v2")  dc]
+     [(iri "v")     (iri "w7q")   (iri "w1")  dc]
+     [(iri "x1")    (iri "w7a")   (iri "y1")  dc]
+     [(iri "x2")    (iri "w7a")   (iri "y2")  dc]
+     [(iri "x2")    (iri "w7r")   (iri "carol") dc]
+     ;; bnode / IRI subjects sharing one object (self-join ordering)
+     ["_:b1"        (iri "w7c")   (str-lit "X") dc]
+     ["_:b2"        (iri "w7c")   (str-lit "X") dc]
+     [(iri "i1")    (iri "w7c")   (str-lit "X") dc]
+     [(iri "i2")    (iri "w7c")   (str-lit "X") dc]
      ;; named graph <http://ex/g>
      [(iri "alice") (iri "inGraph") (str-lit "gv1") g]
      [(iri "bob")   (iri "inGraph") (str-lit "gv2") g]]))
@@ -302,3 +317,77 @@
       (let [{:keys [opt]} (assert-equivalent!
                            "SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s <http://ex/city> ?o } }")]
         (is (empty? opt) "all city triples are in the default graph")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Phase 6 W7: possibly-bound variables must not be treated as bound
+;;; (expected answers asserted on BOTH plans, as for W1-W3).
+;;; ---------------------------------------------------------------------------
+
+(defn- assert-expected!
+  "Run sparql raw + optimized, assert equivalence AND the expected bag."
+  [sparql expected-bag]
+  (let [{:keys [raw opt] :as run} (assert-equivalent! sparql)]
+    (is (= expected-bag (frequencies raw)) (str "raw: " (pr-str raw)))
+    (is (= expected-bag (frequencies opt)) (str "optimized: " (pr-str opt)))
+    run))
+
+(deftest test-w7-filter-not-pushed-onto-optional-side
+  ;; carol: OPTIONAL unmatched, ?x comes from :w7p -> passes ?x != ?n.
+  ;; dave: OPTIONAL ?x=v1 conflicts with :w7p v2 -> no row.
+  (assert-expected!
+   "PREFIX : <http://ex/>
+    SELECT ?s ?n ?x WHERE { ?s :name ?n OPTIONAL { ?s :w7alt ?x } ?s :w7p ?x FILTER(?x != ?n) }"
+   {{"?s" (iri "carol") "?n" (str-lit "Carol") "?x" (iri "v")} 1}))
+
+(deftest test-w7-batch-enrich-respects-optional-binding
+  ;; dave's OPTIONAL ?o=v1 must be equality-checked against :w7p v2 (no row),
+  ;; not overwritten by a batch lookup.
+  (assert-expected!
+   "PREFIX : <http://ex/>
+    SELECT ?s ?n ?o WHERE { ?s :name ?n OPTIONAL { ?s :w7alt ?o } ?s :w7p ?o }"
+   {{"?s" (iri "carol") "?n" (str-lit "Carol") "?o" (iri "v")} 1}))
+
+(deftest test-w7-dp-chain-keeps-rows-with-unbound-lookup-var
+  ;; Hand-built chain [LJ(?x :w7a ?y, ?x :w7r ?s), ?s :w7p ?o, ?o :w7q ?w] with
+  ;; stats that make DP + batch-enrich kick in. x1's ?s is unbound: compatible
+  ;; with every ?s :w7p ?o row (only ?o = v survives the :w7q join).
+  (let [bgp (fn [s p o] {:op :bgp :pattern {:s s :p p :o o :c nil}})
+        lj {:op :left-join :left (bgp "?x" (iri "w7a") "?y")
+            :right (bgp "?x" (iri "w7r") "?s") :join-vars ["?x"]}
+        raw-plan {:op :join
+                  :left {:op :join :left lj :right (bgp "?s" (iri "w7p") "?o") :join-vars []}
+                  :right (bgp "?o" (iri "w7q") "?w") :join-vars ["?o"]}
+        stats {(iri "w7a") {:count 1000 :distinct-subjects 1000 :distinct-objects 1000}
+               (iri "w7r") {:count 10 :distinct-subjects 10 :distinct-objects 10}
+               (iri "w7p") {:count 50 :distinct-subjects 50 :distinct-objects 50}
+               (iri "w7q") {:count 5000 :distinct-subjects 5000 :distinct-objects 5000}}
+        opt-plan (binding [optimization/*predicate-stats* stats]
+                   (optimization/optimize-plan raw-plan))
+        expected {{"?x" (iri "x1") "?y" (iri "y1") "?s" (iri "carol") "?o" (iri "v") "?w" (iri "w1")} 1
+                  {"?x" (iri "x2") "?y" (iri "y2") "?s" (iri "carol") "?o" (iri "v") "?w" (iri "w1")} 1}]
+    (is (= expected (frequencies (execute-plan* raw-plan))) "raw plan")
+    (is (= expected (frequencies (execute-plan* opt-plan)))
+        (str "optimized plan: " (pr-str opt-plan)))))
+
+(deftest test-w7-self-join-filter-respects-subquery-scope
+  ;; ?a/?b are projected away inside the subquery: outside it they are unbound,
+  ;; FILTER(?a != ?b) errors, and no row survives.
+  (assert-expected!
+   "PREFIX : <http://ex/>
+    SELECT * WHERE { { SELECT ?o WHERE { ?a :city ?o . ?b :city ?o } } FILTER(?a != ?b) }"
+   {}))
+
+(deftest test-self-join-ordering-excludes-bnodes
+  ;; Ordering is defined only between IRIs (as in the expression engine):
+  ;; with subjects {_:b1 _:b2 i1 i2} only IRI pairs may satisfy < / <=.
+  (let [q (fn [op] (str "PREFIX : <http://ex/>
+                         SELECT ?a ?b WHERE { ?a :w7c ?o . ?b :w7c ?o FILTER(?a " op " ?b) }"))]
+    (testing "<"
+      (assert-expected! (q "<") {{"?a" (iri "i1") "?b" (iri "i2")} 1}))
+    (testing "<="
+      (assert-expected! (q "<=") {{"?a" (iri "i1") "?b" (iri "i1")} 1
+                                  {"?a" (iri "i2") "?b" (iri "i2")} 1
+                                  {"?a" (iri "i1") "?b" (iri "i2")} 1}))
+    (testing "!= keeps bnode pairs (term inequality)"
+      (let [{:keys [opt]} (assert-equivalent! (q "!="))]
+        (is (= 12 (count opt)))))))

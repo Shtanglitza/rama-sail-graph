@@ -58,6 +58,8 @@
                         :java-source-paths ["test-java"]
                         :dependencies [[org.eclipse.rdf4j/rdf4j-sail-testsuite "5.2.2"
                                         :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic]]
+                                       ;; Reference store for differential (oracle) tests
+                                       [org.eclipse.rdf4j/rdf4j-sail-memory "5.2.2"]
                                        [org.junit.platform/junit-platform-console-standalone "1.10.0"]]}
              :provided {:dependencies [[com.rpl/rama "1.9.0"]
                                        [org.clojure/clojure "1.12.4"]]}

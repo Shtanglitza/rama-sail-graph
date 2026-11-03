@@ -193,3 +193,32 @@
     (is (= [["<s2>" "<p>" "<o>" "<g1>"] ["<s4>" "<p>" "<o>" "<g2>"]]
            (qh/drop-default-graph-quads quads dc)))
     (is (= [] (qh/drop-default-graph-quads [] dc)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Self-join ordering filters match the expression engine (bnodes / triple terms)
+;;; ---------------------------------------------------------------------------
+
+(deftest test-self-join-ordering-only-between-iris
+  (let [f (fn [op] {:op op :left "?a" :right "?b"})
+        ok? (fn [op s1 s2] (qh/apply-inequality-filter s1 s2 (f op) "?a" "?b"))]
+    (testing "IRI vs IRI compares (codepoint order of the serialized form)"
+      (is (true? (ok? :lt "<http://ex/a>" "<http://ex/b>")))
+      (is (true? (ok? :le "<http://ex/a>" "<http://ex/a>"))))
+    (testing "any blank node or triple term makes ordering a type error -> drop"
+      (doseq [op [:lt :le :gt :ge]
+              [s1 s2] [["_:b1" "_:b2"] ["<http://ex/a>" "_:b1"] ["_:b1" "<http://ex/a>"]
+                       ["<< <http://ex/s> <http://ex/p> <http://ex/o> >>" "<http://ex/a>"]]]
+        (is (false? (ok? op s1 s2)) (str op " " s1 " " s2))))
+    (testing "!= is plain term inequality, bnodes included"
+      (is (true? (ok? :ne "_:b1" "_:b2")))
+      (is (false? (ok? :ne "_:b1" "_:b1")))))
+  (testing "pair generation: bnodes never pair under < or >= (sorted fast path too)"
+    (let [groups {"\"X\"" ["_:b1" "<http://ex/i1>" "_:b2" "<http://ex/i2>"]}]
+      (is (= #{["<http://ex/i1>" "<http://ex/i2>"]}
+             (set (sj-pairs groups {:op :lt :left "?a" :right "?b"}))))
+      (is (= #{["<http://ex/i2>" "<http://ex/i1>"]}
+             (set (sj-pairs groups {:op :gt :left "?a" :right "?b"}))))
+      (is (= #{["<http://ex/i1>" "<http://ex/i1>"] ["<http://ex/i2>" "<http://ex/i2>"]
+               ["<http://ex/i1>" "<http://ex/i2>"]}
+             (set (sj-pairs groups {:op :le :left "?a" :right "?b"}))))
+      (is (= 12 (count (sj-pairs groups {:op :ne :left "?a" :right "?b"})))))))

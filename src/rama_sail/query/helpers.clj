@@ -2,7 +2,7 @@
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
             [rama-sail.query.expr :refer [eval-expr term-numeric-value error?
-                                          evaluate-filter-cond]]))
+                                          evaluate-filter-cond parse-term]]))
 
 ;; RDF type predicate IRI - used for materialized view maintenance
 (def RDF-TYPE-PREDICATE "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>")
@@ -96,10 +96,20 @@
 ;;; Self-Join Helpers
 ;;; ---------------------------------------------------------------------------
 
+(defn- iri-term?
+  "True for an IRI term (not a blank node, literal or << triple term >>)."
+  [s]
+  (= :iri (:kind (parse-term s))))
+
 (defn apply-inequality-filter
   "Check if s1 and s2 satisfy the inequality filter.
    Filter format: {:op :lt/:gt/:le/:ge/:ne, :left var, :right var}
-   Returns false if types don't match (ClassCastException from compare)."
+
+   Must agree with the expression engine (`expr/order-compare-terms`), which
+   evaluates the same FILTER when the self-join rewrite does not apply:
+   ordering (< <= > >=) is defined only between two IRIs (codepoint order of
+   the serialized form); any blank node or triple term makes it a type error,
+   i.e. the pair is dropped. != is plain RDF-term inequality."
   [s1 s2 filter-spec left-subject right-subject]
   (if (nil? filter-spec)
     true  ;; No filter - all pairs valid
@@ -109,17 +119,18 @@
           [v1 v2] (if (= filter-left left-subject)
                     [s1 s2]
                     [s2 s1])]
-      (try
-        (case op
-          :lt (neg? (compare v1 v2))
-          :le (not (pos? (compare v1 v2)))
-          :gt (pos? (compare v1 v2))
-          :ge (not (neg? (compare v1 v2)))
-          :ne (not= v1 v2)
-          true)
-        (catch ClassCastException _
-          ;; Types don't match for comparison - filter out this pair
-          false)))))
+      (case op
+        :ne (not= v1 v2)
+        (:lt :le :gt :ge)
+        (and (iri-term? v1)
+             (iri-term? v2)
+             (let [c (compare v1 v2)]
+               (case op
+                 :lt (neg? c)
+                 :le (not (pos? c))
+                 :gt (pos? c)
+                 :ge (not (neg? c)))))
+        true))))
 
 (defn generate-self-join-pairs
   "Generate valid pairs from a group of subjects sharing the same join key.
@@ -135,9 +146,11 @@
         optimized-range? (and filter-spec
                               (= (:left filter-spec) left-subject)
                               (#{:lt :gt} (:op filter-spec)))
-        ;; CRITICAL: Sort subjects for the optimization to work correctly
+        ;; CRITICAL: Sort subjects for the optimization to work correctly.
+        ;; Only IRIs are order-comparable (see apply-inequality-filter); a
+        ;; blank node or triple term can never satisfy < or >.
         subject-vec (if optimized-range?
-                      (vec (sort subjects))
+                      (vec (sort (filter iri-term? subjects)))
                       (vec subjects))
         n (count subject-vec)
         pairs (if optimized-range?
