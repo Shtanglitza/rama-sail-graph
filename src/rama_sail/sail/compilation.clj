@@ -2,7 +2,7 @@
   (:require [clojure.set :as set]
             [clojure.string :as str]
             [rama-sail.sail.serialization :refer [val->str DEFAULT-CONTEXT-VAL]]
-            [rama-sail.sail.optimization :refer [is-variable? extract-plan-vars extract-expr-vars estimate-plan-cardinality optimize-plan get-plan-vars]])
+            [rama-sail.sail.optimization :refer [is-variable? extract-expr-vars estimate-plan-cardinality optimize-plan get-plan-vars]])
   (:import [org.eclipse.rdf4j.query.algebra And ArbitraryLengthPath BindingSetAssignment Compare Compare$CompareOp Distinct EmptySet Reduced Filter LeftJoin Not Or TupleExpr StatementPattern Join Projection SingletonSet Union ValueConstant ValueExpr Var QueryRoot Slice ZeroLengthPath
             Extension ExtensionElem MathExpr MathExpr$MathOp Str Coalesce Bound FunctionCall
             Order OrderElem

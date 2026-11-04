@@ -478,13 +478,16 @@
                         plan-future (future
                                       (binding [*predicate-stats* (:predicate-stats stats)
                                                 *global-stats* (:global-stats stats)]
-                                        (let [plan (tuple-expr->plan tuple-expr)
-                                              ;; If initial bindings provided, substitute constants in plan
-                                              plan-with-bindings (if (.isEmpty bindings)
-                                                                   plan
-                                                                   (apply-initial-bindings plan bindings))]
-                                          ;; Apply optimizations: filter pushdown and join reordering
-                                          (optimize-plan plan-with-bindings))))
+                                        ;; One plan-var-scope memo for compile + optimize
+                                        ;; (both consult the cost model per join)
+                                        (opt/with-scope-cache
+                                          (let [plan (tuple-expr->plan tuple-expr)
+                                                ;; If initial bindings provided, substitute constants in plan
+                                                plan-with-bindings (if (.isEmpty bindings)
+                                                                     plan
+                                                                     (apply-initial-bindings plan bindings))]
+                                            ;; Apply optimizations: filter pushdown and join reordering
+                                            (optimize-plan plan-with-bindings)))))
                         plan (try
                                (let [res (deref plan-future timeout-ms ::planning-timeout)]
                                  (if (= res ::planning-timeout)

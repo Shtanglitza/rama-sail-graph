@@ -2,6 +2,9 @@
   "Tests for query plan optimizations: self-join detection, filter pushdown,
    cardinality-based join ordering."
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.string :as str]
+            [clojure.walk]
+            [rama-sail.bench.bsbm.infra.query-templates :as qt]
             [rama-sail.sail.adapter :as sail]
             [rama-sail.sail.compilation :as comp]
             [rama-sail.sail.optimization :as opt])
@@ -773,3 +776,160 @@
   ;; Run tests from REPL
   (require '[clojure.test :as t])
   (t/run-tests 'rama-sail.sail.optimizer-test))
+
+;;; ---------------------------------------------------------------------------
+;;; W7: always-bound vs possibly-bound variables (Phase 6)
+;;; ---------------------------------------------------------------------------
+
+(def ^:private W7 "PREFIX : <http://ex/> ")
+
+(defn- w7-bgp [s p o] {:op :bgp :pattern {:s s :p p :o o :c nil}})
+
+(deftest test-plan-var-scope
+  (testing "OPTIONAL: only the base side is always bound"
+    (let [lj {:op :left-join :left (w7-bgp "?s" "<n>" "?n")
+              :right (w7-bgp "?s" "<a>" "?x") :join-vars ["?s"]}]
+      (is (= {:always #{"?s" "?n"} :maybe #{"?s" "?n" "?x"} :unknown? false}
+             (opt/plan-var-scope lj)))))
+  (testing "UNION: always = intersection, maybe = union"
+    (let [u {:op :union :left (w7-bgp "?s" "<p>" "?x") :right (w7-bgp "?s" "<q>" "?w")}]
+      (is (= #{"?s"} (:always (opt/plan-var-scope u))))
+      (is (= #{"?s" "?x" "?w"} (:maybe (opt/plan-var-scope u))))))
+  (testing "projection hides unprojected vars"
+    (let [p {:op :project :vars ["?o"]
+             :sub-plan {:op :join :left (w7-bgp "?a" "<p>" "?o")
+                        :right (w7-bgp "?b" "<p>" "?o") :join-vars ["?o"]}}]
+      (is (= {:always #{"?o"} :maybe #{"?o"} :unknown? false} (opt/plan-var-scope p)))))
+  (testing "BIND outputs and VALUES with UNDEF are only possibly bound"
+    (let [b {:op :bind :sub-plan (w7-bgp "?s" "<p>" "?o")
+             :bindings [{:var "?y" :expr {:type :var :name "?o"}}]}
+          v {:op :values :vars ["?a" "?b"] :bindings [{"?a" "<1>" "?b" "<2>"} {"?a" "<3>"}]}]
+      (is (= #{"?s" "?o"} (:always (opt/plan-var-scope b))))
+      (is (contains? (:maybe (opt/plan-var-scope b)) "?y"))
+      (is (= #{"?a"} (:always (opt/plan-var-scope v))))
+      (is (= #{"?a" "?b"} (:maybe (opt/plan-var-scope v))))))
+  (testing "an unmodelled operator poisons the scope"
+    (let [s (opt/plan-var-scope {:op :join :left (w7-bgp "?s" "<p>" "?o")
+                                 :right {:op :mystery-op} :join-vars []})]
+      (is (:unknown? s))
+      (is (opt/may-bind? s "?anything")))))
+
+(deftest test-w7-filter-not-pushed-onto-optional-side
+  ;; ?x is only possibly bound on the OPTIONAL side but bound by the other
+  ;; side: pushing FILTER(?x != ?n) onto the left-join drops rows where the
+  ;; OPTIONAL did not match (the filter errors on unbound ?x).
+  (let [plan (opt/push-filters-down
+              (parse-and-plan (str W7 "SELECT * { ?s :name ?n OPTIONAL { ?s :alt ?x }
+                                                 ?s :p ?x FILTER(?x != ?n) }")))
+        f (find-node plan #(= :filter (:op %)))]
+    (is (some? f))
+    (is (not= :left-join (get-in f [:sub-plan :op]))
+        (str "filter must stay above the join: " (pr-str plan)))))
+
+(deftest test-w7-safe-pushdown-still-happens
+  ;; ?n is always bound on the left and never bound on the right: pushing is
+  ;; semantics-preserving and must still happen (no optimization regression).
+  (let [plan (opt/push-filters-down
+              (parse-and-plan (str W7 "SELECT * { ?s :name ?n . ?s :age ?a FILTER(?n != \"x\") }")))
+        f (find-node plan #(= :filter (:op %)))]
+    (is (= :bgp (get-in f [:sub-plan :op])) (pr-str plan))))
+
+(deftest test-w7-batch-enrich-guards
+  (testing "object var possibly bound by an OPTIONAL on the left: no batch-enrich"
+    (let [plan (opt/optimize-plan
+                (parse-and-plan (str W7 "SELECT * { ?s :name ?n OPTIONAL { ?s :alt ?o } ?s :p ?o }")))]
+      (is (not (contains-op? plan :batch-enrich)) (pr-str plan))))
+  (testing "plain property lookup still becomes batch-enrich"
+    (let [plan (opt/optimize-plan
+                (parse-and-plan (str W7 "SELECT * { ?s :name ?n OPTIONAL { ?s :alt ?x } ?s :p ?o }")))]
+      (is (contains-op? plan :batch-enrich) (pr-str plan))))
+  (testing "lookup var only possibly bound on the left: no batch-enrich"
+    (let [lj {:op :left-join :left (w7-bgp "?x" "<a>" "?y")
+              :right (w7-bgp "?x" "<r>" "?s") :join-vars ["?x"]}
+          plan (opt/apply-batch-enrich {:op :join :left lj :right (w7-bgp "?s" "<p>" "?o")
+                                        :join-vars ["?s"]})]
+      (is (not (contains-op? plan :batch-enrich)) (pr-str plan)))))
+
+(deftest test-w7-dp-join-keys-are-always-bound
+  ;; DP used to key joins on possibly-bound vars (get-plan-vars), which also
+  ;; let batch-enrich look up a possibly-unbound ?s and drop those rows.
+  (let [lj {:op :left-join :left (w7-bgp "?x" "<a>" "?y")
+            :right (w7-bgp "?x" "<r>" "?s") :join-vars ["?x"]}
+        chain {:op :join
+               :left {:op :join :left lj :right (w7-bgp "?s" "<p>" "?o") :join-vars []}
+               :right (w7-bgp "?o" "<q>" "?w") :join-vars ["?o"]}
+        stats {"<a>" {:count 1000 :distinct-subjects 1000 :distinct-objects 1000}
+               "<r>" {:count 10 :distinct-subjects 10 :distinct-objects 10}
+               "<p>" {:count 50 :distinct-subjects 50 :distinct-objects 50}
+               "<q>" {:count 5000 :distinct-subjects 5000 :distinct-objects 5000}}
+        plan (binding [opt/*predicate-stats* stats] (opt/optimize-plan chain))
+        join-keys (atom [])]
+    (clojure.walk/prewalk #(do (when (and (map? %) (= :join (:op %)))
+                                 (swap! join-keys conj (set (:join-vars %))))
+                               %)
+                          plan)
+    (is (not-any? #(contains? % "?s") @join-keys)
+        (str "?s is only possibly bound (OPTIONAL) and must not be a hash key: " (pr-str plan)))
+    (is (nil? (find-node plan #(and (= :batch-enrich (:op %)) (= "?s" (:subject-var %)))))
+        (pr-str plan))))
+
+(deftest test-w7-self-join-filter-not-folded-across-projection
+  (testing "projection hides ?a/?b: the outer filter is a different (unbound) scope"
+    (let [plan (opt/optimize-plan
+                (parse-and-plan (str W7 "SELECT * { { SELECT ?o { ?a :p ?o . ?b :p ?o } }
+                                                   FILTER(?a != ?b) }")))
+          sj (find-node plan #(= :self-join (:op %)))]
+      (is (nil? (:filter sj)) (pr-str plan))))
+  (testing "projection exposing ?a and ?b still allows folding"
+    (let [plan (opt/optimize-plan
+                (parse-and-plan (str W7 "SELECT * { { SELECT ?a ?b { ?a :p ?o . ?b :p ?o } }
+                                                   FILTER(?a != ?b) }")))
+          sj (find-node plan #(= :self-join (:op %)))]
+      (is (= :ne (get-in sj [:filter :op])) (pr-str plan)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Cost-model overflow and the plan-var-scope memo
+;;; ---------------------------------------------------------------------------
+
+(deftest test-cardinality-estimate-caps-instead-of-overflowing
+  ;; Two capped (1e12) estimates multiplied used to throw ArithmeticException
+  ;; (long overflow) from a checked long `*`, crashing query planning.
+  ;; Disjoint variables per pattern: genuine cross products, each estimated at
+  ;; total-triples (1e9); (1e9 x 1e9) is capped, then capped x capped.
+  (let [huge (fn [v] {:op :bgp :pattern {:s (str "?s" v) :p (str "?p" v) :o (str "?o" v) :c nil}})
+        cross {:op :join
+               :left {:op :join :left (huge "a") :right (huge "b") :join-vars []}
+               :right {:op :join :left (huge "c") :right (huge "d") :join-vars []}
+               :join-vars []}]
+    (binding [opt/*global-stats* {:total-triples 1000000000}]
+      (is (= 1000000000000 (opt/estimate-plan-cardinality cross))))))
+
+(deftest test-bsbm-join-queries-plan-without-stats
+  ;; QJ1 / QJ3 crashed planning (long overflow) whenever no statistics were
+  ;; bound, e.g. on a fresh store.
+  (let [subs* {"%ProductXYZ%" "<http://ex/Product1>" "%ProductType%" "<http://ex/ProductType1>"
+               "%ProductFeature1%" "<http://ex/F1>" "%ProductFeature2%" "<http://ex/F2>"
+               "%OfferXYZ%" "<http://ex/Offer1>" "%x%" "10" "%y%" "500" "%Name%" "\"V\""
+               "%currentDate%" "\"2008-06-20\"^^<http://www.w3.org/2001/XMLSchema#date>"}]
+    (doseq [t qt/all-benchmark-templates]
+      (testing (:name t)
+        (let [q (reduce (fn [s [k v]] (str/replace s k v)) (:template t) subs*)]
+          (is (map? (binding [opt/*predicate-stats* nil opt/*global-stats* nil]
+                      (opt/optimize-plan (parse-and-plan q))))))))))
+
+(deftest test-scope-memo-is-transparent
+  ;; The identity memo must never change an answer: same scope, and the same
+  ;; optimized plan, with and without an enclosing cache.
+  (let [plans [(parse-and-plan (str W7 "SELECT * { ?s :name ?n OPTIONAL { ?s :alt ?x } ?s :p ?x FILTER(?x != ?n) }"))
+               (parse-and-plan (str W7 "SELECT * { { ?s :p ?x } UNION { ?s :q ?w } OPTIONAL { ?s :r ?z } }"))
+               (parse-and-plan (str W7 "SELECT ?o { { SELECT ?o { ?a :p ?o . ?b :p ?o } } FILTER(?a != ?b) }"))]]
+    (doseq [p plans]
+      (is (= (opt/plan-var-scope p) (opt/with-scope-cache (opt/plan-var-scope p))))
+      (is (= (opt/optimize-plan p) (opt/with-scope-cache (opt/optimize-plan p)))))
+    (testing "the memo is keyed by identity: equal-but-distinct nodes are separate entries"
+      (opt/with-scope-cache
+        (let [a {:op :bgp :pattern {:s "?s" :p "<p>" :o "?o" :c nil}}
+              b (into {} a)]
+          (opt/plan-var-scope a)
+          (opt/plan-var-scope b)
+          (is (= 2 (.size ^java.util.IdentityHashMap opt/*scope-cache*))))))))
