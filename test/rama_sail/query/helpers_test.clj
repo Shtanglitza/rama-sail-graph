@@ -76,6 +76,17 @@
           result (qh/apply-left-join-with-condition idx {"?x" "<zzz>"} ["?x"] nil)]
       (is (= [{"?x" "<zzz>"}] (vec result))))))
 
+(deftest test-multi-left-join-applies-optionals-in-idx-order
+  ;; The topology collects optionals in completion order; OPTIONALs sharing a
+  ;; variable do not commute, so they must be applied in :idx (query) order.
+  (let [opt (fn [i rows] {:idx i :hash-idx (qh/build-hash-index rows []) :join-vars [] :condition nil})
+        first-opt (opt 0 [{"?a" "1" "?c" "<c>"}])
+        second-opt (opt 1 [{"?a" "<n1>" "?e" "10"}])
+        expected [{"?a" "1" "?c" "<c>"}]]
+    (is (= expected (qh/apply-multi-left-join [{}] [first-opt second-opt])))
+    (is (= expected (qh/apply-multi-left-join [{}] [second-opt first-opt]))
+        "completion order must not matter")))
+
 ;;; ---------------------------------------------------------------------------
 ;;; ORDER BY sort keys — mixed-type totality
 ;;; ---------------------------------------------------------------------------

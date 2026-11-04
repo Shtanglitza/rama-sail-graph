@@ -403,8 +403,11 @@
       [left-bind])))
 
 (defn apply-multi-left-join
-  "Apply multiple optional joins to base bindings in a single pass.
-   Each optional-index has {:hash-idx :join-vars :condition}."
+  "Apply multiple optional joins to base bindings in a single pass, as the
+   left-deep chain LeftJoin(LeftJoin(base, o0), o1)... Each optional-index has
+   {:idx :hash-idx :join-vars :condition}; they are applied in :idx (query)
+   order, because the topology collects them in completion order and
+   OPTIONALs that share a variable do not commute."
   [base-bindings optional-indices]
   (reduce
    (fn [bindings {:keys [hash-idx join-vars condition]}]
@@ -412,7 +415,7 @@
            (mapcat #(apply-left-join-with-condition hash-idx % join-vars condition))
            bindings))
    base-bindings
-   optional-indices))
+   (sort-by :idx optional-indices)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; ORDER BY Helpers

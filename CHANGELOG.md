@@ -27,6 +27,10 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   boundaries, this changelog, and community/validation docs.
 - Generative N-Triples serialization round-trip suite and metamorphic optimizer-equivalence suite.
 - Differential test suite against RDF4J's MemoryStore (`memorystore-parity-test`, runs in CI).
+- Randomized query suite (`random-query-parity-test`, runs in CI): seeded random SPARQL over
+  OPTIONAL/UNION/FILTER/BIND/VALUES/subqueries/GRAPH; checks that unoptimized, optimized and
+  statistics-optimized plans agree, and matches RDF4J where RDF4J follows the spec. Failures
+  are shrunk to a minimal query. `RANDOM_QUERY_SEED` / `RANDOM_QUERY_COUNT` override the run.
 
 ### Changed
 - Upgraded Rama 1.6.0 → 1.9.0 (1.9.0 fixes a yielding `local-select>` in a microbatch topology reading a closed RocksDB instance; the indexer yields on large scans). (Run `lein clean` after changing the Rama dependency to clear
@@ -70,6 +74,15 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Wrong results: self-join `<`/`<=`/`>`/`>=` paired blank nodes and triple terms** by
   string order, while the same FILTER evaluated normally is a type error for them. Ordering
   is now applied only between IRIs, matching the expression engine. Module-side change:
+  redeploy the module.
+- **Wrong results: two OPTIONALs sharing a variable could be applied in the wrong order.**
+  When the optimizer folds a chain of OPTIONALs into one multi-left-join, the optionals ran
+  concurrently and were applied in whichever order they finished; OPTIONALs that share a
+  variable do not commute, so e.g. `OPTIONAL { … ?a } OPTIONAL { ?a :s ?e }` could return the
+  second pattern's rows instead of the first's. Module-side change: redeploy the module.
+- **Wrong results: UNION (and projected subqueries) could drop duplicate rows**, depending on
+  timing: when a branch that returns a set (an empty group `{}`, or a basic graph pattern)
+  finished first, the result combiner de-duplicated the other branch. Module-side change:
   redeploy the module.
 - **Query planning could crash with `ArithmeticException: long overflow`.** The cost model's
   capped multiplication fell back to checked long arithmetic, so two large estimates (e.g. a

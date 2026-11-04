@@ -129,11 +129,18 @@
 
                     (|origin)))
 
+(defn- bag-concat
+  "Bag-preserving concatenation for result combiners. The accumulator can be
+   the first input itself rather than the init value, and some operators
+   return sets (:singleton is #{{}}, find-bgp collects with +set-agg); `into`
+   a set would silently de-duplicate the other input's rows, so the
+   accumulator is always made a vector first."
+  [v1 v2]
+  (into (if (vector? v1) v1 (vec v1)) v2))
+
 ;; Combiner for union - merges two vectors for distributed bag-union aggregation
 (def +vec-union-combiner
-  (combiner
-   (fn [v1 v2] (into (or v1 []) v2))
-   :init-fn (fn [] [])))
+  (combiner bag-concat :init-fn (fn [] [])))
 
 ;; --- Batch Lookup ---
 
@@ -189,13 +196,16 @@
   (<<query-topology topologies "multi-left-join"
                     [*base-plan *optionals :> *results]
                     (invoke-query "execute-plan" *base-plan :> *base-results)
-                    (ops/explode *optionals :> *opt)
+                    ;; Optionals run concurrently and reach +vec-agg in completion
+                    ;; order; :idx restores query order (OPTIONALs sharing a
+                    ;; variable do not commute), see qh/apply-multi-left-join.
+                    (ops/explode-indexed *optionals :> *opt-i *opt)
                     (get *opt :plan :> *opt-plan)
                     (get *opt :join-vars :> *opt-jv)
                     (get *opt :condition nil :> *opt-cond)
                     (invoke-query "execute-plan" *opt-plan :> *opt-results)
                     (qh/build-hash-index *opt-results *opt-jv :> *opt-idx)
-                    (hash-map :hash-idx *opt-idx :join-vars *opt-jv :condition *opt-cond :> *opt-entry)
+                    (hash-map :idx *opt-i :hash-idx *opt-idx :join-vars *opt-jv :condition *opt-cond :> *opt-entry)
                     (|origin)
                     (aggs/+vec-agg *opt-entry :> *all-indices)
                     (aggs/+last *base-results :> *base-agg)
@@ -213,9 +223,7 @@
 
 ;; Combiner for ordered results - preserves insertion order
 (def +vec-concat-combiner
-  (combiner
-   (fn [v1 v2] (into (or v1 []) v2))
-   :init-fn (fn [] [])))
+  (combiner bag-concat :init-fn (fn [] [])))
 
 (defn project-query-topology [topologies]
   (<<query-topology topologies "project" [*sub-plan *proj-vars :> *results]
