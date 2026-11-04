@@ -1,6 +1,7 @@
 (ns ^:no-doc rama-sail.sail.serialization
   (:require [clojure.string :as str])
-  (:import (org.eclipse.rdf4j.model.vocabulary XSD)
+  (:import (java.util Locale)
+           (org.eclipse.rdf4j.model.vocabulary XSD)
            [org.eclipse.rdf4j.model Value Resource IRI Literal BNode Triple ValueFactory]
            [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.query.impl MapBindingSet SimpleBinding]))
@@ -54,8 +55,9 @@
       (let [d (Double/parseDouble label)]
         (if (Double/isFinite d)
           (if (== d (Math/floor d))
-            ;; Whole number - format without unnecessary decimals
-            (format "%.1f" d)
+            ;; Whole number - format without unnecessary decimals. Locale/ROOT:
+            ;; the default locale would write "1,0" on e.g. a German JVM (W9)
+            (String/format Locale/ROOT "%.1f" (to-array [d]))
             (str d))
           ;; Special values: INF, -INF, NaN
           label))
@@ -65,13 +67,13 @@
       (let [f (Float/parseFloat label)]
         (if (Float/isFinite f)
           (if (== f (Math/floor f))
-            (format "%.1f" (double f))
+            (String/format Locale/ROOT "%.1f" (to-array [(double f)]))
             (str f))
           label))
 
       ;; Boolean: normalize to lowercase
       (= dtype XSD/BOOLEAN)
-      (let [lower (str/lower-case (str/trim label))]
+      (let [lower (.toLowerCase (str/trim label) Locale/ROOT)]
         (cond
           (or (= lower "true") (= lower "1")) "true"
           (or (= lower "false") (= lower "0")) "false"

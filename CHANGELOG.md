@@ -44,7 +44,36 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Indexer: cooperative yielding (`{:allow-yield? true}`) on large subindexed scans; stat updates
   use no-read `termval` writes.
 
+- **One term comparator for `=` / `!=` / `IN`, `<` / `<=` / `>` / `>=`, ORDER BY and MIN/MAX**
+  (checked cell by cell against Apache Jena). Behavior changes:
+  - Ordering two IRIs (or blank nodes, or literals of an unknown datatype) is now a type
+    error, as in strict SPARQL and RDF4J. `FILTER(?a < ?b)` over IRIs returns no rows; write
+    `FILTER(STR(?a) < STR(?b))` (the self-join optimization accepts both). ORDER BY still
+    sorts IRIs.
+  - Literals of different value classes are unequal instead of a type error
+    (`"4"^^xsd:integer = "a"@en` is false, `!=` true), as in Jena; a literal whose value is
+    unknown (unknown datatype, ill-typed) compared with a different term is still an error.
+    `NaN = NaN` is false.
+  - Date/time literals (dateTime, date, time, gYear, ...) compare as XSD values with
+    timezones (`<` is a type error when indeterminate) instead of as strings.
+  - Literals that `<` cannot compare sort as in RDF4J: numbers, then date/time, then by
+    datatype IRI (so language-tagged strings come before plain strings).
+  - `REGEX` requires a string or language-tagged text and a plain string pattern (numbers,
+    IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
+
 ### Fixed
+- **Wrong results: ORDER BY, MIN and MAX compared serialized N-Triples strings** (W5):
+  `"New York"` sorted before `"New"`, `<item10>` before `<item1>`, `MIN(<a>, "x")` was
+  `"x"`, and dates compared as text. They now use term values. Module-side change: redeploy
+  the module.
+- **Wrong results: REGEX matched escaped text** (W4): `REGEX(?x, "\\d")` never matched a
+  digit (also `\\s`, `\\w`, quotes, newlines). Text and pattern are now unescaped.
+- **Boolean results vs boolean literals** (W6): `BOUND(?x) = false` was false when `?x` was
+  unbound; `BOUND(?x) = true`, `… IN (true)`, `sameTerm(BOUND(?x), true)` threw
+  `ClassCastException` (aborting BIND/ORDER BY); `LANG(true)` was an error.
+- **Locale-dependent canonical numbers** (W9): a JVM with e.g. a German default locale stored
+  `"1,0"^^xsd:double`; language ranges were lower-cased with the default locale (Turkish
+  dotless i). Canonical forms now use `Locale/ROOT`.
 - **Data loss: CLEAR/DROP after a bulk commit left most quads behind.** Each op of a commit
   was stamped one millisecond later than the previous one, dating large commits seconds into
   the future, so a subsequent clear (which deletes only quads not newer than itself) skipped
@@ -72,9 +101,10 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   FILTER folded into a subquery that hides its variables. All rewrites now use one shared
   always-bound / possibly-bound analysis. Client-side only.
 - **Wrong results: self-join `<`/`<=`/`>`/`>=` paired blank nodes and triple terms** by
-  string order, while the same FILTER evaluated normally is a type error for them. Ordering
-  is now applied only between IRIs, matching the expression engine. Module-side change:
-  redeploy the module.
+  string order, while the same FILTER evaluated normally is a type error for them. The
+  self-join now uses the expression engine's comparator, so it always agrees with normal
+  evaluation (since the comparator change above, ordering subjects keeps no pair; use
+  `STR(?a) < STR(?b)`). Module-side change: redeploy the module.
 - **Wrong results: two OPTIONALs sharing a variable could be applied in the wrong order.**
   When the optimizer folds a chain of OPTIONALs into one multi-left-join, the optionals ran
   concurrently and were applied in whichever order they finished; OPTIONALs that share a

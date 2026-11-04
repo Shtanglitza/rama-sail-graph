@@ -43,6 +43,13 @@
     (is (nil? (init-agg-state :max)))
     (is (= [0 0] (init-agg-state :avg)))))
 
+(defn- state [agg-fn v] (update-agg-state agg-fn (init-agg-state agg-fn) v))
+
+(defn- minmax
+  "Fold values into a MIN/MAX state and return the resulting term."
+  [agg-fn values]
+  (compute-final-agg agg-fn (reduce #(update-agg-state agg-fn %1 %2) (init-agg-state agg-fn) values)))
+
 (deftest test-update-agg-state
   (testing "Update COUNT state"
     (is (= 1 (update-agg-state :count 0 "\"10\"^^<xsd:int>")))
@@ -52,29 +59,28 @@
     (is (= 10.0 (update-agg-state :sum 0.0 "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>")))
     (is (= 25.0 (update-agg-state :sum 10.0 "\"15\"^^<http://www.w3.org/2001/XMLSchema#integer>"))))
 
+  ;; MIN/MAX state is [order-key term]; assert on the term it yields.
   (testing "Update MIN state (numeric)"
-    (is (= "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"
-           (update-agg-state :min nil "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>")))
-    (is (= "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
-           (update-agg-state :min "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>" "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>")))
-    (is (= "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
-           (update-agg-state :min "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>" "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"))))
+    (let [ten "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+          five "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+      (is (= ten (minmax :min [ten])))
+      (is (= five (minmax :min [ten five])))
+      (is (= five (minmax :min [five ten])))))
 
   (testing "Update MIN state (string)"
-    (is (= "\"apple\"" (update-agg-state :min nil "\"apple\"")))
-    (is (= "\"apple\"" (update-agg-state :min "\"banana\"" "\"apple\""))))
+    (is (= "\"apple\"" (minmax :min ["\"apple\""])))
+    (is (= "\"apple\"" (minmax :min ["\"banana\"" "\"apple\""]))))
 
   (testing "Update MAX state (numeric)"
-    (is (= "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"
-           (update-agg-state :max nil "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>")))
-    (is (= "\"15\"^^<http://www.w3.org/2001/XMLSchema#integer>"
-           (update-agg-state :max "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>" "\"15\"^^<http://www.w3.org/2001/XMLSchema#integer>")))
-    (is (= "\"15\"^^<http://www.w3.org/2001/XMLSchema#integer>"
-           (update-agg-state :max "\"15\"^^<http://www.w3.org/2001/XMLSchema#integer>" "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"))))
+    (let [ten "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+          fifteen "\"15\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+      (is (= ten (minmax :max [ten])))
+      (is (= fifteen (minmax :max [ten fifteen])))
+      (is (= fifteen (minmax :max [fifteen ten])))))
 
   (testing "Update MAX state (string)"
-    (is (= "\"banana\"" (update-agg-state :max nil "\"banana\"")))
-    (is (= "\"banana\"" (update-agg-state :max "\"apple\"" "\"banana\""))))
+    (is (= "\"banana\"" (minmax :max ["\"banana\""])))
+    (is (= "\"banana\"" (minmax :max ["\"apple\"" "\"banana\""]))))
 
   (testing "Update AVG state"
     (is (= [10.0 1] (update-agg-state :avg [0.0 0] "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>")))
@@ -88,23 +94,23 @@
     (is (= 30.0 (merge-agg-states :sum 10.0 20.0))))
 
   (testing "Merge MIN states (typed integers compare numerically)"
-    (let [five "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
-          ten "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+    (let [five (state :min "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>")
+          ten (state :min "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>")]
       (is (= five (merge-agg-states :min five ten)))
       (is (= five (merge-agg-states :min ten five)))
       (is (= five (merge-agg-states :min nil five)))
       (is (= five (merge-agg-states :min five nil)))))
 
   (testing "Merge MAX states (typed integers compare numerically)"
-    (let [five "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
-          ten "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+    (let [five (state :max "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>")
+          ten (state :max "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>")]
       (is (= ten (merge-agg-states :max five ten)))
       (is (= ten (merge-agg-states :max ten five)))))
 
   (testing "Plain (untyped) literals compare as strings per SPARQL"
     ;; "10" < "5" lexicographically — datatype-less numbers are strings
-    (is (= "\"10\"" (merge-agg-states :min "\"5\"" "\"10\"")))
-    (is (= "\"5\"" (merge-agg-states :max "\"5\"" "\"10\""))))
+    (is (= "\"10\"" (compute-final-agg :min (merge-agg-states :min (state :min "\"5\"") (state :min "\"10\"")))))
+    (is (= "\"5\"" (compute-final-agg :max (merge-agg-states :max (state :max "\"5\"") (state :max "\"10\""))))))
 
   (testing "Merge AVG states"
     (is (= [30.0 3] (merge-agg-states :avg [10.0 1] [20.0 2])))))

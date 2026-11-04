@@ -13,8 +13,15 @@
    eval-expr returns the sentinel ::error for a type error and nil for
    unbound. Errors propagate through most operators; FILTER treats an error
    as false (row excluded); BIND leaves the variable unbound; COALESCE skips
-   both errors and unbound (but keeps a legitimate false)."
-  (:require [clojure.string :as str]))
+   both errors and unbound (but keeps a legitimate false).
+
+   Term comparison is defined once, in the \"Term values\" section, and shared
+   by every caller: `terms-equal` (= != IN, self-join !=), `compare-terms`
+   (< <= > >=, self-join ordering) and `order-key` (ORDER BY, MIN/MAX)."
+  (:require [clojure.string :as str])
+  (:import (java.time LocalDateTime ZoneOffset)
+           (java.util Locale)
+           (javax.xml.datatype DatatypeConstants DatatypeFactory XMLGregorianCalendar)))
 
 (def ^:const error
   "Sentinel returned by eval-expr for a SPARQL type error.
@@ -115,13 +122,6 @@
 
 (def ^:private float-datatypes #{(str xsd "double") (str xsd "float")})
 
-(defn- string-like-literal?
-  "True for literals that compare as strings: simple literals and xsd:string."
-  [term]
-  (and (literal-of-kind? term)
-       (nil? (:lang term))
-       (or (nil? (:datatype term)) (= xsd-string (:datatype term)))))
-
 (defn- parse-xsd-double
   "Parse an xsd:double/float lexical form; xsd uses INF/-INF, Java uses Infinity."
   ^Double [^String lex]
@@ -202,9 +202,11 @@
    comparison is in double space; otherwise exact (BigDecimal) comparison,
    so large integers and decimals never lose precision."
   [a b]
-  (if (or (instance? Double a) (instance? Double b))
-    (Double/compare (double a) (double b))
-    (.compareTo (bigdec a) (bigdec b))))
+  (cond
+    ;; fast path: the common integer case needs no BigDecimal allocation
+    (and (instance? Long a) (instance? Long b)) (Long/compare (long a) (long b))
+    (or (instance? Double a) (instance? Double b)) (Double/compare (double a) (double b))
+    :else (.compareTo (bigdec a) (bigdec b))))
 
 (defn- integral? [n]
   (or (instance? Long n) (instance? BigInteger n) (instance? Integer n)
@@ -374,15 +376,44 @@
 ;;; Helpers shared by eval branches
 ;;; ---------------------------------------------------------------------------
 
-(defn- lexical-or-raw
-  "String content of a term: lexical form for literals, raw value for bare
-   tokens, nil for other kinds."
-  [^String s]
-  (let [term (parse-term s)]
-    (case (:kind term)
-      :literal (:lexical term)
-      :other (:value term)
-      nil)))
+(defn unescape-lexical
+  "Unescape a serialized lexical form (the N-Triples escapes canonical
+   storage writes: \\\\ \\\" \\n \\r, plus \\t \\b \\f \\' \\uXXXX \\UXXXXXXXX that
+   hand-written plan constants may carry). Fast path: no backslash, no copy."
+  ^String [^String s]
+  (if (neg? (.indexOf s (int \\)))
+    s
+    (let [len (.length s)
+          sb (StringBuilder. len)]
+      (loop [i 0]
+        (if (>= i len)
+          (.toString sb)
+          (let [ch (.charAt s i)]
+            (if (and (= ch \\) (< (inc i) len))
+              (let [nx (.charAt s (inc i))]
+                (case nx
+                  \n (do (.append sb \newline) (recur (+ i 2)))
+                  \r (do (.append sb \return) (recur (+ i 2)))
+                  \t (do (.append sb \tab) (recur (+ i 2)))
+                  \b (do (.append sb \backspace) (recur (+ i 2)))
+                  \f (do (.append sb \formfeed) (recur (+ i 2)))
+                  (\" \' \\) (do (.append sb nx) (recur (+ i 2)))
+                  (\u \U) (let [n (if (= nx \u) 4 8)
+                                end (+ i 2 n)]
+                            (if-let [cp (when (<= end len)
+                                          (try (Integer/parseInt (subs s (+ i 2) end) 16)
+                                               (catch NumberFormatException _ nil)))]
+                              (do (.appendCodePoint sb (int cp)) (recur end))
+                              (do (.append sb ch) (recur (inc i)))))
+                  ;; unknown escape: keep the backslash literally
+                  (do (.append sb ch) (recur (inc i)))))
+              (do (.append sb ch) (recur (inc i))))))))))
+
+(defn- lower-root
+  "Locale-independent lower-casing (clojure.string/lower-case uses the JVM's
+   default locale: on a Turkish JVM \"I\" would become a dotless i)."
+  ^String [^String s]
+  (.toLowerCase s Locale/ROOT))
 
 (defn- plain-literal [s] (str "\"" s "\""))
 
@@ -402,82 +433,308 @@
     (instance? Boolean v) (boolean-literal v)
     :else v))
 
-(defn- eq-terms
-  "SPARQL RDFterm-equal adapted to canonical serialized terms.
-   Returns true, false, or ::error.
-   - identical serializations → true (canonical storage ⇒ same term)
-   - both numeric → numeric value equality
-   - both string-like literals → lexical equality
-   - both literals with equal lang tags → lexical equality
-   - both literals, same non-numeric datatype → lexical equality (extension)
-   - both literals otherwise → ::error (incomparable per spec)
-   - different term kinds → false"
-  [^String l ^String r]
-  (if (= l r)
-    true
-    (let [ln (term-numeric-value l)
-          rn (term-numeric-value r)]
-      (if (and ln rn)
-        (zero? (compare-numbers ln rn))
-        (let [lt (parse-term l)
-              rt (parse-term r)]
-          (cond
-            (and (literal-of-kind? lt) (literal-of-kind? rt))
+(defn- as-term
+  "An eval result as a term: a Java Boolean (the result of a comparison,
+   BOUND, ...) IS the xsd:boolean literal; nil/::error pass through."
+  [v]
+  (if (instance? Boolean v) (boolean-literal v) v))
+
+;;; ---------------------------------------------------------------------------
+;;; Term values: the one comparator
+;;;
+;;; Every term is classified once into a value class; equality, the ordering
+;;; operators and ORDER BY are all defined over these classes:
+;;;
+;;;   :numeric   valid integer/decimal/float/double literal (or bare number token)
+;;;   :boolean   valid xsd:boolean
+;;;   :temporal  valid XSD date/time type (dateTime, date, time, gYear, ...);
+;;;              :datatype matters: a date never equals a dateTime
+;;;   :string    simple literal or xsd:string (or bare non-numeric token)
+;;;   :lang      language-tagged string
+;;;   :opaque    any other datatype, or an ill-typed literal of a known one
+;;;   :iri :bnode :triple
+;;;
+;;; Semantics (decided Nov 4, 2026; checked cell by cell against Apache Jena
+;;; and RDF4J — see expr-test):
+;;; - `=` follows RDFterm-equal as Jena implements it: literals of DIFFERENT
+;;;   known value classes are simply unequal (false); an opaque literal that is
+;;;   not the same term is a type error (its value is unknown); NaN = NaN is
+;;;   false (IEEE / op:numeric-equal).
+;;; - `<` and friends are defined only within numeric, string, boolean, the
+;;;   same temporal datatype, and the same language tag (as Jena). Strict
+;;;   SPARQL everywhere else: IRIs, blank nodes, opaque literals and mixed
+;;;   classes are a type error.
+;;; - ORDER BY / MIN / MAX: SPARQL's total order (unbound < blank nodes < IRIs <
+;;;   literals < triple terms), using `<` within a class and a fixed class rank
+;;;   across classes.
+;;; ---------------------------------------------------------------------------
+
+(def ^:private temporal-datatypes
+  (into #{} (map #(str xsd %))
+        ["dateTime" "dateTimeStamp" "date" "time"
+         "gYear" "gYearMonth" "gMonth" "gMonthDay" "gDay"]))
+
+(def ^:private ^DatatypeFactory datatype-factory (DatatypeFactory/newInstance))
+
+(defn- parse-temporal
+  "XMLGregorianCalendar for an XSD date/time lexical form, or nil if ill-typed.
+   The JDK implements the XSD lexical spaces and the XSD partial order."
+  ^XMLGregorianCalendar [^String lex]
+  (try (.newXMLGregorianCalendar datatype-factory lex)
+       (catch IllegalArgumentException _ nil)))
+
+(defn- xsd-boolean-value [^String lex]
+  (case lex ("true" "1") true ("false" "0") false nil))
+
+(defn term-value
+  "Classify a serialized term (or a Java Boolean eval result) into its value
+   class; see the section comment. Returns nil for nil."
+  [v]
+  (when (some? v)
+    (if (instance? Boolean v)
+      {:class :boolean :v (boolean v)}
+      (let [term (parse-term v)]
+        (case (:kind term)
+          :iri {:class :iri :s (:value term)}
+          :bnode {:class :bnode :s (:id term)}
+          :triple {:class :triple :s v}
+          :other (if-let [n (bare-token-number (:value term))]
+                   {:class :numeric :v n}
+                   {:class :string :lex (unescape-lexical (:value term)) :xsd? false})
+          :literal
+          (let [{:keys [lexical lang datatype]} term]
             (cond
-              (and (string-like-literal? lt) (string-like-literal? rt))
-              (= (:lexical lt) (:lexical rt))
+              lang {:class :lang :lex (unescape-lexical lexical) :lang lang}
+              (or (nil? datatype) (= xsd-string datatype))
+              {:class :string :lex (unescape-lexical lexical) :xsd? (some? datatype)}
+              :else
+              (or (when-let [n (try
+                                 (cond
+                                   (contains? integer-datatypes datatype) (parse-integer-lexical lexical)
+                                   (= xsd-decimal datatype) (BigDecimal. ^String lexical)
+                                   (contains? float-datatypes datatype) (parse-xsd-double lexical)
+                                   :else nil)
+                                 (catch NumberFormatException _ nil))]
+                    {:class :numeric :v n})
+                  (when (= xsd-boolean datatype)
+                    (let [b (xsd-boolean-value lexical)]
+                      (when (some? b) {:class :boolean :v b})))
+                  (when (contains? temporal-datatypes datatype)
+                    (when-let [cal (parse-temporal lexical)]
+                      {:class :temporal :datatype datatype :cal cal}))
+                  {:class :opaque :datatype datatype :lex lexical}))))))))
 
-              (and (:lang lt) (:lang rt))
-              (and (.equalsIgnoreCase ^String (:lang lt) ^String (:lang rt))
-                   (= (:lexical lt) (:lexical rt)))
+(defn- nan? [x] (and (instance? Double x) (Double/isNaN ^double x)))
 
-              (and (:datatype lt) (= (:datatype lt) (:datatype rt)))
-              (= (:lexical lt) (:lexical rt))
+(defn- lang= [a b] (.equalsIgnoreCase ^String (:lang a) ^String (:lang b)))
 
-              :else ::error)
+(defn- compare-temporal
+  "XSD partial order: negative/zero/positive, or ::error when indeterminate
+   (one value has a timezone and the other does not, within 14 hours)."
+  [a b]
+  (let [r (.compare ^XMLGregorianCalendar (:cal a) ^XMLGregorianCalendar (:cal b))]
+    (condp = r
+      DatatypeConstants/LESSER -1
+      DatatypeConstants/EQUAL 0
+      DatatypeConstants/GREATER 1
+      ::error)))
 
-            ;; bare tokens compare by raw string against anything string-like
-            (or (= :other (:kind lt)) (= :other (:kind rt)))
-            (= (lexical-or-raw l) (lexical-or-raw r))
+(defn- comparable-classes?
+  "True when `<` is defined between the two classified values."
+  [a b]
+  (let [c (:class a)]
+    (and (= c (:class b))
+         (case c
+           (:numeric :string :boolean) true
+           :temporal (= (:datatype a) (:datatype b))
+           :lang (lang= a b)
+           false))))
 
-            ;; different kinds (iri vs literal vs bnode): not equal
-            :else false))))))
+(defn- compare-values*
+  "Compare two classified values known to be comparable-classes?."
+  [a b]
+  (case (:class a)
+    :numeric (compare-numbers (:v a) (:v b))
+    :boolean (compare (:v a) (:v b))
+    :temporal (compare-temporal a b)
+    (:string :lang) (compare (:lex a) (:lex b))))
 
-(defn- order-compare-terms
-  "Ordering comparison for :lt/:le/:gt/:ge. Returns a negative/zero/positive
-   long, or ::error when the terms are not order-comparable.
-   - both numeric → numeric comparison
-   - both string-like literals → codepoint comparison of lexical forms
-   - both IRIs → codepoint comparison (documented extension, consistent with
-     the self-join execution path)
-   - both literals with the same lang or same datatype → lexical comparison
-     (extension; makes ISO dateTime ordering work)
-   - anything else → ::error"
-  [^String l ^String r]
-  (let [ln (term-numeric-value l)
-        rn (term-numeric-value r)]
-    (if (and ln rn)
-      (compare-numbers ln rn)
-      (let [lt (parse-term l)
-            rt (parse-term r)]
-        (cond
-          (and (string-like-literal? lt) (string-like-literal? rt))
-          (compare (:lexical lt) (:lexical rt))
+(defn- compare-classified [a b]
+  (if (and a b (comparable-classes? a b))
+    (compare-values* a b)
+    ::error))
 
-          (and (= :iri (:kind lt)) (= :iri (:kind rt)))
-          (compare l r)
+(defn compare-terms
+  "The ordering operators (< <= > >=): negative/zero/positive, or ::error when
+   the operands are not order-comparable. Strict SPARQL: IRIs, blank nodes,
+   triple terms, opaque literals and mixed value classes are a type error."
+  [l r]
+  (compare-classified (term-value l) (term-value r)))
 
-          (and (literal-of-kind? lt) (literal-of-kind? rt)
-               (or (and (:lang lt) (.equalsIgnoreCase ^String (:lang lt)
-                                                      ^String (or (:lang rt) "")))
-                   (and (:datatype lt) (= (:datatype lt) (:datatype rt)))))
-          (compare (:lexical lt) (:lexical rt))
+(defn order-comparable?
+  "True when `<` is defined between this term and another of its kind (used by
+   the self-join rewrite to skip subjects that can never satisfy an ordering)."
+  [v]
+  (let [a (term-value v)]
+    (boolean (and a (comparable-classes? a a)))))
 
-          ;; bare tokens: compare string content leniently
-          (or (= :other (:kind lt)) (= :other (:kind rt)))
-          (compare (or (lexical-or-raw l) l) (or (lexical-or-raw r) r))
+(def ^:private literal-classes #{:numeric :boolean :temporal :string :lang :opaque})
 
-          :else ::error)))))
+(defn- equal-classified
+  "terms-equal over already classified values (l and r are the terms)."
+  [l r a b]
+  (cond
+    (or (nil? a) (nil? b)) ::error
+    (= l r) (not (and (= :numeric (:class a)) (nan? (:v a))))
+    (not (and (literal-classes (:class a)) (literal-classes (:class b)))) false
+    (or (= :lang (:class a)) (= :lang (:class b)))
+    (and (= :lang (:class a) (:class b)) (lang= a b) (= (:lex a) (:lex b)))
+    (or (= :opaque (:class a)) (= :opaque (:class b))) ::error
+    (not= (:class a) (:class b)) false
+    (and (= :temporal (:class a)) (not= (:datatype a) (:datatype b))) false
+    (and (= :numeric (:class a)) (or (nan? (:v a)) (nan? (:v b)))) false
+    :else (let [c (compare-values* a b)]
+            (if (error? c) ::error (zero? c)))))
+
+(defn terms-equal
+  "RDFterm-equal for = / != / IN: true, false or ::error (see the section
+   comment)."
+  [l r]
+  (equal-classified l r (term-value l) (term-value r)))
+
+;; Plan constants are classified once, not once per row: a FILTER like
+;; ?d < "2008-06-20T00:00:00Z"^^xsd:dateTime would otherwise re-parse the
+;; constant for every binding. Bounded like the regex cache; only :const
+;; operands go through it, so data values never churn it.
+(def ^:private const-value-cache-limit 1024)
+(def ^:private ^java.util.concurrent.ConcurrentHashMap const-value-cache
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- const-term-value [^String s]
+  (or (.get const-value-cache s)
+      (let [t (term-value s)]
+        (when t
+          (when (>= (.size const-value-cache) const-value-cache-limit)
+            (.clear const-value-cache))
+          (.put const-value-cache s t))
+        t)))
+
+(defn- identity-only-term?
+  "True for an IRI, blank node or triple term (equality is term identity,
+   never order-comparable) — decided from the first character."
+  [^String s]
+  (or (.startsWith s "<") (.startsWith s "_:")))
+
+(defn- bare-token?
+  "A bare (non-N-Triples) token, as hand-written internal plan constants use
+   ({:type :const :val \"25\"}); SPARQL never produces one."
+  [^String s]
+  (and (pos? (.length s))
+       (let [ch (.charAt s 0)]
+         (not (or (= ch \") (= ch \<) (.startsWith s "_:"))))))
+
+(defn- lenient-compare
+  "Internal plan API only (an operand is a bare token): compare the text of
+   the two terms — numerically when both parse as numbers, else as strings —
+   as the engine always has for bare tokens. ::error when a side has no text."
+  [l r]
+  (let [text (fn [s] (let [t (parse-term s)]
+                       (case (:kind t)
+                         :literal (unescape-lexical (:lexical t))
+                         :other (:value t)
+                         nil)))
+        a (text l) b (text r)]
+    (if (and a b)
+      (let [na (bare-token-number a) nb (bare-token-number b)]
+        (if (and na nb) (compare-numbers na nb) (compare a b)))
+      ::error)))
+
+(defn- operand-value
+  "term-value of an evaluated operand; constants come from the cache."
+  [expr v]
+  (if (and (= :const (:type expr)) (string? v))
+    (const-term-value v)
+    (term-value v)))
+
+;; ORDER BY key: a fixed-length vector of Comparable values, compared with
+;; clojure.core/compare (Clojure orders vectors by LENGTH first, so every key
+;; has the same length; the element types at each position are uniform within
+;; a [kind group] prefix). Pure data on purpose: it can be computed once per
+;; row, shipped between tasks, and used directly as the :sort value of Rama's
+;; +limit / +top-monotonic.
+;;
+;; Literals that `<` cannot compare are ordered as RDF4J's ValueComparator
+;; does (SPARQL leaves this to the implementation; Rama is an RDF4J SAIL, so
+;; ORDER BY and MIN/MAX agree with RDF4J): numeric datatypes first, then
+;; XSD date/time datatypes (each datatype by its IRI, then by value), then all
+;; other literals by datatype IRI — simple literals are xsd:string and
+;; language-tagged ones rdf:langString (RDF 1.1) — then language tag, then
+;; value / lexical form.
+
+(defn- temporal-sort-value
+  "A total-order stand-in for an XSD date/time: its instant in epoch seconds,
+   reading a missing timezone as UTC and missing fields as their minimum
+   (agrees with every determinate XSD comparison except xsd:time values that
+   mix timezone / no timezone). Computed from the parsed fields with
+   java.time rather than via GregorianCalendar (several times cheaper)."
+  [^XMLGregorianCalendar cal]
+  (let [u DatatypeConstants/FIELD_UNDEFINED
+        f (fn [^long x ^long d] (if (= x u) d x))
+        hour (f (.getHour cal) 0)
+        ldt (LocalDateTime/of (int (f (.getYear cal) 1970)) (int (f (.getMonth cal) 1))
+                              (int (f (.getDay cal) 1)) (int (if (= hour 24) 0 hour))
+                              (int (f (.getMinute cal) 0)) (int (f (.getSecond cal) 0)))
+        ldt (if (= hour 24) (.plusDays ldt 1) ldt)
+        epoch (- (.toEpochSecond ldt ZoneOffset/UTC) (* 60 (f (.getTimezone cal) 0)))
+        frac (.getFractionalSecond cal)]
+    (if frac (+ (bigdec epoch) frac) (bigdec epoch))))
+
+(defn order-key
+  "SPARQL ORDER BY key of an eval result (term string, Boolean, nil or
+   ::error): [kind group sub a b c]. kind: 0 unbound/error, 1 blank node,
+   2 IRI, 3 literal, 4 triple term. Literal groups: 0 numeric, 1 date/time,
+   2 everything else (see the comment above)."
+  [v]
+  (let [t (when-not (error? v) (term-value v))]
+    (if (nil? t)
+      [0 0 0 0 "" ""]
+      (case (:class t)
+        :bnode [1 0 0 0 (:s t) ""]
+        :iri [2 0 0 0 (:s t) ""]
+        :triple [4 0 0 0 (:s t) ""]
+        ;; NaN after every number (as compare-numbers); equal values of
+        ;; different datatypes tie-break on the serialized term
+        :numeric (let [n (:v t)]
+                   [3 0 (if (nan? n) 1 0) (if (nan? n) 0 n) (str v) ""])
+        :temporal [3 1 0 (:datatype t) (temporal-sort-value (:cal t)) (str v)]
+        :boolean [3 2 0 xsd-boolean (if (:v t) "1" "0") ""]
+        :string [3 2 0 xsd-string (:lex t) ""]
+        :lang [3 2 0 rdf-lang-string (lower-root (:lang t)) (:lex t)]
+        :opaque (if (or (contains? integer-datatypes (:datatype t))
+                        (contains? float-datatypes (:datatype t))
+                        (= xsd-decimal (:datatype t)))
+                  ;; ill-typed numeric: with the numbers, after NaN
+                  [3 0 2 0 (str v) ""]
+                  [3 2 0 (:datatype t) (:lex t) ""])))))
+
+(defn compare-order-keys
+  "Compare two order-key vectors (ascending)."
+  [a b]
+  (compare a b))
+
+(defn- string-literal-text
+  "Unescaped text of a string or language-tagged literal (REGEX, LANGMATCHES
+   arguments), or nil for any other term."
+  [v]
+  (let [t (term-value (as-term v))]
+    (when (#{:string :lang} (:class t)) (:lex t))))
+
+(defn- simple-string-text
+  "Unescaped text of a simple / xsd:string literal (REGEX pattern and flags),
+   or nil."
+  [v]
+  (let [t (term-value (as-term v))]
+    (when (= :string (:class t)) (:lex t))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Expression evaluation
@@ -500,23 +757,43 @@
     :var   (get bindings (:name expr))
 
     :cmp
-    (let [l (eval-expr (:left expr) bindings)
-          r (eval-expr (:right expr) bindings)
+    (let [l (as-term (eval-expr (:left expr) bindings))
+          r (as-term (eval-expr (:right expr) bindings))
           op (:op expr)]
       (if (or (nil? l) (error? l) (nil? r) (error? r))
         ::error
-        (case op
-          :eq (eq-terms l r)
-          :ne (let [e (eq-terms l r)]
-                (if (error? e) ::error (not e)))
-          (let [c (order-compare-terms l r)]
+        (cond
+          (or (identity-only-term? l) (identity-only-term? r))
+          ;; an IRI / blank node / triple term: = is term identity and the
+          ;; ordering operators are a type error — no classification needed
+          (case op
+            :eq (= l r)
+            :ne (not= l r)
+            ::error)
+
+          (or (bare-token? l) (bare-token? r))
+          (let [c (lenient-compare l r)]
             (if (error? c)
               ::error
               (case op
-                :lt (neg? c)
-                :le (not (pos? c))
-                :gt (pos? c)
-                :ge (not (neg? c))))))))
+                :eq (zero? c) :ne (not (zero? c))
+                :lt (neg? c) :le (not (pos? c)) :gt (pos? c) :ge (not (neg? c)))))
+
+          :else
+        (let [a (operand-value (:left expr) l)
+              b (operand-value (:right expr) r)]
+          (case op
+            :eq (equal-classified l r a b)
+            :ne (let [e (equal-classified l r a b)]
+                  (if (error? e) ::error (not e)))
+            (let [c (compare-classified a b)]
+              (if (error? c)
+                ::error
+                (case op
+                  :lt (neg? c)
+                  :le (not (pos? c))
+                  :gt (pos? c)
+                  :ge (not (neg? c))))))))))
 
     :logic
     (case (:op expr)
@@ -609,7 +886,7 @@
             :is-triple (= :triple (:kind term))))))
 
     :lang
-    (let [v (eval-expr (:arg expr) bindings)]
+    (let [v (as-term (eval-expr (:arg expr) bindings))]
       (cond
         (or (nil? v) (error? v)) ::error
         (not (string? v)) ::error
@@ -639,15 +916,15 @@
       (if (or (nil? lang-val) (error? lang-val)
               (nil? pattern-val) (error? pattern-val))
         ::error
-        (let [lang (lexical-or-raw lang-val)
-              pat (lexical-or-raw pattern-val)]
+        (let [lang (string-literal-text lang-val)
+              pat (string-literal-text pattern-val)]
           (if (or (nil? lang) (nil? pat))
             ::error
             (if (= pat "*")
               (not (str/blank? lang))
               ;; RFC 4647 basic filtering: case-insensitive prefix match
-              (let [lang-lc (str/lower-case lang)
-                    pat-lc (str/lower-case pat)]
+              (let [lang-lc (lower-root lang)
+                    pat-lc (lower-root pat)]
                 (or (= lang-lc pat-lc)
                     (str/starts-with? lang-lc (str pat-lc "-")))))))))
 
@@ -658,10 +935,14 @@
       (if (or (nil? v) (error? v) (nil? pat-val) (error? pat-val)
               (error? flags-val))
         ::error
-        (let [text (lexical-or-raw v)
-              pattern (lexical-or-raw pat-val)
-              flag-str (when flags-val (lexical-or-raw flags-val))]
-          (if (or (nil? text) (nil? pattern))
+        ;; SPARQL REGEX: text is a string or language-tagged literal, pattern
+        ;; and flags are simple strings — all matched on their UNESCAPED
+        ;; values (the stored form escapes \ " \n \r, so "\\d" used to
+        ;; reach java.util.regex as a literal backslash).
+        (let [text (string-literal-text v)
+              pattern (simple-string-text pat-val)
+              flag-str (when flags-val (simple-string-text flags-val))]
+          (if (or (nil? text) (nil? pattern) (and flags-val (nil? flag-str)))
             ::error
             (let [flags-int (if flag-str
                               (reduce (fn [acc ch]
@@ -684,7 +965,7 @@
       (if (or (nil? l) (error? l) (nil? r) (error? r))
         ::error
         ;; canonical serialization ⇒ same term iff same string
-        (= l r)))
+        (= (as-term l) (as-term r))))
 
     :in
     (let [v (eval-expr (:arg expr) bindings)]
@@ -698,7 +979,7 @@
             (let [m (eval-expr (first members) bindings)]
               (if (or (nil? m) (error? m))
                 (recur (rest members) true)
-                (let [e (eq-terms v m)]
+                (let [e (terms-equal (as-term v) (as-term m))]
                   (cond
                     (true? e) true
                     (error? e) (recur (rest members) true)

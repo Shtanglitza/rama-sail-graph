@@ -97,7 +97,7 @@
   (let [specs [{:expr {:type :var :name "?v"} :ascending ascending}]
         keyed (map (fn [v] [(qh/compute-sort-key {"?v" v} specs) {"?v" v}])
                    values)]
-    (map #(get-in % [1 "?v"]) (qh/sort-keyed-rows keyed))))
+    (map #(get-in % [1 "?v"]) (qh/sort-keyed-rows keyed specs))))
 
 (deftest test-sort-key-mixed-types-total
   (testing "mixed numeric/string/IRI/bnode column sorts without throwing"
@@ -137,7 +137,8 @@
           sort-rows (fn [specs]
                       (map second
                            (qh/sort-keyed-rows
-                            (map (fn [r] [(qh/compute-sort-key r specs) r]) rows))))]
+                            (map (fn [r] [(qh/compute-sort-key r specs) r]) rows)
+                            specs)))]
       (is (= [{} {"?v" "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"}]
              (vec (sort-rows specs-asc))))
       (is (= [{"?v" "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"} {}]
@@ -164,18 +165,12 @@
     (testing "a predicate whose objects are all unique still yields one row per triple"
       (is (= #{["<p>" "<p>"] ["<q>" "<q>"]}
              (set (sj-pairs {"\"1\"" ["<p>"] "\"2\"" ["<q>"]} nil)))))
-    (testing ":le / :ge keep the equal pair"
-      (is (= #{["<x>" "<x>"] ["<x>" "<y>"] ["<y>" "<y>"] ["<z>" "<z>"]}
-             (set (sj-pairs groups {:op :le :left "?a" :right "?b"}))))
-      (is (= #{["<x>" "<x>"] ["<y>" "<x>"] ["<y>" "<y>"] ["<z>" "<z>"]}
-             (set (sj-pairs groups {:op :ge :left "?a" :right "?b"})))))
-    (testing ":ne / :lt / :gt reject the equal pair"
+    (testing ":ne rejects only the equal pair"
       (is (= #{["<x>" "<y>"] ["<y>" "<x>"]}
-             (set (sj-pairs groups {:op :ne :left "?a" :right "?b"}))))
-      (is (= #{["<x>" "<y>"]}
-             (set (sj-pairs groups {:op :lt :left "?a" :right "?b"}))))
-      (is (= #{["<y>" "<x>"]}
-             (set (sj-pairs groups {:op :gt :left "?a" :right "?b"})))))
+             (set (sj-pairs groups {:op :ne :left "?a" :right "?b"})))))
+    (testing "< <= > >= between IRIs are a type error (strict SPARQL): no pairs"
+      (doseq [op [:lt :le :gt :ge]]
+        (is (empty? (sj-pairs groups {:op op :left "?a" :right "?b"})) (str op))))
     (testing "result-limit path agrees with the unlimited path"
       (is (= 5 (count (sj-pairs groups nil 100))))
       (is (= 3 (count (sj-pairs groups nil 3))))
@@ -209,27 +204,39 @@
 ;;; Self-join ordering filters match the expression engine (bnodes / triple terms)
 ;;; ---------------------------------------------------------------------------
 
-(deftest test-self-join-ordering-only-between-iris
+(deftest test-self-join-ordering-is-strict-sparql
+  ;; Same comparator as the expression engine (expr/compare-terms): subjects
+  ;; are IRIs, blank nodes or triple terms, none of which is order-comparable,
+  ;; so an ordering FILTER keeps no pair (BSBM QJ4's ?product1 < ?product2
+  ;; returns no rows, as in RDF4J). != is RDFterm-equal.
   (let [f (fn [op] {:op op :left "?a" :right "?b"})
         ok? (fn [op s1 s2] (qh/apply-inequality-filter s1 s2 (f op) "?a" "?b"))]
-    (testing "IRI vs IRI compares (codepoint order of the serialized form)"
-      (is (true? (ok? :lt "<http://ex/a>" "<http://ex/b>")))
-      (is (true? (ok? :le "<http://ex/a>" "<http://ex/a>"))))
-    (testing "any blank node or triple term makes ordering a type error -> drop"
+    (testing "IRIs, blank nodes and triple terms never satisfy an ordering"
       (doseq [op [:lt :le :gt :ge]
-              [s1 s2] [["_:b1" "_:b2"] ["<http://ex/a>" "_:b1"] ["_:b1" "<http://ex/a>"]
+              [s1 s2] [["<http://ex/a>" "<http://ex/b>"] ["<http://ex/a>" "<http://ex/a>"]
+                       ["_:b1" "_:b2"] ["<http://ex/a>" "_:b1"] ["_:b1" "<http://ex/a>"]
                        ["<< <http://ex/s> <http://ex/p> <http://ex/o> >>" "<http://ex/a>"]]]
         (is (false? (ok? op s1 s2)) (str op " " s1 " " s2))))
     (testing "!= is plain term inequality, bnodes included"
       (is (true? (ok? :ne "_:b1" "_:b2")))
-      (is (false? (ok? :ne "_:b1" "_:b1")))))
-  (testing "pair generation: bnodes never pair under < or >= (sorted fast path too)"
+      (is (false? (ok? :ne "_:b1" "_:b1")))
+      (is (true? (ok? :ne "<http://ex/a>" "_:b1")))))
+  (testing "STR(?a) op STR(?b): subjects compared by their STR (the IRI string)"
+    (let [g {"\"X\"" ["<http://ex/i2>" "<http://ex/i10>" "<http://ex/i1>"]}
+          pairs (fn [op] (set (sj-pairs g {:op op :left "?a" :right "?b" :str? true})))]
+      (is (= #{["<http://ex/i1>" "<http://ex/i10>"] ["<http://ex/i1>" "<http://ex/i2>"]
+               ["<http://ex/i10>" "<http://ex/i2>"]}
+             (pairs :lt))
+          "codepoint order of the IRI strings: i1 < i10 < i2")
+      (is (= #{["<http://ex/i10>" "<http://ex/i1>"] ["<http://ex/i2>" "<http://ex/i1>"]
+               ["<http://ex/i2>" "<http://ex/i10>"]}
+             (pairs :gt)))
+      (is (= 6 (count (pairs :le))) "3 strict + 3 reflexive")
+      (let [iri-str (fn [s] (subs s 1 (dec (count s))))]
+        (is (= (pairs :lt) (set (filter (fn [[a b]] (neg? (compare (iri-str a) (iri-str b)))) (pairs :ne))))
+            "fast path agrees with filtering the general path by IRI string"))))
+  (testing "pair generation, sorted fast path included"
     (let [groups {"\"X\"" ["_:b1" "<http://ex/i1>" "_:b2" "<http://ex/i2>"]}]
-      (is (= #{["<http://ex/i1>" "<http://ex/i2>"]}
-             (set (sj-pairs groups {:op :lt :left "?a" :right "?b"}))))
-      (is (= #{["<http://ex/i2>" "<http://ex/i1>"]}
-             (set (sj-pairs groups {:op :gt :left "?a" :right "?b"}))))
-      (is (= #{["<http://ex/i1>" "<http://ex/i1>"] ["<http://ex/i2>" "<http://ex/i2>"]
-               ["<http://ex/i1>" "<http://ex/i2>"]}
-             (set (sj-pairs groups {:op :le :left "?a" :right "?b"}))))
+      (doseq [op [:lt :le :gt :ge]]
+        (is (empty? (sj-pairs groups {:op op :left "?a" :right "?b"})) (str op)))
       (is (= 12 (count (sj-pairs groups {:op :ne :left "?a" :right "?b"})))))))

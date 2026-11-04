@@ -93,45 +93,22 @@
                               bindings))
             "OR logic (one side true)"))))
 
-  ;; Tests for string comparison fallback (when numeric parsing fails)
-  (testing "String comparison fallback for :le and :ge"
+  ;; Ordering IRIs is a type error (strict SPARQL, as RDF4J; Nov 4, 2026):
+  ;; the FILTER excludes the row whatever the IRIs are. = is term identity.
+  (testing "IRI ordering is a type error; IRI equality is term identity"
     (let [eval-cond expr/evaluate-filter-cond
-          ;; Use IRIs which cannot be parsed as numbers
           bindings {"?uri1" "<http://example.org/a>"
                     "?uri2" "<http://example.org/b>"
-                    "?uri3" "<http://example.org/a>"}]
-
-      ;; :le string fallback
-      (is (true? (eval-cond {:type :cmp :op :le
-                             :left {:type :var :name "?uri1"}
-                             :right {:type :var :name "?uri2"}} bindings))
-          "IRI 'a' <= IRI 'b' (string comparison)")
-
-      (is (true? (eval-cond {:type :cmp :op :le
-                             :left {:type :var :name "?uri1"}
-                             :right {:type :var :name "?uri3"}} bindings))
-          "IRI 'a' <= IRI 'a' (equal strings)")
-
-      (is (false? (eval-cond {:type :cmp :op :le
-                              :left {:type :var :name "?uri2"}
-                              :right {:type :var :name "?uri1"}} bindings))
-          "IRI 'b' <= IRI 'a' should be false")
-
-      ;; :ge string fallback
-      (is (true? (eval-cond {:type :cmp :op :ge
-                             :left {:type :var :name "?uri2"}
-                             :right {:type :var :name "?uri1"}} bindings))
-          "IRI 'b' >= IRI 'a' (string comparison)")
-
-      (is (true? (eval-cond {:type :cmp :op :ge
-                             :left {:type :var :name "?uri1"}
-                             :right {:type :var :name "?uri3"}} bindings))
-          "IRI 'a' >= IRI 'a' (equal strings)")
-
-      (is (false? (eval-cond {:type :cmp :op :ge
-                              :left {:type :var :name "?uri1"}
-                              :right {:type :var :name "?uri2"}} bindings))
-          "IRI 'a' >= IRI 'b' should be false"))))
+                    "?uri3" "<http://example.org/a>"}
+          cnd (fn [op l r] (eval-cond {:type :cmp :op op
+                                       :left {:type :var :name l}
+                                       :right {:type :var :name r}} bindings))]
+      (doseq [op [:lt :le :gt :ge]
+              [l r] [["?uri1" "?uri2"] ["?uri2" "?uri1"] ["?uri1" "?uri3"]]]
+        (is (false? (cnd op l r)) (str l " " op " " r)))
+      (is (true? (cnd :eq "?uri1" "?uri3")))
+      (is (false? (cnd :eq "?uri1" "?uri2")))
+      (is (true? (cnd :ne "?uri1" "?uri2"))))))
 
 ;;; -----------------------------------------------------------------------------
 ;;; INTEGRATION TEST: Filter Query Topology

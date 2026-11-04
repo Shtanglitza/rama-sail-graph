@@ -42,6 +42,15 @@ _:b1 <http://ex/w7c> \"X\" .
 _:b2 <http://ex/w7c> \"X\" .
 <http://ex/i1> <http://ex/w7c> \"X\" .
 <http://ex/i2> <http://ex/w7c> \"X\" .
+<http://ex/item10> <http://ex/label> \"New York\" .
+<http://ex/item1> <http://ex/label> \"New\" .
+<http://ex/item2> <http://ex/label> \"a\\\"b\" .
+<http://ex/item3> <http://ex/label> \"line1\\nline2\" .
+<http://ex/item4> <http://ex/label> \"x9\" .
+<http://ex/item5> <http://ex/label> \"caf\u00e9\"@fr .
+<http://ex/item1> <http://ex/when> \"2008-06-21T05:00:00+02:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+<http://ex/item2> <http://ex/when> \"2008-06-20T23:00:00-05:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+<http://ex/item3> <http://ex/when> \"2008-06-22T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
 ")
 
 (defn- build-model
@@ -126,24 +135,14 @@ _:b2 <http://ex/w7c> \"X\" .
   ;; Subjects of :w7c are {_:b1 _:b2 :i1 :i2}.
   (testing "!= : full parity (plain term inequality, blank nodes included)"
     (is (= 12 (count (parity! (str P "SELECT ?a ?b { ?a :w7c ?o . ?b :w7c ?o FILTER(?a != ?b) }"))))))
-  ;; Ordering: DOCUMENTED DIVERGENCE. Strict SPARQL / RDF4J make < <= > >= on
-  ;; IRIs a type error (0 rows); Rama's expression engine and self-join order
-  ;; IRIs by codepoint as an extension (BSBM QJ4 relies on it — see
-  ;; expr/order-compare-terms). What must hold everywhere: no pair involving a
-  ;; blank node (a type error in both engines) — Rama returns exactly the
-  ;; IRI-IRI pairs, RDF4J none.
-  (let [i1 "http://ex/i1" i2 "http://ex/i2"]
-    (doseq [[op expected] [["<"  #{[i1 i2]}]
-                           ["<=" #{[i1 i1] [i1 i2] [i2 i2]}]
-                           [">"  #{[i2 i1]}]
-                           [">=" #{[i1 i1] [i2 i1] [i2 i2]}]]]
-      (testing op
-        (let [q (str P "SELECT ?a ?b { ?a :w7c ?o . ?b :w7c ?o FILTER(?a " op " ?b) }")
-              r (rows *rama* q)]
-          (is (empty? (rows *mem* q)) "RDF4J: ordering IRIs is a type error")
-          (is (= (count expected) (count r)) (pr-str r))
-          (is (= expected (set (map (juxt #(get % "a") #(get % "b")) r)))
-              (str "Rama must return only IRI-IRI pairs, never blank nodes: " (pr-str r)))))))
+  ;; Ordering (< <= > >=) between subjects — IRIs and blank nodes — is a type
+  ;; error in strict SPARQL, in RDF4J and (since Nov 4, 2026) in Rama: no rows.
+  (doseq [op ["<" "<=" ">" ">="]]
+    (testing op
+      (is (empty? (parity! (str P "SELECT ?a ?b { ?a :w7c ?o . ?b :w7c ?o FILTER(?a " op " ?b) }"))))))
+  (testing "STR(?a) < STR(?b): the strict-SPARQL ordering of IRI subjects (BSBM QJ4)"
+    (doseq [op ["<" "<=" ">" ">=" "!="]]
+      (parity! (str P "SELECT ?a ?b { ?a :city ?o . ?b :city ?o FILTER(STR(?a) " op " STR(?b)) }"))))
   (testing "plain self-join keeps ?a = ?b rows (W1)"
     (is (= 5 (count (parity! (str P "SELECT ?a ?b { ?a :city ?o . ?b :city ?o }"))))))
   (testing "self-join on unique objects (W1)"
@@ -156,3 +155,29 @@ _:b2 <http://ex/w7c> \"X\" .
   (testing "GRAPH ?g ranges over named graphs only (W3)"
     (is (= 2 (count (parity! (str P "SELECT ?g ?s { GRAPH ?g { ?s ?p ?o } }")))))
     (parity! (str P "SELECT ?g ?s { GRAPH ?g { ?s ?p ?o } } LIMIT 5"))))
+
+(deftest test-expression-parity
+  ;; W4-W6: the shared term comparator (expr/terms-equal, compare-terms,
+  ;; order-key) end to end — ORDER BY and MIN/MAX run in the module.
+  (testing "ORDER BY strings / IRIs / dates by value (W5)"
+    (parity! (str P "SELECT ?l { ?s :label ?l } ORDER BY ?l") true)
+    (parity! (str P "SELECT ?l { ?s :label ?l } ORDER BY DESC(?l)") true)
+    (parity! (str P "SELECT ?s { ?s :label ?l } ORDER BY ?s") true)
+    (parity! (str P "SELECT ?s ?w { ?s :when ?w } ORDER BY ?w") true))
+  (testing "MIN / MAX by value (W5)"
+    (is (= [{"m" "\"New\""}] (parity! (str P "SELECT (MIN(?l) AS ?m) { ?s :label ?l FILTER(!isLiteral(?l) || LANG(?l) = \"\") }"))))
+    (parity! (str P "SELECT (MAX(?l) AS ?m) (MIN(?s) AS ?n) { ?s :label ?l }"))
+    (parity! (str P "SELECT (MIN(?w) AS ?m) (MAX(?w) AS ?n) { ?s :when ?w }")))
+  (testing "REGEX on unescaped values (W4)"
+    (is (= 2 (count (parity! (str P "SELECT ?s { ?s :label ?l FILTER(REGEX(?l, \"\\\\d\")) }"))))
+        "x9 and line1\\nline2")
+    (is (= 1 (count (parity! (str P "SELECT ?s { ?s :label ?l FILTER(REGEX(?l, \"\\\"\")) }")))))
+    (is (= 1 (count (parity! (str P "SELECT ?s { ?s :label ?l FILTER(REGEX(?l, \"1.l\", \"s\")) }")))))
+    (parity! (str P "SELECT ?s { ?s :label ?l FILTER(REGEX(?l, \"^caf\")) }")))
+  (testing "boolean results vs boolean literals (W6)"
+    (parity! (str P "SELECT ?s { ?s :name ?n OPTIONAL { ?s :age ?a } FILTER(BOUND(?a) = false) }"))
+    (parity! (str P "SELECT ?s { ?s :name ?n OPTIONAL { ?s :age ?a } FILTER(BOUND(?a) IN (true)) }"))
+    (parity! (str P "SELECT ?s ?b { ?s :name ?n OPTIONAL { ?s :age ?a } BIND(BOUND(?a) AS ?b) } ORDER BY ?b ?s") true))
+  (testing "literals of different datatypes are unequal (= / !=)"
+    (parity! (str P "SELECT ?s { ?s :age ?a FILTER(?a != \"x\"@en) }"))
+    (parity! (str P "SELECT ?s { ?s :label ?l FILTER(?l != \"caf\u00e9\"@fr) }"))))

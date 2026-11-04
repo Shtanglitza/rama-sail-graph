@@ -36,10 +36,8 @@
      RANDOM_QUERY_COUNT=5000 lein test :only rama-sail.sail.random-query-parity-test
 
    Divergences the generator avoids by construction:
-   - ordering comparisons (< <= > >=) between two variables (Rama orders IRIs
-     as an extension; see memorystore-parity-test);
-   - literals of different datatypes compared with = / != (Rama raises a type
-     error, RDFterm-equal; RDF4J and Jena return false): the dataset and the
+   - literals of different datatypes compared with = / != (Rama and Jena
+     return false, RDF4J often raises a type error): the dataset and the
      constants use one literal datatype, xsd:integer;
    - LIMIT/OFFSET without a total order (nondeterministic);
    - the same triple stored in several graphs (test-triple-in-several-graphs-divergence);
@@ -159,6 +157,7 @@
       (weighted rnd [[[:ne (v) (v)] 3] [[:eq (v) (v)] 2] [[:eq (v) (gen-term rnd)] 2]
                      [[:bound (v)] 2] [[:lt (v) (pick rnd ["1" "2" "3"])] 1.5]
                      [[:gt (v) (pick rnd ["1" "2" "3"])] 1.5]
+                     [[:lt (v) (v)] 1] [[:ge (v) (v)] 0.5]
                      [[:sameterm (v) (v)] 1] [[:isiri (v)] 1] [[:isliteral (v)] 1]]))))
 
 (defn- gen-failable-bind-expr
@@ -248,6 +247,7 @@
     :eq (str "(" a " = " b ")")
     :lt (str "(" a " < " b ")")
     :gt (str "(" a " > " b ")")
+    :ge (str "(" a " >= " b ")")
     :bound (str "BOUND(" a ")")
     :sameterm (str "sameTerm(" a ", " b ")")
     :isiri (str "isIRI(" a ")")
@@ -443,8 +443,15 @@
                    (when (and c (has-undef-values? (:els g)))
                      [[:filter-with-undef-values el]])
                    (group-violations g others true)))
-      :union (concat (group-violations (first args) others true)
-                     (group-violations (second args) others true))
+      :union (concat
+              ;; a variable only some branches bind, joined with a sibling
+              ;; that binds it: RDF4J keys the join on it and drops the rows
+              ;; of the branches that leave it unbound
+              (when (seq (filter others (remove (certain-el el)
+                                                (into (mentions (first args)) (mentions (second args))))))
+                [[:union-partially-binds-join-var el]])
+              (group-violations (first args) others true)
+              (group-violations (second args) others true))
       :graph (group-violations (second args) others true)
       :subquery (let [[_ vs g] args]
                   (concat
@@ -665,6 +672,12 @@
    {:name "a FILTER is not pushed into VALUES rows with UNDEF"
     :q "SELECT * WHERE { VALUES (?e) { (UNDEF) } ?e <http://ex/s> ?b . FILTER(isIRI(?e)) }"
     :same-as "SELECT ?e ?b WHERE { ?e <http://ex/s> ?b . FILTER(isIRI(?e)) }"}
+   {:name "a UNION branch that leaves the join variable unbound still joins"
+    ;; Join({b:2}, {?b :r ?e} UNION {x:20}) keeps {b:2, x:20}; RDF4J keys
+    ;; the join on ?b and drops the second branch's row
+    :q "SELECT * WHERE { BIND(2 AS ?b) { ?b <http://ex/r> ?e . } UNION { BIND(20 AS ?x) } }"
+    :expected [{"b" "\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+                "x" "\"20\"^^<http://www.w3.org/2001/XMLSchema#integer>"}]}
    {:name "OPTIONAL over an empty subquery keeps the left row"
     :q "SELECT * WHERE { OPTIONAL { { SELECT ?a WHERE { ?a <http://ex/p> <http://ex/none> . } } } }"
     :expected [{}]}

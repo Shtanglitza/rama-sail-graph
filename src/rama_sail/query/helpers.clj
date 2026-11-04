@@ -1,8 +1,9 @@
 (ns ^:no-doc rama-sail.query.helpers
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [rama-sail.query.expr :refer [eval-expr term-numeric-value error?
-                                          evaluate-filter-cond parse-term]]))
+            [rama-sail.query.expr :refer [eval-expr error error? evaluate-filter-cond
+                                          terms-equal compare-terms order-key
+                                          order-comparable?]]))
 
 ;; RDF type predicate IRI - used for materialized view maintenance
 (def RDF-TYPE-PREDICATE "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>")
@@ -96,35 +97,38 @@
 ;;; Self-Join Helpers
 ;;; ---------------------------------------------------------------------------
 
-(defn- iri-term?
-  "True for an IRI term (not a blank node, literal or << triple term >>)."
-  [s]
-  (= :iri (:kind (parse-term s))))
+(defn- self-join-operand
+  "The value a self-join filter compares for subject s: the subject itself,
+   or its STR() when the filter is STR(?a) op STR(?b) — evaluated by the
+   expression engine, so it agrees with the unrewritten FILTER."
+  [s filter-spec]
+  (if (:str? filter-spec)
+    (let [v (eval-expr {:type :str :arg {:type :const :val s}} {})]
+      (when-not (error? v) v))
+    s))
 
 (defn apply-inequality-filter
   "Check if s1 and s2 satisfy the inequality filter.
-   Filter format: {:op :lt/:gt/:le/:ge/:ne, :left var, :right var}
+   Filter format: {:op :lt/:gt/:le/:ge/:ne, :left var, :right var, :str? bool}
 
-   Must agree with the expression engine (`expr/order-compare-terms`), which
-   evaluates the same FILTER when the self-join rewrite does not apply:
-   ordering (< <= > >=) is defined only between two IRIs (codepoint order of
-   the serialized form); any blank node or triple term makes it a type error,
-   i.e. the pair is dropped. != is plain RDF-term inequality."
+   Uses the expression engine's comparator, so the pair is kept exactly when
+   the same FILTER, evaluated normally, would be true: != is RDFterm-equal
+   (`expr/terms-equal`); < <= > >= use `expr/compare-terms`, under which
+   subjects (IRIs, blank nodes, triple terms) are never order-comparable —
+   a type error, i.e. the pair is dropped."
   [s1 s2 filter-spec left-subject right-subject]
   (if (nil? filter-spec)
     true  ;; No filter - all pairs valid
     (let [op (:op filter-spec)
           filter-left (:left filter-spec)
           ;; Determine which value goes where based on variable names
-          [v1 v2] (if (= filter-left left-subject)
-                    [s1 s2]
-                    [s2 s1])]
+          [v1 v2] (map #(self-join-operand % filter-spec)
+                       (if (= filter-left left-subject) [s1 s2] [s2 s1]))]
       (case op
-        :ne (not= v1 v2)
+        :ne (and v1 v2 (false? (terms-equal v1 v2)))
         (:lt :le :gt :ge)
-        (and (iri-term? v1)
-             (iri-term? v2)
-             (let [c (compare v1 v2)]
+        (let [c (if (and v1 v2) (compare-terms v1 v2) error)]
+          (and (not (error? c))
                (case op
                  :lt (neg? c)
                  :le (not (pos? c))
@@ -147,11 +151,18 @@
                               (= (:left filter-spec) left-subject)
                               (#{:lt :gt} (:op filter-spec)))
         ;; CRITICAL: Sort subjects for the optimization to work correctly.
-        ;; Only IRIs are order-comparable (see apply-inequality-filter); a
-        ;; blank node or triple term can never satisfy < or >.
-        subject-vec (if optimized-range?
-                      (vec (sort (filter iri-term? subjects)))
-                      (vec subjects))
+        ;; Only order-comparable terms can satisfy < or > (see
+        ;; apply-inequality-filter); subjects never are under strict SPARQL,
+        ;; so this yields no pairs — but stays correct if that ever changes.
+        ;; Sorted by the compared value (the subject, or its STR); keys kept
+        ;; alongside so equal values (no strict order) never pair.
+        keyed (when optimized-range?
+                (->> subjects
+                     (keep (fn [s] (let [v (self-join-operand s filter-spec)]
+                                     (when (and v (order-comparable? v)) [(order-key v) s]))))
+                     (sort-by first)
+                     vec))
+        subject-vec (if optimized-range? (mapv second keyed) (vec subjects))
         n (count subject-vec)
         pairs (if optimized-range?
                 ;; Optimized: subjects are sorted, generate only ordered index pairs
@@ -160,6 +171,7 @@
                         j (if (= op :lt)
                             (range (inc i) n)
                             (range 0 i))
+                        :when (not= (first (keyed i)) (first (keyed j)))
                         :let [s1 (subject-vec i)
                               s2 (subject-vec j)]]
                     {left-subject s1
@@ -421,74 +433,32 @@
 ;;; ORDER BY Helpers
 ;;; ---------------------------------------------------------------------------
 
-;; Comparable wrapper for DESC string ordering.
-;; Reverses natural string comparison so larger strings sort first.
-(deftype DescString [^String s]
-  Comparable
-  (compareTo [_ other]
-    ;; Reverse comparison: compare other to this instead of this to other
-    (compare (.s ^DescString other) s))
-
-  Object
-  (equals [_ other]
-    (and (instance? DescString other)
-         (= s (.s ^DescString other))))
-  (hashCode [_]
-    (.hashCode s))
-  (toString [_]
-    (str "DescString[" s "]")))
-
 (defn compute-sort-key
-  "Compute a composite sort key where natural vector ordering produces correct result.
-   Each element is [category rank value] where:
-   - category 0: nil (ASC) - sorts first
-   - category 1: bound value
-   - category 2: nil (DESC) - sorts last
-
-   rank orders bound values by term type so mixed-type columns are totally
-   ordered (SPARQL: blank nodes < IRIs < literals) instead of throwing
-   ClassCastException when e.g. a numeric and a string value meet:
-   - 0: blank node    (compared as string)
-   - 1: IRI           (compared as string)
-   - 2: numeric literal (compared numerically)
-   - 3: other literal (compared as string)
-   - 4: non-string evaluation result, e.g. a boolean (compared via str)
-   Values are only compared within the same rank, so every key element is
-   mutually comparable. For DESC both rank and value are inverted."
+  "ORDER BY key of a row: one `expr/order-key` per order spec (SPARQL's total
+   order: unbound/error < blank nodes < IRIs < literals < triple terms; `<`
+   within a value class). Keys are pure data — direction is applied by
+   `compare-sort-keys` — so they can be computed on any task and shipped."
   [row order-specs]
-  (mapv (fn [{:keys [expr ascending]}]
-          (let [raw* (eval-expr expr row)
-                ;; an evaluation error orders like unbound
-                raw (when-not (error? raw*) raw*)
-                parsed (when (string? raw)
-                         ;; datatype-aware numeric value; coerce to double —
-                         ;; ordering does not need exact arithmetic
-                         (some-> (term-numeric-value raw) double))]
-            (cond
-              ;; nil: use category to control null ordering
-              (nil? raw)
-              (if ascending [0 0 nil] [2 0 nil])
+  (mapv (fn [{:keys [expr]}] (order-key (eval-expr expr row))) order-specs))
 
-              ;; numeric literal: negate for DESC so larger values sort first
-              parsed
-              [1 (if ascending 2 -2) (if ascending parsed (- parsed))]
-
-              :else
-              (let [rank (cond
-                           (not (string? raw)) 4
-                           (str/starts-with? raw "_:") 0
-                           (str/starts-with? raw "<") 1
-                           :else 3)
-                    s (if (string? raw) raw (str raw))]
-                [1
-                 (if ascending rank (- rank))
-                 (if ascending s (->DescString s))]))))
-        order-specs))
+(defn compare-sort-keys
+  "Compare two compute-sort-key results column by column, honouring each
+   spec's direction (:ascending; DESC reverses the column, so unbound sorts
+   last)."
+  [order-specs ka kb]
+  (loop [i 0 specs (seq order-specs)]
+    (if (nil? specs)
+      0
+      (let [c (compare (nth ka i) (nth kb i))]
+        (if (zero? c)
+          (recur (inc i) (next specs))
+          (if (:ascending (first specs)) c (- c)))))))
 
 (defn sort-keyed-rows
-  "Sort [sort-key, row] tuples by sort-key and return sorted vector."
-  [keyed-rows]
-  (vec (sort-by first keyed-rows)))
+  "Sort [sort-key, row] tuples by sort-key per the order specs' directions
+   (stable, so ties keep input order) and return a sorted vector."
+  [keyed-rows order-specs]
+  (vec (sort (fn [a b] (compare-sort-keys order-specs (first a) (first b))) keyed-rows)))
 
 (defn extract-sorted-rows
   "Extract just the rows from sorted [sort-key, row] tuples."

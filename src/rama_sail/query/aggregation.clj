@@ -1,8 +1,8 @@
 (ns ^:no-doc rama-sail.query.aggregation
   (:use [com.rpl.rama])
   (:require [clojure.set]
-            [rama-sail.query.expr :refer [eval-expr term-numeric-value
-                                          compare-numbers add-numbers error?]]))
+            [rama-sail.query.expr :refer [eval-expr term-numeric-value add-numbers
+                                          order-key value->term-string]]))
 
 ;; --- GROUP BY / Aggregates ---
 
@@ -46,17 +46,19 @@
 
     :else (str value)))
 
-(defn- compare-rdf-terms
-  "Compare two RDF term values for MIN/MAX ordering.
-   Numeric literals (per datatype) compare numerically and exactly;
-   everything else compares lexicographically on the serialized form.
-   Returns negative if a < b, positive if a > b, zero if equal."
-  [a b]
-  (let [na (if (number? a) a (when (string? a) (term-numeric-value a)))
-        nb (if (number? b) b (when (string? b) (term-numeric-value b)))]
-    (if (and na nb)
-      (compare-numbers na nb)
-      (compare (str a) (str b)))))
+(defn- keyed-term
+  "MIN/MAX state for one value: [order-key term]. The key is computed once per
+   value, so updates and combiner merges compare precomputed pure data."
+  [term]
+  [(order-key term) term])
+
+(defn- extreme
+  "The state whose key wins under `better?` (neg? for MIN, pos? for MAX)
+   when compared to the other; nil states lose."
+  [better? s1 s2]
+  (cond (nil? s1) s2
+        (nil? s2) s1
+        :else (if (better? (compare (first s2) (first s1))) s2 s1)))
 
 (defn- format-rdf-term-result
   "Format a MIN/MAX result. If the value is already an N-Triples term, return as-is.
@@ -85,32 +87,20 @@
          :compute identity
          :format format-numeric-result}
 
+   ;; SPARQL MIN/MAX use the ORDER BY order (unbound skipped; blank nodes <
+   ;; IRIs < literals; numbers by value, strings by codepoint).
    :min {:init (constantly nil)
          :update (fn [state raw-value]
-                   (if (some? raw-value)
-                     (if (nil? state)
-                       raw-value
-                       (let [cmp (compare-rdf-terms state raw-value)]
-                         (if (pos? cmp) raw-value state)))
-                     state))
-         :merge (fn [s1 s2]
-                  (cond (nil? s1) s2 (nil? s2) s1
-                        :else (if (pos? (compare-rdf-terms s1 s2)) s2 s1)))
-         :compute identity
+                   (if (some? raw-value) (extreme neg? state (keyed-term raw-value)) state))
+         :merge (fn [s1 s2] (extreme neg? s1 s2))
+         :compute second
          :format format-rdf-term-result}
 
    :max {:init (constantly nil)
          :update (fn [state raw-value]
-                   (if (some? raw-value)
-                     (if (nil? state)
-                       raw-value
-                       (let [cmp (compare-rdf-terms state raw-value)]
-                         (if (neg? cmp) raw-value state)))
-                     state))
-         :merge (fn [s1 s2]
-                  (cond (nil? s1) s2 (nil? s2) s1
-                        :else (if (neg? (compare-rdf-terms s1 s2)) s2 s1)))
-         :compute identity
+                   (if (some? raw-value) (extreme pos? state (keyed-term raw-value)) state))
+         :merge (fn [s1 s2] (extreme pos? s1 s2))
+         :compute second
          :format format-rdf-term-result}
 
    :avg {:init (constantly [0 0])
@@ -196,15 +186,15 @@
   "Extract the value to aggregate from a binding based on agg-spec.
    For COUNT(*) the value is the binding row itself, so COUNT(DISTINCT *)
    deduplicates whole rows instead of a shared constant marker.
-   An expression evaluation error contributes nothing (treated as unbound)."
+   An expression evaluation error contributes nothing (treated as unbound);
+   a boolean expression result is its xsd:boolean literal."
   [binding agg-spec]
   (let [arg (:arg agg-spec)]
     (if (nil? arg)
       binding
-      (let [v (if (= :var (:type arg))
-                (get binding (:name arg))
-                (eval-expr arg binding))]
-        (when-not (error? v) v)))))
+      (if (= :var (:type arg))
+        (get binding (:name arg))
+        (value->term-string (eval-expr arg binding))))))
 
 (defn build-group-entry
   "Build a single group entry with aggregate states from one binding.

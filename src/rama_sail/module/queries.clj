@@ -307,7 +307,7 @@
                     (vector (vector *sort-key *row) :> *single-keyed)
                     (|origin)
                     (+vec-concat-combiner *single-keyed :> *all-keyed)
-                    (qh/sort-keyed-rows *all-keyed :> *sorted-keyed)
+                    (qh/sort-keyed-rows *all-keyed *order-specs :> *sorted-keyed)
                     (qh/extract-sorted-rows *sorted-keyed :> *results)))
 
 ;; --- LIST CONTEXTS ---
