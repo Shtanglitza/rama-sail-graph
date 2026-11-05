@@ -259,11 +259,11 @@
     (is (every? (fn [[a b]] (= a b)) (keys (pairs-of opt))))))
 
 (deftest test-self-join-non-strict-and-ne-filters
-  ;; W1: <= / >= keep the equal pair, != drops it. Cities: NYC {alice bob
-  ;; carol}, LA {dave eve}.
-  ;;   <=, >= : NYC 3 equal + 3 ordered, LA 2 equal + 1 ordered -> 9
-  ;;   !=     : NYC 6 ordered pairs, LA 2                       -> 8
-  (doseq [[op expected] [["<=" 9] [">=" 9] ["!=" 8]]]
+  ;; W1: != drops only the equal pair. Cities: NYC {alice bob carol},
+  ;; LA {dave eve}: NYC 6 ordered pairs + LA 2 -> 8.
+  ;; < <= > >= between IRI subjects are a type error (strict SPARQL, Nov 4,
+  ;; 2026), so the ordering self-joins return nothing — on both plans.
+  (doseq [[op expected] [["<=" 0] [">=" 0] ["<" 0] ["!=" 8]]]
     (testing op
       (let [{:keys [opt]} (assert-equivalent!
                            (str "SELECT ?a ?b WHERE {
@@ -377,17 +377,29 @@
     SELECT * WHERE { { SELECT ?o WHERE { ?a :city ?o . ?b :city ?o } } FILTER(?a != ?b) }"
    {}))
 
-(deftest test-self-join-ordering-excludes-bnodes
-  ;; Ordering is defined only between IRIs (as in the expression engine):
-  ;; with subjects {_:b1 _:b2 i1 i2} only IRI pairs may satisfy < / <=.
+(deftest test-self-join-on-str-ordering
+  ;; The strict-SPARQL way to order IRI subjects (BSBM QJ4): STR(?a) < STR(?b).
+  ;; The optimizer folds it into the self-join (:str? true). Cities: NYC
+  ;; {alice bob carol} -> 3 pairs, LA {dave eve} -> 1.
+  (let [q (fn [op] (str "SELECT ?a ?b WHERE { ?a <http://ex/city> ?c . ?b <http://ex/city> ?c .
+                         FILTER(STR(?a) " op " STR(?b)) }"))
+        lt {{"?a" (iri "alice") "?b" (iri "bob")} 1 {"?a" (iri "alice") "?b" (iri "carol")} 1
+            {"?a" (iri "bob") "?b" (iri "carol")} 1 {"?a" (iri "dave") "?b" (iri "eve")} 1}]
+    (let [{:keys [opt-plan]} (assert-expected! (q "<") lt)]
+      (is (= {:op :lt :left "?a" :right "?b" :str? true} (get-in opt-plan [:sub-plan :filter]))
+          (str "folded into the self-join: " (pr-str opt-plan))))
+    (assert-expected! (q ">") (into {} (for [[{a "?a" b "?b"} n] lt] [{"?a" b "?b" a} n])))
+    (let [{:keys [opt]} (assert-equivalent! (q "<="))]
+      (is (= 9 (count opt)) "4 strict + 5 reflexive"))))
+
+(deftest test-self-join-ordering-is-strict-sparql
+  ;; Subjects {_:b1 _:b2 i1 i2}: neither blank nodes nor IRIs are
+  ;; order-comparable (expr/compare-terms), so < / <= keep no pair.
   (let [q (fn [op] (str "PREFIX : <http://ex/>
                          SELECT ?a ?b WHERE { ?a :w7c ?o . ?b :w7c ?o FILTER(?a " op " ?b) }"))]
-    (testing "<"
-      (assert-expected! (q "<") {{"?a" (iri "i1") "?b" (iri "i2")} 1}))
-    (testing "<="
-      (assert-expected! (q "<=") {{"?a" (iri "i1") "?b" (iri "i1")} 1
-                                  {"?a" (iri "i2") "?b" (iri "i2")} 1
-                                  {"?a" (iri "i1") "?b" (iri "i2")} 1}))
+    (doseq [op ["<" "<=" ">" ">="]]
+      (testing op
+        (assert-expected! (q op) {})))
     (testing "!= keeps bnode pairs (term inequality)"
       (let [{:keys [opt]} (assert-equivalent! (q "!="))]
         (is (= 12 (count opt)))))))

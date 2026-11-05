@@ -361,7 +361,10 @@ LIMIT 100")})
 (def qj4-template
   "QJ4: Self-join - Products sharing the same producer.
 
-   Tests: BGP, JOIN (self-join pattern)"
+   Tests: BGP, JOIN (self-join pattern). Each pair once via STR(?p1) < STR(?p2):
+   ordering IRIs directly (?p1 < ?p2) is a type error in SPARQL — no rows in
+   RDF4J and, since Nov 4, 2026, in Rama. The self-join rewrite accepts both
+   forms."
   {:name "QJ4"
    :description "Self-join: pairs of products from same producer"
    :operators #{:bgp :join :filter}
@@ -374,7 +377,7 @@ WHERE {
   ?product2 bsbm:producer ?producer .
   ?product1 rdfs:label ?label1 .
   ?product2 rdfs:label ?label2 .
-  FILTER (?product1 < ?product2)
+  FILTER (STR(?product1) < STR(?product2))
 }
 LIMIT 100")})
 

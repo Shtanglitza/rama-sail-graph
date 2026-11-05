@@ -465,20 +465,33 @@
                    (down :sub-plan))
         nil))))
 
+(defn- self-join-operands
+  "For a comparison usable by the self-join rewrite, [left-var right-var str?]:
+   both operands bare variables (?a < ?b), or both STR of a variable
+   (STR(?a) < STR(?b) — the strict-SPARQL way to order IRIs). Else nil."
+  [expr]
+  (when (and (= :cmp (:type expr)) (#{:lt :le :gt :ge :ne} (:op expr)))
+    (let [{l :left r :right} expr
+          str-var? (fn [o] (and (= :str (:type o)) (= :var (get-in o [:arg :type]))))]
+      (cond
+        (and (= :var (:type l)) (= :var (:type r))) [(:name l) (:name r) false]
+        (and (str-var? l) (str-var? r)) [(get-in l [:arg :name]) (get-in r [:arg :name]) true]
+        :else nil))))
+
+(defn- self-join-filter-spec
+  "The self-join :filter for expr when it compares exactly the two subjects
+   (in either order), else nil. :str? marks STR() operands."
+  [expr subject-a subject-b]
+  (when-let [[left-var right-var str?] (self-join-operands expr)]
+    (when (or (and (= left-var subject-a) (= right-var subject-b))
+              (and (= left-var subject-b) (= right-var subject-a)))
+      (cond-> {:op (:op expr) :left left-var :right right-var}
+        str? (assoc :str? true)))))
+
 (defn- is-self-join-inequality?
   "Check if an expression is an inequality filter that applies to self-join subjects."
   [expr self-join]
-  (when (and (= :cmp (:type expr))
-             (#{:lt :le :gt :ge :ne} (:op expr))
-             (= :var (get-in expr [:left :type]))
-             (= :var (get-in expr [:right :type])))
-    (let [left-var (get-in expr [:left :name])
-          right-var (get-in expr [:right :name])
-          sj-left (:left-subject self-join)
-          sj-right (:right-subject self-join)]
-      ;; Filter variables must match self-join subjects
-      (or (and (= left-var sj-left) (= right-var sj-right))
-          (and (= left-var sj-right) (= right-var sj-left))))))
+  (some? (self-join-filter-spec expr (:left-subject self-join) (:right-subject self-join))))
 
 (defn- incorporate-filter-into-self-join
   "If a filter is an inequality on self-join subjects, incorporate it into the self-join."
@@ -492,32 +505,18 @@
                  (is-self-join-inequality? expr self-join))
         ;; Update the self-join with the filter
         (let [updated-self-join (assoc self-join :filter
-                                       {:op (:op expr)
-                                        :left (get-in expr [:left :name])
-                                        :right (get-in expr [:right :name])})
+                                       (self-join-filter-spec expr (:left-subject self-join)
+                                                              (:right-subject self-join)))
               ;; Update the plan tree to include the modified self-join
               updated-sub-plan (assoc-in (:sub-plan plan) path updated-self-join)]
           ;; Return the sub-plan without the filter (it's now in the self-join)
           updated-sub-plan)))))
 
 (defn- extract-inequality-filter
-  "Check if an expression is an inequality filter between two variables.
-   Returns {:op :lt/:gt, :left var, :right var} or nil."
+  "Check if an expression is an inequality filter between two variables
+   (bare or both wrapped in STR). Returns {:op :left :right [:str? true]} or nil."
   [expr var1 var2]
-  (when (= :cmp (:type expr))
-    (let [op (:op expr)
-          left (:left expr)
-          right (:right expr)]
-      (when (and (#{:lt :le :gt :ge :ne} op)
-                 (= :var (:type left))
-                 (= :var (:type right)))
-        (let [left-var (:name left)
-              right-var (:name right)]
-          (when (or (and (= left-var var1) (= right-var var2))
-                    (and (= left-var var2) (= right-var var1)))
-            {:op op
-             :left left-var
-             :right right-var}))))))
+  (self-join-filter-spec expr var1 var2))
 
 (defn- detect-self-join-with-filter
   "Detect a filter over a self-join pattern.
