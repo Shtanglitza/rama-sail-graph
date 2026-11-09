@@ -33,6 +33,11 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are shrunk to a minimal query. `RANDOM_QUERY_SEED` / `RANDOM_QUERY_COUNT` override the run.
 
 ### Changed
+- **Property lookups scale with the input instead of the store.** `batch-enrich` now applies to
+  either side of a join when the input is no larger than the property, and to `OPTIONAL` property
+  patterns with no filter. On BSBM with 59K triples the median query mix time fell from 1,055 ms
+  to 488 ms; Q7 went from 178 ms to 2.6 ms and Q8 from 115 ms to 2.0 ms. **Deploy the module before
+  the clients:** an older module ignores the plan's `:optional?` flag and drops unmatched rows.
 - Upgraded Rama 1.6.0 → 1.9.0 (1.9.0 fixes a yielding `local-select>` in a microbatch topology reading a closed RocksDB instance; the indexer yields on large scans). (Run `lein clean` after changing the Rama dependency to clear
   stale AOT bytecode.)
 - **Expression engine rebuilt** with a typed numeric tower (Long/BigInteger/BigDecimal/Double)
@@ -62,6 +67,11 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- Bench loader lost data silently: unacknowledged appends overran the depot's append buffer, so
+  only 46,393 of the 59,328 triples in the 1,000-product dataset were indexed. It now sends
+  acknowledged appends through a sliding window with retries and throws if any append still fails.
+  Cluster runs wait for the indexer instead of sleeping for a fixed time, and the reported load time
+  now covers the whole load up to fully indexed.
 - **Wrong results: ORDER BY, MIN and MAX compared serialized N-Triples strings** (W5):
   `"New York"` sorted before `"New"`, `<item10>` before `<item1>`, `MIN(<a>, "x")` was
   `"x"`, and dates compared as text. They now use term values. Module-side change: redeploy
