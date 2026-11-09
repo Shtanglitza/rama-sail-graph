@@ -118,7 +118,7 @@
             (let [query "SELECT ?p1 ?p2 WHERE {
                            ?p1 <http://ex/producer> ?prod .
                            ?p2 <http://ex/producer> ?prod .
-                           FILTER (?p1 < ?p2)
+                           FILTER (STR(?p1) < STR(?p2))
                          }"
                   stats (benchmark-query conn query 10)]
               ;; With 4 products (2 per producer), should get 2 pairs
@@ -163,7 +163,7 @@
             (let [query "SELECT ?p1 ?p2 WHERE {
                            ?p1 <http://ex/producer> ?prod .
                            ?p2 <http://ex/producer> ?prod .
-                           FILTER (?p1 < ?p2)
+                           FILTER (STR(?p1) < STR(?p2))
                          }"
                   tq (.prepareTupleQuery conn query)]
               (with-open [result (.evaluate tq)]
