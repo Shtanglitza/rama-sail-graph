@@ -147,7 +147,7 @@
                                      "?product <" bsbm-vocab "productFeature> ?f2 . "
                                      "?product <" bsbm-vocab "productPropertyNumeric1> ?p1 . "
                                      "?product <" bsbm-vocab "productPropertyNumeric3> ?p3 . "
-                                     "FILTER (?f1 < ?f2) "  ;; Ensure f1 != f2 and avoid duplicates
+                                     "FILTER (STR(?f1) < STR(?f2)) "  ;; Ensure f1 != f2 and avoid duplicates (ordering IRIs directly is a type error)
                                      "} LIMIT " (* max-count 3)))]
     (let [valid-params (->> results
                             (map (fn [r]
