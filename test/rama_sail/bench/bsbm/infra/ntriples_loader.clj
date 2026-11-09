@@ -8,7 +8,8 @@
             [com.rpl.rama.test :as rtest]
             [rama-sail.core :as core]
             [rama-sail.bench.infra.bench-helpers :as bh])
-  (:import [java.util.concurrent Executors ExecutorService TimeUnit CompletableFuture]))
+  (:import [java.util.concurrent CompletableFuture Executor Executors ExecutorService Semaphore TimeUnit]
+           [java.util.function BiConsumer]))
 
 ;;; ---------------------------------------------------------------------------
 ;;; N-Triples Parser
@@ -246,27 +247,51 @@
        :parse-time-ms parse-ms
        :append-time-ms append-ms})))
 
-(defn load-ntriples-async!
-  "Load N-Triples using async fire-and-forget appends for maximum throughput.
+(defn- append-acked!
+  "Append `op` asynchronously; the returned future completes once the depot has
+   accepted the record. Failed appends (e.g. the depot's append buffer is full,
+   Rama's backpressure signal) are retried with capped exponential backoff.
+   A retry can only re-add a triple, which the indexer treats as a no-op."
+  ^CompletableFuture [depot op retries backoff-ms]
+  (let [done (CompletableFuture.)
+        attempt (fn attempt [left delay-ms]
+                  (.whenComplete
+                   ^CompletableFuture (rama/foreign-append-async! depot op :append-ack)
+                   (reify BiConsumer
+                     (accept [_ _ err]
+                       (cond
+                         (nil? err) (.complete done true)
+                         (zero? left) (.completeExceptionally done err)
+                         :else (.execute
+                                ^Executor (CompletableFuture/delayedExecutor (long delay-ms) TimeUnit/MILLISECONDS)
+                                ^Runnable (fn [] (attempt (dec left) (min 2000 (* 2 delay-ms))))))))))]
+    (attempt retries backoff-ms)
+    done))
 
-   This is the FASTEST loader that:
+(defn load-ntriples-async!
+  "Load N-Triples using acknowledged async appends with a sliding window.
+
    1. Parses all triples first (fast, CPU-bound)
-   2. Sends all appends asynchronously with AckLevel/NONE (fire-and-forget)
-   3. No waiting for individual append acknowledgments
+   2. Keeps at most :window appends in flight, releasing a slot per ack, so
+      the sender slows to what the depot can absorb. (Fire-and-forget appends
+      overran the depot's 10,000-record append buffer and were lost silently.)
+   3. Retries failed appends and throws if any still fail
 
    IMPORTANT: Data is not guaranteed to be indexed when this returns!
    You MUST call wait-for-indexer separately if you need to query the data.
 
    Options:
-     :context     - Context URI for all triples (default: DEFAULT-CONTEXT-VAL)
-     :parallelism - Number of concurrent sender threads (default: 4)
-     :batch-size  - Triples per batch before yielding (default: 1000)
+     :context          - Context URI for all triples (default: DEFAULT-CONTEXT-VAL)
+     :window           - Max appends in flight (default: 4000)
+     :retries          - Attempts after the first for each append (default: 20)
+     :retry-backoff-ms - First retry delay, doubling up to 2s (default: 50)
 
    Returns {:count :time-ms :triples-per-sec :parse-time-ms :append-time-ms}"
-  [depot file-path & {:keys [context parallelism batch-size]
+  [depot file-path & {:keys [context window retries retry-backoff-ms]
                       :or {context core/DEFAULT-CONTEXT-VAL
-                           parallelism 4
-                           batch-size 1000}}]
+                           window 4000
+                           retries 20
+                           retry-backoff-ms 50}}]
   (let [start (System/nanoTime)
         ;; Phase 1: Parse all triples (fast, CPU-bound)
         parse-start (System/nanoTime)
@@ -278,24 +303,26 @@
         parse-ms (/ (- parse-end parse-start) 1e6)
         total-count (count triples)
 
-        ;; Phase 2: Async fire-and-forget appends
+        ;; Phase 2: Acknowledged appends, at most `window` in flight
         append-start (System/nanoTime)
-        ^ExecutorService executor (Executors/newFixedThreadPool parallelism)
-        chunks (partition-all batch-size triples)
-        futures (doall
-                 (for [chunk chunks]
-                   (.submit executor
-                            ^Callable
-                            (fn []
-                              (doseq [op chunk]
-                                ;; Fire-and-forget: nil ack level = no waiting
-                                (rama/foreign-append-async! depot op nil))
-                              (count chunk)))))]
-    ;; Wait for all chunks to be SENT (not indexed)
-    (doseq [fut futures]
-      @fut)
-    (.shutdown executor)
-    (.awaitTermination executor 60 TimeUnit/SECONDS)
+        slots (Semaphore. (int window))
+        failures (atom 0)
+        first-error (atom nil)]
+    (doseq [op triples]
+      (.acquire slots)
+      (.whenComplete (append-acked! depot op retries retry-backoff-ms)
+                     (reify BiConsumer
+                       (accept [_ _ err]
+                         (when err
+                           (swap! failures inc)
+                           (compare-and-set! first-error nil err))
+                         (.release slots)))))
+    ;; Every slot back means every append was acknowledged (not yet indexed)
+    (.acquire slots (int window))
+    (when (pos? @failures)
+      (throw (ex-info (str @failures " of " total-count " appends failed after retries")
+                      {:failed @failures :total total-count}
+                      @first-error)))
 
     (let [append-end (System/nanoTime)
           append-ms (/ (- append-end append-start) 1e6)
@@ -325,8 +352,8 @@
   "Load N-Triples from a file using a cluster connection abstraction.
 
    Works with both IPC and real cluster connections via the ClusterConnection protocol.
-   Uses the wait-for-indexer! protocol method which handles the difference between
-   IPC (microbatch polling) and cluster (time-based delay) modes.
+   Uses the wait-for-indexer! protocol method, which blocks until the indexer
+   has caught up in both IPC and real cluster modes.
 
    Arguments:
    - conn: ClusterConnection (IPCConnection or RealClusterConnection)
@@ -335,39 +362,45 @@
 
    Options:
    - :context - Context URI for all triples (default: DEFAULT-CONTEXT-VAL)
-   - :async - Use async fire-and-forget appends (default: true, FASTEST)
+   - :async - Use acknowledged async appends with a sliding window (default: true)
+   - :window - Max appends in flight when :async (default: 4000)
    - :parallel - Use parallel loader when not async (default: true)
-   - :parallelism - Thread count for loading (default: 4 for async, 8 for parallel)
+   - :parallelism - Thread count for the parallel loader (default: 8)
 
    Loading modes (fastest to slowest):
-   1. :async true (default) - Fire-and-forget, maximum throughput
+   1. :async true (default) - Sliding window of acknowledged appends
    2. :parallel true - Concurrent blocking appends
    3. :parallel false - Sequential blocking appends (legacy)
 
-   Returns {:count :time-ms :triples-per-sec}"
-  [conn depot file-path & {:keys [async parallel parallelism context]
+   Returns {:count :time-ms :triples-per-sec ...}; :time-ms and
+   :triples-per-sec cover the whole load up to fully indexed."
+  [conn depot file-path & {:keys [async parallel parallelism context window]
                            :or {async true
                                 parallel true
-                                parallelism nil
-                                context core/DEFAULT-CONTEXT-VAL}
-                           :as opts}]
+                                parallelism 8
+                                context core/DEFAULT-CONTEXT-VAL
+                                window 4000}}]
   (let [;; Dynamically require to avoid circular dependency
         wait-fn (requiring-resolve 'rama-sail.bench.infra.cluster-config/wait-for-indexer!)
-        effective-parallelism (or parallelism (if async 4 8))
+        start (System/nanoTime)
         load-stats (cond
                      async
                      (load-ntriples-async! depot file-path
                                            :context context
-                                           :parallelism effective-parallelism)
+                                           :window window)
                      parallel
                      (load-ntriples-parallel! depot file-path
                                               :context context
-                                              :parallelism effective-parallelism)
+                                              :parallelism parallelism)
                      :else
-                     (load-ntriples! depot file-path :context context))]
-    (when (pos? (:count load-stats))
-      (wait-fn conn (:count load-stats)))
-    load-stats))
+                     (load-ntriples! depot file-path :context context))
+        triples (:count load-stats)]
+    (when (pos? triples)
+      (wait-fn conn triples))
+    (let [elapsed-ms (/ (- (System/nanoTime) start) 1e6)]
+      (assoc load-stats
+             :time-ms elapsed-ms
+             :triples-per-sec (if (pos? elapsed-ms) (* 1000.0 (/ triples elapsed-ms)) 0)))))
 
 (defn count-ntriples
   "Count the number of valid triples in an N-Triples file without loading.
