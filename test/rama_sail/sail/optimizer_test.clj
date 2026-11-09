@@ -835,20 +835,22 @@
     (is (= :bgp (get-in f [:sub-plan :op])) (pr-str plan))))
 
 (deftest test-w7-batch-enrich-guards
-  (testing "object var possibly bound by an OPTIONAL on the left: no batch-enrich"
+  (testing "object var possibly bound by an OPTIONAL on the left: no inner batch-enrich on it"
+    ;; The OPTIONAL itself may become an :optional? batch-enrich; the join on ?o must not.
     (let [plan (opt/optimize-plan
                 (parse-and-plan (str W7 "SELECT * { ?s :name ?n OPTIONAL { ?s :alt ?o } ?s :p ?o }")))]
-      (is (not (contains-op? plan :batch-enrich)) (pr-str plan))))
+      (is (nil? (find-node plan #(and (= :batch-enrich (:op %)) (not (:optional? %)))))
+          (pr-str plan))))
   (testing "plain property lookup still becomes batch-enrich"
     (let [plan (opt/optimize-plan
                 (parse-and-plan (str W7 "SELECT * { ?s :name ?n OPTIONAL { ?s :alt ?x } ?s :p ?o }")))]
       (is (contains-op? plan :batch-enrich) (pr-str plan))))
-  (testing "lookup var only possibly bound on the left: no batch-enrich"
+  (testing "lookup var only possibly bound on the left: the join stays a join"
     (let [lj {:op :left-join :left (w7-bgp "?x" "<a>" "?y")
               :right (w7-bgp "?x" "<r>" "?s") :join-vars ["?x"]}
           plan (opt/apply-batch-enrich {:op :join :left lj :right (w7-bgp "?s" "<p>" "?o")
                                         :join-vars ["?s"]})]
-      (is (not (contains-op? plan :batch-enrich)) (pr-str plan)))))
+      (is (= :join (:op plan)) (pr-str plan)))))
 
 (deftest test-w7-dp-join-keys-are-always-bound
   ;; DP used to key joins on possibly-bound vars (get-plan-vars), which also
@@ -933,3 +935,93 @@
           (opt/plan-var-scope a)
           (opt/plan-var-scope b)
           (is (= 2 (.size ^java.util.IdentityHashMap opt/*scope-cache*))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; batch-enrich on either join side, OPTIONAL as lookup
+;;; ---------------------------------------------------------------------------
+
+(def ^:private enrich-stats
+  {"<huge>" {:count 1000000 :distinct-subjects 1000000 :distinct-objects 1000000}
+   "<wide>" {:count 1000 :distinct-subjects 1000 :distinct-objects 1}
+   "<small>" {:count 5 :distinct-subjects 5 :distinct-objects 5}})
+
+(defn- enrich [plan]
+  (binding [opt/*predicate-stats* enrich-stats]
+    (opt/apply-batch-enrich plan)))
+
+(defn- bgp-join [l r] {:op :join :left l :right r :join-vars ["?s"]})
+(defn- bgp-optional [l r] {:op :left-join :left l :right r :join-vars ["?s"] :condition nil})
+(defn- opt-entry [p] {:plan p :join-vars ["?s"] :condition nil})
+
+(def ^:private selective (w7-bgp "?s" "<small>" "<c>"))
+(def ^:private lookup-o (w7-bgp "?s" "<huge>" "?o"))
+
+(deftest test-batch-enrich-either-side
+  (testing "property lookup on the left of a join, smaller input on the right"
+    (is (= {:op :batch-enrich :sub-plan selective :predicate "<huge>"
+            :subject-var "?s" :object-var "?o" :context nil}
+           (enrich (bgp-join lookup-o selective)))))
+  (testing "input estimated larger than the predicate: keep the hash join"
+    (let [join (bgp-join (w7-bgp "?s" "<small>" "?o") (w7-bgp "?s" "<wide>" "<c>"))]
+      (is (= :join (:op (enrich join))))))
+  (testing "lookup var only possibly bound on the other side: keep the join"
+    (let [other (bgp-optional (w7-bgp "?x" "<small>" "<c>") (w7-bgp "?x" "<r>" "?s"))]
+      (is (= :join (:op (enrich (bgp-join lookup-o other)))))))
+  (testing "object var possibly bound on the other side: keep the join"
+    (let [other (bgp-optional selective (w7-bgp "?s" "<r>" "?o"))]
+      (is (= :join (:op (enrich (bgp-join lookup-o other))))))))
+
+(deftest test-optional-lookup
+  (let [base (w7-bgp "?s" "<small>" "?n")]
+    (testing "plain OPTIONAL property lookup becomes an optional batch-enrich"
+      (is (= {:op :batch-enrich :optional? true :sub-plan base :predicate "<huge>"
+              :subject-var "?s" :object-var "?o" :context nil}
+             (enrich (bgp-optional base lookup-o)))))
+    (testing "the looked-up variable is only possibly bound"
+      (let [scope (opt/plan-var-scope (enrich (bgp-optional base lookup-o)))]
+        (is (contains? (:maybe scope) "?o"))
+        (is (not (contains? (:always scope) "?o")))
+        (is (contains? (:always scope) "?s"))))
+    (testing "cases that must stay a left join"
+      (doseq [[why plan]
+              {"OPTIONAL with a condition"
+               (assoc (bgp-optional base lookup-o) :condition {:type :bound :var "?n"})
+               "subject only possibly bound"
+               (bgp-optional (bgp-optional (w7-bgp "?x" "<small>" "?n") (w7-bgp "?x" "<r>" "?s")) lookup-o)
+               "object possibly bound by the base"
+               (bgp-optional (bgp-optional base (w7-bgp "?s" "<r>" "?o")) lookup-o)
+               "variable context"
+               (bgp-optional base (assoc-in lookup-o [:pattern :c] "?g"))
+               "base estimated larger than the predicate"
+               (bgp-optional (w7-bgp "?s" "<huge>" "?n") (w7-bgp "?s" "<small>" "?o"))}]
+        (is (= :left-join (:op (enrich plan))) why))))
+  (testing "multi-left-join absorbs only a leading run of lookups"
+    (let [base (w7-bgp "?s" "<small>" "?n")
+          a (w7-bgp "?s" "<huge>" "?a")
+          b (w7-bgp "?s" "<huge>" "?b")
+          blocker (w7-bgp "?s" "?p" "?v")
+          multi (fn [& plans] {:op :multi-left-join :base base :optionals (mapv opt-entry plans)})
+          objects (fn objects [p]
+                    (when (= :batch-enrich (:op p))
+                      (conj (objects (:sub-plan p)) (:object-var p))))
+          objects* #(vec (reverse (objects %)))]
+      (testing "all lookups: no multi-left-join left, applied in query order"
+        (let [plan (enrich (multi a b))]
+          (is (= :batch-enrich (:op plan)))
+          (is (= ["?a" "?b"] (objects* plan)))))
+      (testing "a non-lookup stops absorption and keeps the later optionals in order"
+        (let [plan (enrich (multi a blocker b))]
+          (is (= :multi-left-join (:op plan)))
+          (is (= "?a" (get-in plan [:base :object-var])))
+          (is (= [blocker b] (mapv :plan (:optionals plan))))))
+      (testing "optionals sharing a variable: the second must stay a left join"
+        (let [same (w7-bgp "?s" "<huge>" "?a")
+              plan (enrich (multi a same))]
+          (is (= :multi-left-join (:op plan)))
+          (is (= [same] (mapv :plan (:optionals plan))))))
+      (testing "an optional with a condition stops absorption"
+        (let [plan (enrich {:op :multi-left-join :base base
+                            :optionals [(assoc (opt-entry a) :condition {:type :bound :var "?n"})
+                                        (opt-entry b)]})]
+          (is (= base (:base plan)))
+          (is (= 2 (count (:optionals plan)))))))))

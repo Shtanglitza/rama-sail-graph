@@ -240,3 +240,22 @@
       (doseq [op [:lt :le :gt :ge]]
         (is (empty? (sj-pairs groups {:op op :left "?a" :right "?b"})) (str op)))
       (is (= 12 (count (sj-pairs groups {:op :ne :left "?a" :right "?b"})))))))
+
+;;; ---------------------------------------------------------------------------
+;;; batch-enrich merge
+;;; ---------------------------------------------------------------------------
+
+(deftest test-batch-enrich-merge-results
+  (let [rows [{"?s" "<a>"} {"?s" "<b>"} {"?s" "<c>"}]
+        pairs [["<a>" "1"] ["<c>" "2"] ["<c>" "3"]]
+        merge-rows (fn [& args]
+                     (frequencies (apply qh/batch-enrich-merge-results rows pairs "?s" "?o" args)))]
+    (testing "inner: rows without a value are dropped, multi-valued rows explode"
+      (is (= {{"?s" "<a>" "?o" "1"} 1 {"?s" "<c>" "?o" "2"} 1 {"?s" "<c>" "?o" "3"} 1}
+             (merge-rows))))
+    (testing "optional: rows without a value are kept unchanged"
+      (is (= {{"?s" "<a>" "?o" "1"} 1 {"?s" "<b>"} 1 {"?s" "<c>" "?o" "2"} 1 {"?s" "<c>" "?o" "3"} 1}
+             (merge-rows true))))
+    (testing "duplicate input rows stay duplicated (bag semantics)"
+      (is (= {{"?s" "<b>"} 2}
+             (frequencies (qh/batch-enrich-merge-results [{"?s" "<b>"} {"?s" "<b>"}] [] "?s" "?o" true)))))))

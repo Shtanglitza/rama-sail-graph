@@ -263,22 +263,24 @@
           pairs))
 
 (defn batch-enrich-merge-results
-  "Merge batch lookup results into bindings using INNER JOIN semantics.
+  "Merge batch lookup results into bindings.
    lookup-pairs is a vector of [subject object] pairs from batch-lookup.
    For each binding, looks up the subject-var's value and adds matching objects.
-   - If no lookup result exists, the binding is EXCLUDED (inner-join semantics).
+   - If no lookup result exists, the binding is EXCLUDED (inner-join semantics),
+     or kept unchanged when `optional?` (OPTIONAL semantics).
    - If multiple objects exist for a subject (multi-valued predicate),
      the binding is exploded into multiple bindings."
-  [bindings lookup-pairs subject-var object-var]
-  (let [lookup-map (pairs-to-grouped-map lookup-pairs)]
-    (into []
-          (mapcat (fn [binding]
-                    (when-let [subj (get binding subject-var)]
-                      (when-let [objs (get lookup-map subj)]
-                        ;; objs is a set of objects (may be 1 or more)
-                        ;; Explode into multiple bindings for multi-valued predicates
-                        (map (fn [obj] (assoc binding object-var obj)) objs)))))
-          bindings)))
+  ([bindings lookup-pairs subject-var object-var]
+   (batch-enrich-merge-results bindings lookup-pairs subject-var object-var false))
+  ([bindings lookup-pairs subject-var object-var optional?]
+   (let [lookup-map (pairs-to-grouped-map lookup-pairs)]
+     (into []
+           (mapcat (fn [binding]
+                     ;; objs is a set of objects (may be 1 or more)
+                     (if-let [objs (get lookup-map (get binding subject-var))]
+                       (map (fn [obj] (assoc binding object-var obj)) objs)
+                       (when optional? [binding]))))
+           bindings))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Colocated Join Helpers
