@@ -50,6 +50,47 @@
 ;;; Real Cluster Implementation
 ;;; ---------------------------------------------------------------------------
 
+(defn await-indexed-triples!
+  "Block until the indexer has caught up after loading `target` triples.
+
+   `read-total` returns the store's current triple count. Rama offers no
+   foreign view of microbatch progress, so this polls the count: done once it
+   reaches `target` and stops moving (a store that already held data passes
+   `target` while still indexing). A count that stops short for :stall-ms
+   returns with a warning, since a file with duplicates never reaches `target`.
+   Throws if the indexer is still moving after :max-wait-ms. Returns the count."
+  [read-total target & {:keys [poll-ms settle-ms stall-ms max-wait-ms]
+                        :or {poll-ms 250
+                             settle-ms 1000
+                             stall-ms 30000
+                             max-wait-ms 120000}}]
+  (let [start (System/currentTimeMillis)]
+    (loop [prev nil
+           changed-at start]
+      (let [n (or (read-total) 0)
+            now (System/currentTimeMillis)
+            changed-at (if (= n prev) changed-at now)
+            quiet-ms (- now changed-at)]
+        (cond
+          (and (>= n target) (>= quiet-ms settle-ms))
+          n
+
+          (>= quiet-ms stall-ms)
+          (do (println (format "  WARNING: indexing stopped at %d triples, expected %d" n target))
+              n)
+
+          (>= (- now start) max-wait-ms)
+          (throw (ex-info "Timed out waiting for the indexer"
+                          {:indexed n :target target :max-wait-ms max-wait-ms}))
+
+          :else
+          (do (Thread/sleep (long poll-ms))
+              (recur n changed-at)))))))
+
+(defn- indexed-triple-count [manager module-name]
+  (:total-triples
+   (rama/foreign-invoke-query (rama/foreign-query manager module-name "get-global-stats"))))
+
 (defrecord RealClusterConnection [manager module-name poll-interval-ms max-wait-ms]
   ClusterConnection
   (get-cluster-manager [_] manager)
@@ -57,14 +98,8 @@
   (launch-module! [_ _ _]
     (throw (ex-info "Module must be pre-deployed to cluster. Use scripts/deploy-module.sh" {})))
   (wait-for-indexer! [_ count]
-    ;; For cluster mode, estimate wait time based on triple count.
-    ;; Assume indexer processes ~5000 triples/sec (conservative for cluster).
-    ;; Add base delay for microbatch coordination.
-    (let [base-delay-ms 2000
-          triples-per-sec 5000
-          estimated-ms (+ base-delay-ms (* 1000 (/ (or count 0) triples-per-sec)))
-          wait-ms (min estimated-ms (or max-wait-ms 120000))]
-      (Thread/sleep (long wait-ms))))
+    (await-indexed-triples! #(indexed-triple-count manager module-name) (or count 0)
+                            :max-wait-ms (or max-wait-ms 120000)))
   (closeable? [_] true)
   (connection-type [_] :cluster)
 
@@ -80,12 +115,8 @@
   (launch-module! [_ _ _]
     (throw (ex-info "Module must be pre-deployed to cluster. Use scripts/deploy-module.sh" {})))
   (wait-for-indexer! [_ count]
-    ;; Same wait strategy as RealClusterConnection
-    (let [base-delay-ms 2000
-          triples-per-sec 5000
-          estimated-ms (+ base-delay-ms (* 1000 (/ (or count 0) triples-per-sec)))
-          wait-ms (min estimated-ms (or max-wait-ms 120000))]
-      (Thread/sleep (long wait-ms))))
+    (await-indexed-triples! #(indexed-triple-count manager module-name) (or count 0)
+                            :max-wait-ms (or max-wait-ms 120000)))
   (closeable? [_] false)  ;; Pooled connections don't need explicit closing
   (connection-type [_] :cluster-pooled)
 

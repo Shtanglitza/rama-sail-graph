@@ -156,11 +156,12 @@
                  :unknown? false})
       :type-lookup (vars-scope [(:subject-var plan)])
       :self-join (vars-scope [(:left-subject plan) (:right-subject plan) (:join-var plan)])
-      ;; batch-enrich has inner-join semantics: it binds object-var in every row
-      :batch-enrich (let [s (sub)]
-                      (-> s
-                          (update :always conj (:object-var plan))
-                          (update :maybe conj (:object-var plan))))
+      ;; batch-enrich has inner-join semantics and binds object-var in every
+      ;; row; with :optional? it keeps unmatched rows, so only possibly bound.
+      :batch-enrich (let [s (sub)
+                          o (:object-var plan)]
+                      (cond-> (update s :maybe conj o)
+                        (not (:optional? plan)) (update :always conj o)))
       :triple-ref (vars-scope [(:subject-var plan) (:predicate-var plan)
                                (:object-var plan) (:expr-var plan)])
       (:zero-length-path :arbitrary-length-path) (vars-scope [(:subject plan) (:object plan)])
@@ -752,10 +753,9 @@
                  (not (is-variable? (:c pattern))))
         s))))
 
-(defn- transform-to-batch-enrich
-  "Transform a join with property lookup into batch-enrich.
-   Pattern: join(sub-plan, bgp(?var pred ?result))
-   Becomes: batch-enrich(sub-plan, pred, ?var, ?result)
+(defn- batch-enrich-node
+  "A batch-enrich of `sub-plan` with the property-lookup BGP `lookup`, or nil
+   when `lookup` is not one or the rewrite would change results.
 
    Decided from the sub-plan's variable scope, not from :join-vars (which the
    DP planner and the compiler compute differently):
@@ -765,26 +765,67 @@
    - ?result must NOT be bound by ANY sub-plan solution: the merge assoc's the
      looked-up value, silently overwriting (instead of equality-checking) an
      existing binding, e.g. one coming from an OPTIONAL."
+  [sub-plan lookup]
+  (when-let [lookup-var (is-property-lookup-bgp? lookup)]
+    (let [scope (plan-var-scope sub-plan)
+          object-var (get-in lookup [:pattern :o])]
+      (when (and (not (:unknown? scope))
+                 (contains? (:always scope) lookup-var)
+                 (not (may-bind? scope object-var))
+                 ;; ?var p ?var: object and lookup var coincide; keep the join
+                 (not= lookup-var object-var))
+        {:op :batch-enrich
+         :sub-plan sub-plan
+         :predicate (get-in lookup [:pattern :p])
+         :subject-var lookup-var
+         :object-var object-var
+         :context (get-in lookup [:pattern :c])}))))
+
+(defn- transform-to-batch-enrich
+  "Transform a join with property lookup into batch-enrich.
+   Pattern: join(sub-plan, bgp(?var pred ?result))
+   Becomes: batch-enrich(sub-plan, pred, ?var, ?result)"
   [join-plan]
-  (let [left (:left join-plan)
-        right (:right join-plan)]
-    (when-let [lookup-var (is-property-lookup-bgp? right)]
-      (let [left-scope (plan-var-scope left)
-            object-var (get-in right [:pattern :o])]
-        (when (and (not (:unknown? left-scope))
-                   (contains? (:always left-scope) lookup-var)
-                   (not (may-bind? left-scope object-var))
-                   ;; ?var p ?var: object and lookup var coincide; keep the join
-                   (not= lookup-var object-var))
-          {:op :batch-enrich
-           :sub-plan left
-           :predicate (get-in right [:pattern :p])
-           :subject-var lookup-var
-           :object-var object-var
-           :context (get-in right [:pattern :c])})))))
+  (batch-enrich-node (:left join-plan) (:right join-plan)))
+
+(defn- lookup-no-larger?
+  "True when `input` is estimated to have no more rows than the property-lookup
+   BGP `lookup` has triples. Hash-joining scans every triple of the predicate;
+   batch-enrich does one lookup per input subject, so this is when it wins."
+  [input lookup]
+  (<= (estimate-plan-cardinality input) (estimate-plan-cardinality lookup)))
+
+(defn- commuted-batch-enrich
+  "batch-enrich for a join whose property-lookup BGP is on the LEFT. Join
+   ordering puts the larger input on the left (the right is the hash table),
+   so a scan-sized BGP probed by a few rows usually lands here."
+  [{:keys [left right]}]
+  (when (and (is-property-lookup-bgp? left) (lookup-no-larger? right left))
+    (batch-enrich-node right left)))
+
+(defn- optional-batch-enrich
+  "batch-enrich for OPTIONAL { ?var pred ?result } over `base`, keeping rows
+   with no value, or nil when not applicable. The caller excludes OPTIONALs
+   with a condition (the condition sees both sides)."
+  [base lookup]
+  (when (and (is-property-lookup-bgp? lookup) (lookup-no-larger? base lookup))
+    (some-> (batch-enrich-node base lookup) (assoc :optional? true))))
+
+(defn- absorb-optional-lookups
+  "Fold the leading OPTIONALs that are plain property lookups into `base`.
+   Only a prefix: a multi-left-join applies optionals in query order, and they
+   do not commute when they share a variable. Returns [base remaining]."
+  [base optionals]
+  (loop [base base opts (seq optionals)]
+    (let [{:keys [plan condition]} (first opts)
+          enriched (when (and opts (nil? condition))
+                     (optional-batch-enrich base plan))]
+      (if enriched
+        (recur enriched (next opts))
+        [base (vec opts)]))))
 
 (defn apply-batch-enrich
-  "Apply batch-enrich transformation to joins where applicable.
+  "Apply batch-enrich transformation to joins and OPTIONALs where applicable.
    Recursively processes the plan tree."
   [plan]
   (case (:op plan)
@@ -795,14 +836,19 @@
           updated-plan (assoc plan :left optimized-left :right optimized-right)]
       ;; Then try to transform this join to batch-enrich
       (or (transform-to-batch-enrich updated-plan)
+          (commuted-batch-enrich updated-plan)
           updated-plan))
 
     :left-join
-    {:op :left-join
-     :left (apply-batch-enrich (:left plan))
-     :right (apply-batch-enrich (:right plan))
-     :join-vars (:join-vars plan)
-     :condition (:condition plan)}
+    (let [left (apply-batch-enrich (:left plan))
+          right (apply-batch-enrich (:right plan))]
+      (or (when (nil? (:condition plan))
+            (optional-batch-enrich left right))
+          {:op :left-join
+           :left left
+           :right right
+           :join-vars (:join-vars plan)
+           :condition (:condition plan)}))
 
     :union
     {:op :union
@@ -850,10 +896,13 @@
      :sub-plan (apply-batch-enrich (:sub-plan plan))}
 
     :multi-left-join
-    {:op :multi-left-join
-     :base (apply-batch-enrich (:base plan))
-     :optionals (mapv (fn [opt] (update opt :plan apply-batch-enrich))
-                      (:optionals plan))}
+    (let [[base optionals] (absorb-optional-lookups
+                            (apply-batch-enrich (:base plan))
+                            (mapv (fn [opt] (update opt :plan apply-batch-enrich))
+                                  (:optionals plan)))]
+      (if (seq optionals)
+        {:op :multi-left-join :base base :optionals optionals}
+        base))
 
     ;; Leaf nodes (bgp, self-join, type-lookup, batch-enrich) - return unchanged
     plan))
@@ -1387,13 +1436,13 @@
   [plan]
   (let [optimized (with-scope-cache
                     (-> plan
-                      push-filters-down
-                      flatten-left-join-chains
-                      optimize-join-chains
-                      transform-self-join
-                      use-type-view
-                      apply-batch-enrich
-                      push-limit-down))]
+                        push-filters-down
+                        flatten-left-join-chains
+                        optimize-join-chains
+                        transform-self-join
+                        use-type-view
+                        apply-batch-enrich
+                        push-limit-down))]
     (when (log/enabled? :debug)
       (let [self-joins-before (count-ops plan :self-join)
             self-joins-after (count-ops optimized :self-join)

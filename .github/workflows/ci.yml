@@ -33,7 +33,7 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
           restore-keys: ${{ runner.os }}-maven-
-      - run: lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test rama-sail.query.helpers-test rama-sail.query.expr-test rama-sail.query.term-order-test rama-sail.sail.serialization-roundtrip-test
+      - run: lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test rama-sail.query.helpers-test rama-sail.query.expr-test rama-sail.query.term-order-test rama-sail.sail.bulk-load-test rama-sail.sail.serialization-roundtrip-test
 
   # Runs on PRs too: the e2e suite shares one in-process cluster per
   # namespace, so the whole job is minutes, not tens of minutes.

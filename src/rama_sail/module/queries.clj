@@ -796,7 +796,8 @@
                               (invoke-query "execute-plan" *sub-plan :> *sub-results)
                               (qh/batch-enrich-extract-subjects *sub-results *subject-var :> *subjects)
                               (invoke-query "batch-lookup" *subjects *predicate *context :> *lookup-map)
-                              (qh/batch-enrich-merge-results *sub-results *lookup-map *subject-var *object-var :> *results)
+                              (get *plan :optional? false :> *enrich-optional?)
+                              (qh/batch-enrich-merge-results *sub-results *lookup-map *subject-var *object-var *enrich-optional? :> *results)
 
                               (case> :singleton)
                               (identity #{{}} :> *results)

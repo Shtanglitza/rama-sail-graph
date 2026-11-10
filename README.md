@@ -441,77 +441,78 @@ These benchmark results were recorded on this development machine:
 - OS: macOS 27.0
 - Runtime/config: Rama 1.9.0, single-node cluster, 6 GB client heap, 4 tasks, 2 threads, 1 worker
 - Benchmark settings: 50 iterations, 5 warmup
-- Method: the first run after loading is discarded because indexing may still be in progress; each table is the median of 3 further runs by query mix time
+- Method: each dataset is loaded into a fresh deployment and the loader waits until indexing has finished. The first run is discarded as warm-up, and each table is the run with the median query mix time out of 3 further runs
+- Loading: 59,328 triples took about 65 seconds from the first append to fully indexed (about 900 triples/sec)
 
-Q1, Q8 and Q10 return 0 rows on these generated datasets, so their timings measure empty queries.
+Q8 and Q10 return 0 rows on these generated datasets and Q1 almost always does, so their timings measure empty queries.
 
 #### 6K Triples (100 products)
 
 | Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
 |-------|----------|----------|----------|-----------|-------------|
-| Q1 | 6.48 | 78.41 | 108.11 | 12.01 | 0.0 |
-| Q2 | 7.43 | 150.76 | 280.02 | 25.26 | 2.9 |
-| Q3 | 9.09 | 19.19 | 54.14 | 10.90 | 1.2 |
-| Q4 | 7.87 | 16.39 | 49.34 | 9.26 | 1.0 |
-| Q5 | 11.39 | 16.38 | 93.67 | 13.86 | 3.4 |
-| Q7 | 19.30 | 25.07 | 65.63 | 20.50 | 6.4 |
-| Q8 | 12.86 | 53.71 | 115.22 | 18.79 | 0.0 |
-| Q10 | 9.34 | 16.02 | 99.25 | 12.64 | 0.0 |
-| Q11 | 0.89 | 1.06 | 24.36 | 1.37 | 5.0 |
-| QJ1 | 15.75 | 20.69 | 57.05 | 17.03 | 100.0 |
-| QJ2 | 6.40 | 8.50 | 51.77 | 7.45 | 12.1 |
-| QJ3 | 16.46 | 21.15 | 59.48 | 18.22 | 100.0 |
-| QJ4 | 6.54 | 33.53 | 108.04 | 10.01 | 100.0 |
+| Q1 | 4.27 | 104.28 | 105.41 | 10.58 | 0.1 |
+| Q2 | 5.80 | 7.85 | 106.70 | 8.01 | 3.1 |
+| Q3 | 2.82 | 6.25 | 104.18 | 7.13 | 1.2 |
+| Q4 | 4.46 | 5.81 | 48.54 | 5.66 | 0.9 |
+| Q5 | 8.33 | 9.37 | 31.34 | 8.82 | 3.4 |
+| Q7 | 2.49 | 3.23 | 3.63 | 2.62 | 5.8 |
+| Q8 | 1.97 | 3.37 | 90.64 | 3.89 | 0.0 |
+| Q10 | 4.90 | 5.97 | 61.70 | 6.36 | 0.0 |
+| Q11 | 1.15 | 53.18 | 101.42 | 6.71 | 5.0 |
+| QJ1 | 12.50 | 45.02 | 131.56 | 18.97 | 100.0 |
+| QJ2 | 2.49 | 3.37 | 24.73 | 2.96 | 12.0 |
+| QJ3 | 16.99 | 46.43 | 52.04 | 19.12 | 100.0 |
+| QJ4 | 5.39 | 8.37 | 34.12 | 6.36 | 100.0 |
 
 #### 59K Triples (1,000 products)
 
 | Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
 |-------|----------|----------|----------|-----------|-------------|
-| Q1 | 26.35 | 90.55 | 138.70 | 34.77 | 0.0 |
-| Q2 | 6.94 | 77.75 | 108.52 | 12.51 | 3.0 |
-| Q3 | 36.10 | 79.42 | 136.71 | 45.83 | 3.9 |
-| Q4 | 34.20 | 83.28 | 140.12 | 43.38 | 1.3 |
-| Q5 | 49.32 | 130.98 | 218.09 | 63.24 | 4.6 |
-| Q7 | 115.74 | 233.79 | 289.55 | 139.20 | 3.6 |
-| Q8 | 53.96 | 111.15 | 112.58 | 63.15 | 0.0 |
-| Q10 | 65.24 | 126.15 | 176.84 | 76.68 | 0.0 |
-| Q11 | 0.91 | 1.02 | 37.25 | 1.64 | 5.0 |
-| QJ1 | 128.77 | 193.97 | 204.80 | 143.65 | 100.0 |
-| QJ2 | 37.80 | 106.63 | 125.75 | 44.86 | 39.6 |
-| QJ3 | 84.49 | 144.67 | 145.73 | 94.02 | 100.0 |
-| QJ4 | 95.67 | 113.30 | 115.08 | 98.90 | 100.0 |
+| Q1 | 13.31 | 58.48 | 112.26 | 17.61 | 0.1 |
+| Q2 | 6.57 | 106.63 | 108.92 | 12.93 | 2.8 |
+| Q3 | 4.13 | 5.59 | 103.80 | 6.26 | 5.2 |
+| Q4 | 16.99 | 84.56 | 97.41 | 23.70 | 2.0 |
+| Q5 | 26.71 | 81.68 | 183.06 | 33.29 | 4.7 |
+| Q7 | 2.62 | 5.51 | 99.99 | 4.70 | 6.8 |
+| Q8 | 1.71 | 4.64 | 77.22 | 3.49 | 0.0 |
+| Q10 | 25.55 | 124.56 | 136.68 | 37.10 | 0.0 |
+| Q11 | 0.89 | 1.02 | 1.07 | 0.90 | 5.0 |
+| QJ1 | 101.22 | 181.49 | 211.64 | 118.64 | 100.0 |
+| QJ2 | 3.73 | 4.18 | 4.36 | 3.75 | 39.9 |
+| QJ3 | 157.35 | 231.14 | 233.09 | 174.29 | 100.0 |
+| QJ4 | 46.01 | 87.24 | 155.65 | 53.62 | 100.0 |
 
 #### Scaling: p50 Comparison (6K → 59K)
 
 | Query | 6K p50 | 59K p50 | Slowdown |
 |-------|--------|---------|----------|
-| Q1 | 6.5 | 26.4 | 4.1x |
-| Q2 | 7.4 | 6.9 | 0.9x |
-| Q3 | 9.1 | 36.1 | 4.0x |
-| Q4 | 7.9 | 34.2 | 4.3x |
-| Q5 | 11.4 | 49.3 | 4.3x |
-| Q7 | 19.3 | 115.7 | 6.0x |
-| Q8 | 12.9 | 54.0 | 4.2x |
-| Q10 | 9.3 | 65.2 | 7.0x |
-| Q11 | 0.9 | 0.9 | 1.0x |
-| QJ1 | 15.8 | 128.8 | 8.2x |
-| QJ2 | 6.4 | 37.8 | 5.9x |
-| QJ3 | 16.5 | 84.5 | 5.1x |
-| QJ4 | 6.5 | 95.7 | 14.6x |
+| Q1 | 4.3 | 13.3 | 3.1x |
+| Q2 | 5.8 | 6.6 | 1.1x |
+| Q3 | 2.8 | 4.1 | 1.5x |
+| Q4 | 4.5 | 17.0 | 3.8x |
+| Q5 | 8.3 | 26.7 | 3.2x |
+| Q7 | 2.5 | 2.6 | 1.1x |
+| Q8 | 2.0 | 1.7 | 0.9x |
+| Q10 | 4.9 | 25.6 | 5.2x |
+| Q11 | 1.1 | 0.9 | 0.8x |
+| QJ1 | 12.5 | 101.2 | 8.1x |
+| QJ2 | 2.5 | 3.7 | 1.5x |
+| QJ3 | 17.0 | 157.3 | 9.3x |
+| QJ4 | 5.4 | 46.0 | 8.5x |
 
-For a 10x data increase, the lookup-style queries Q2 and Q11 stay flat, most other queries grow 4-8x, and the QJ4 self-join grows 14.6x.
+For a 10x data increase, Q2, Q3, Q7, Q8, Q11 and QJ2 stay within 1.5x, and Q1, Q4, Q5 and Q10 grow 3-5x. QJ1, QJ3 and QJ4 grow 8-9x because they still compute every join row before LIMIT applies.
 
 ### Query Optimizations
 
 The following optimizations are applied automatically during query planning:
 
-- **LIMIT pushdown**: Propagates LIMIT into BGPs, joins, and self-joins for early termination — truncates quads before binding construction. Pushes through transparent operators (PROJECT, BIND), with safety multipliers for FILTER (4x) and DISTINCT (2x). Correctly blocks at ORDER BY for BGP targets (ORDER BY needs all rows to sort)
+- **LIMIT pushdown**: Applies LIMIT inside BGPs and self-joins, passing through PROJECT and BIND, where truncating cannot change the result. It stops at joins, FILTER, DISTINCT and ORDER BY. BGPs and self-joins truncate after reading their data, so this shortens results and binding construction but does not avoid the scan
 - **Adaptive filter selectivity**: Estimates filter selectivity by operator type (equality=0.05, range=0.3, inequality=0.8) instead of a flat 0.3, improving join ordering decisions
 - **AND decomposition**: Splits compound AND filters into independent conjuncts that can be pushed separately to each join side
 - **Selinger-style join ordering**: Dynamic programming optimizer for multi-way join chains using predicate statistics
 - **Self-join optimization**: Detects same-predicate joins with inequality filters and uses group-and-pair generation instead of Cartesian product
 - **Colocated subject joins**: Exploits subject hash partitioning for partition-local joins
-- **Batch property enrichment**: Replaces N individual property lookups with single batch query
+- **Batch property enrichment**: Replaces a hash join on a property with a batched lookup keyed by the other input's bindings. It applies on either side of a join, when the input is no larger than the property, and to `OPTIONAL` property patterns with no filter
 - **Materialized type views**: Pre-computed indices for `rdf:type` pattern lookups
 
 ## Known Limitations

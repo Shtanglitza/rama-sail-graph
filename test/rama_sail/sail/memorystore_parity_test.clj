@@ -51,6 +51,9 @@ _:b2 <http://ex/w7c> \"X\" .
 <http://ex/item1> <http://ex/when> \"2008-06-21T05:00:00+02:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
 <http://ex/item2> <http://ex/when> \"2008-06-20T23:00:00-05:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
 <http://ex/item3> <http://ex/when> \"2008-06-22T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+<http://ex/alice> <http://ex/nick> \"Al\" .
+<http://ex/alice> <http://ex/nick> \"Ali\" .
+<http://ex/bob> <http://ex/nick> \"Bobby\" .
 ")
 
 (defn- build-model
@@ -181,3 +184,23 @@ _:b2 <http://ex/w7c> \"X\" .
   (testing "literals of different datatypes are unequal (= / !=)"
     (parity! (str P "SELECT ?s { ?s :age ?a FILTER(?a != \"x\"@en) }"))
     (parity! (str P "SELECT ?s { ?s :label ?l FILTER(?l != \"caf\u00e9\"@fr) }"))))
+
+(deftest test-property-lookup-rewrites-parity
+  (testing "OPTIONAL lookups: missing and multi-valued properties"
+    (parity! (str P "SELECT * { ?s :name ?n OPTIONAL { ?s :nick ?k } }"))
+    (parity! (str P "SELECT * { ?s :name ?n OPTIONAL { ?s :nick ?k } OPTIONAL { ?s :age ?a } }"))
+    (parity! (str P "SELECT ?s ?k { ?s :name ?n OPTIONAL { ?s :nick ?k } } ORDER BY ?k ?s") true))
+  (testing "OPTIONALs sharing a variable do not commute"
+    (parity! (str P "SELECT * { ?s :name ?n OPTIONAL { ?s :city ?x } OPTIONAL { ?s :age ?x } }"))
+    (parity! (str P "SELECT * { ?s :name ?n OPTIONAL { ?s :age ?x } OPTIONAL { ?s :city ?x } }")))
+  (testing "the optional variable is only possibly bound afterwards"
+    (parity! (str P "SELECT ?s { ?s :name ?n OPTIONAL { ?s :nick ?k } FILTER(!BOUND(?k)) }"))
+    (parity! (str P "SELECT * { ?s :name ?n OPTIONAL { ?s :nick ?k } ?s :city ?c }"))
+    (parity! (str P "SELECT * { ?s :name ?n OPTIONAL { ?s :nick ?k } ?t :nick ?k }")))
+  (testing "OPTIONAL with a filter stays conditional"
+    (parity! (str P "SELECT * { ?s :name ?n OPTIONAL { ?s :age ?a FILTER(?a > 20) } }")))
+  (testing "OPTIONAL over a possibly-unbound subject"
+    (parity! (str P "SELECT * { { ?s :name ?n } UNION { ?t :city ?c } OPTIONAL { ?s :nick ?k } }")))
+  (testing "property lookup on either side of an inner join"
+    (parity! (str P "SELECT * { ?s :w7p <http://ex/v> . ?s :name ?n }"))
+    (parity! (str P "SELECT * { ?s :name ?n . ?s :city \"NYC\" . ?s :nick ?k }"))))
