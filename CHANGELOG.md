@@ -33,6 +33,11 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are shrunk to a minimal query. `RANDOM_QUERY_SEED` / `RANDOM_QUERY_COUNT` override the run.
 
 ### Changed
+- **`LIMIT` over property lookups stops reading early.** The planner adds cheaper attempts that
+  truncate the driving pattern, and the executor falls back to the full plan when an attempt yields
+  too few rows, so results stay exact. On BSBM with 59K triples the median query mix time fell from
+  496 ms to 237 ms; QJ1 went from 103 ms to 29 ms, QJ3 from 162 ms to 36 ms and QJ4 from 47 ms to
+  9 ms. An older module ignores the attempts and still returns correct results.
 - **Property lookups scale with the input instead of the store.** `batch-enrich` now applies to
   either side of a join when the input is no larger than the property, and to `OPTIONAL` property
   patterns with no filter. On BSBM with 59K triples the median query mix time fell from 1,055 ms
