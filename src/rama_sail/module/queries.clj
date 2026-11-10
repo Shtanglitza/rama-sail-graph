@@ -248,11 +248,24 @@
                     (|origin)))
 
 (defn slice-query-topology [topologies]
-  (<<query-topology topologies "slice" [*sub-plan *offset *limit :> *results]
-                    (invoke-query "execute-plan" *sub-plan :> *all-res)
+  ;; *attempts are cheaper plans whose rows are a subset of *sub-plan's (see
+  ;; limit-attempts in the optimizer). The first with enough rows is the answer;
+  ;; when none has, *sub-plan runs, so a poor guess costs time but never rows.
+  (<<query-topology topologies "slice" [*sub-plan *offset *limit *attempts :> *results]
+                    (max 0 *offset :> *safe-offset)
+                    (+ *safe-offset *limit :> *needed)
+                    (loop<- [*remaining (seq *attempts) :> *all-res]
+                            (<<if (nil? *remaining)
+                                  (invoke-query "execute-plan" *sub-plan :> *full-res)
+                                  (:> *full-res)
+                                  (else>)
+                                  (invoke-query "execute-plan" (first *remaining) :> *attempt-res)
+                                  (<<if (>= (count *attempt-res) *needed)
+                                        (:> *attempt-res)
+                                        (else>)
+                                        (continue> (next *remaining)))))
                     (vec *all-res :> *all-vec)
                     (count *all-vec :> *total)
-                    (max 0 *offset :> *safe-offset)
                     (<<if (< *limit 0)
                           (identity *total :> *upper)
                           (else>)
@@ -742,7 +755,8 @@
 
                               (case> :slice)
                               (identity *plan :> {*sub-plan :sub-plan *offset :offset *limit :limit})
-                              (invoke-query "slice" *sub-plan *offset *limit :> *results)
+                              (get *plan :attempts nil :> *attempts)
+                              (invoke-query "slice" *sub-plan *offset *limit *attempts :> *results)
 
                               (case> :filter)
                               (identity *plan :> {*sub-plan :sub-plan *expr :expr})

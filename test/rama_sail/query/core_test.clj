@@ -171,9 +171,9 @@
   ;; Register the slice topology we want to test
   (queries/slice-query-topology topologies)
 
-  ;; Mock 'execute-plan' to return a fixed set of 5 bindings
+  ;; Mock 'execute-plan' to return the plan's :rows, or a fixed set of 5 bindings
   (<<query-topology topologies "execute-plan" [*plan :> *results]
-                    (identity [{"?id" "1"} {"?id" "2"} {"?id" "3"} {"?id" "4"} {"?id" "5"}] :> *data)
+                    (get *plan :rows [{"?id" "1"} {"?id" "2"} {"?id" "3"} {"?id" "4"} {"?id" "5"}] :> *data)
                     (ops/explode *data :> *row)
                     (|origin)
                     (aggs/+set-agg *row :> *results)))
@@ -187,38 +187,57 @@
 
       (testing "Slice: Normal offset and limit"
         ;; OFFSET 1, LIMIT 2 -> should get 2 results
-        (let [results (foreign-invoke-query q-slice {} 1 2)]
+        (let [results (foreign-invoke-query q-slice {} 1 2 nil)]
           (is (= 2 (count results)) "Should return 2 results with OFFSET 1 LIMIT 2")))
 
       (testing "Slice: Zero offset"
         ;; OFFSET 0, LIMIT 3 -> first 3 results
-        (let [results (foreign-invoke-query q-slice {} 0 3)]
+        (let [results (foreign-invoke-query q-slice {} 0 3 nil)]
           (is (= 3 (count results)) "Should return 3 results with OFFSET 0 LIMIT 3")))
 
       (testing "Slice: Offset exceeds total (per SPARQL spec, returns empty)"
         ;; OFFSET 10 (> 5 total), LIMIT 2 -> empty
-        (let [results (foreign-invoke-query q-slice {} 10 2)]
+        (let [results (foreign-invoke-query q-slice {} 10 2 nil)]
           (is (empty? results) "Should return empty when offset exceeds total results")))
 
       (testing "Slice: Negative offset treated as 0 (per RDF4J spec)"
         ;; OFFSET -1 (not set), LIMIT 2 -> from start
-        (let [results (foreign-invoke-query q-slice {} -1 2)]
+        (let [results (foreign-invoke-query q-slice {} -1 2 nil)]
           (is (= 2 (count results)) "Negative offset should be treated as 0")))
 
       (testing "Slice: Negative limit means no limit (per RDF4J spec)"
         ;; OFFSET 1, LIMIT -1 (not set) -> all from offset 1
-        (let [results (foreign-invoke-query q-slice {} 1 -1)]
+        (let [results (foreign-invoke-query q-slice {} 1 -1 nil)]
           (is (= 4 (count results)) "Negative limit should return all remaining results")))
 
       (testing "Slice: Limit exceeds remaining results"
         ;; OFFSET 3, LIMIT 10 -> only 2 remaining
-        (let [results (foreign-invoke-query q-slice {} 3 10)]
+        (let [results (foreign-invoke-query q-slice {} 3 10 nil)]
           (is (= 2 (count results)) "Should return only remaining results when limit exceeds")))
 
       (testing "Slice: Zero limit returns empty"
         ;; OFFSET 0, LIMIT 0 -> empty
-        (let [results (foreign-invoke-query q-slice {} 0 0)]
-          (is (empty? results) "Zero limit should return empty set"))))))
+        (let [results (foreign-invoke-query q-slice {} 0 0 nil)]
+          (is (empty? results) "Zero limit should return empty set")))
+
+      (let [attempt (fn [& ids] {:rows (mapv #(hash-map "?id" %) ids)})
+            ids (fn [results] (set (map #(get % "?id") results)))
+            full #{"1" "2" "3" "4" "5"}]
+        (testing "Slice: an attempt with enough rows is the answer"
+          (let [results (foreign-invoke-query q-slice {} 0 2 [(attempt "a" "b" "c")])]
+            (is (= 2 (count results)))
+            (is (every? #{"a" "b" "c"} (ids results)))))
+        (testing "Slice: a short attempt falls through to the next one"
+          (let [results (foreign-invoke-query q-slice {} 0 2 [(attempt "a") (attempt "b" "c")])]
+            (is (= #{"b" "c"} (ids results)))))
+        (testing "Slice: OFFSET counts towards the rows an attempt must produce"
+          (let [results (foreign-invoke-query q-slice {} 1 2 [(attempt "a" "b") (attempt "c" "d" "e")])]
+            (is (= 2 (count results)))
+            (is (every? #{"c" "d" "e"} (ids results)))))
+        (testing "Slice: when every attempt is short the full plan answers"
+          (let [results (foreign-invoke-query q-slice {} 0 4 [(attempt "a") (attempt "b" "c")])]
+            (is (= 4 (count results)))
+            (is (every? full (ids results)))))))))
 
 ;;; -----------------------------------------------------------------------------
 ;;; 2. INTEGRATION TEST: RdfStorageModule (Quads / Named Graphs)

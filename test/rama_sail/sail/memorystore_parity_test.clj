@@ -21,10 +21,20 @@
            (org.eclipse.rdf4j.rio Rio RDFFormat)
            (org.eclipse.rdf4j.sail.memory MemoryStore)))
 
+(def ^:private sparse-join-data
+  "Two predicates of 63 triples whose subjects overlap on only 3 rows, and those
+   sort last: the driver of a LIMIT query must read past many unmatched rows."
+  (apply str
+         (concat
+          (for [p ["lp" "lq"] i (range 60)]
+            (format "<http://ex/%s/s%02d> <http://ex/%s> \"v%02d\" .\n" p i p i))
+          (for [p ["lp" "lq"] i (range 3)]
+            (format "<http://ex/both/s%d> <http://ex/%s> \"zzz\" .\n" i p)))))
+
 (def ^:private data
   "Small default-graph dataset (N-Triples) covering the regression shapes;
    named-graph statements are added in `build-model`."
-  "<http://ex/alice> <http://ex/name> \"Alice\" .
+  (str sparse-join-data "<http://ex/alice> <http://ex/name> \"Alice\" .
 <http://ex/bob> <http://ex/name> \"Bob\" .
 <http://ex/carol> <http://ex/name> \"Carol\" .
 <http://ex/dave> <http://ex/name> \"Dave\" .
@@ -54,7 +64,7 @@ _:b2 <http://ex/w7c> \"X\" .
 <http://ex/alice> <http://ex/nick> \"Al\" .
 <http://ex/alice> <http://ex/nick> \"Ali\" .
 <http://ex/bob> <http://ex/nick> \"Bobby\" .
-")
+"))
 
 (defn- build-model
   "Parse `data` and add two statements in the named graph <http://ex/g>.
@@ -204,3 +214,17 @@ _:b2 <http://ex/w7c> \"X\" .
   (testing "property lookup on either side of an inner join"
     (parity! (str P "SELECT * { ?s :w7p <http://ex/v> . ?s :name ?n }"))
     (parity! (str P "SELECT * { ?s :name ?n . ?s :city \"NYC\" . ?s :nick ?k }"))))
+
+(deftest test-limit-with-many-unmatched-rows
+  (let [q (fn [tail] (str P "SELECT ?s { ?s :lp ?a . ?s :lq ?b } " tail))
+        both? #(re-find #"http://ex/both/" (get % "s"))]
+    (testing "without LIMIT the join has exactly the overlapping rows"
+      (is (= 3 (count (parity! (q ""))))))
+    (doseq [[tail expected] [["LIMIT 2" 2] ["LIMIT 3" 3] ["LIMIT 5" 3] ["OFFSET 1 LIMIT 5" 2] ["OFFSET 2 LIMIT 1" 1]]]
+      (testing tail
+        (let [r (rows *rama* (q tail))]
+          (is (= expected (count r)))
+          (is (= (count r) (count (rows *mem* (q tail)))))
+          (is (every? both? r)))))
+    (testing "OPTIONAL keeps unmatched rows, so LIMIT is met by the first attempt"
+      (is (= 5 (count (rows *rama* (str P "SELECT ?s { ?s :lp ?a OPTIONAL { ?s :lq ?b } } LIMIT 5"))))))))
