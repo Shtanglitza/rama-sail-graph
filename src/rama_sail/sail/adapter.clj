@@ -326,7 +326,7 @@
                           get-all-stats-qt get-global-stats-qt
                           timeout-ms sync-config]
   ;; Transaction buffers - operations are buffered until commit
-  ;; sync-config: {:enabled true :module-name "..." :microbatch-count (atom 0)}
+  ;; sync-config: {:enabled true :module-name "..." :pending-clears-qt query-or-nil}
   ;; Statistics are fetched lazily on first query and cached for connection lifetime
   (let [pending-ops (atom [])  ;; Vector of [:add quad] or [:del quad] or [:clear-context quad]
         pending-ns-ops (atom [])  ;; Vector of namespace operations [:set-ns prefix iri], [:remove-ns prefix], [:clear-ns]
@@ -658,13 +658,23 @@
           ;; since topology start. The exact barrier target is therefore the sum
           ;; of the depot partitions' end-offsets — everything appended so far,
           ;; by this SAIL instance or any other client. No shared counter needed.
+          ;;
+          ;; A graph clear is applied in bounded slices over several
+          ;; microbatches, and the indexer appends a wake-up record per slice,
+          ;; so repeat the barrier until no clear is pending.
           (when (:enabled sync-config)
             (let [module-name (:module-name sync-config)
                   num-partitions (:num-partitions (rama/foreign-object-info triple-depot))
-                  total (reduce + (for [part (range num-partitions)]
-                                    (:end-offset (rama/foreign-depot-partition-info triple-depot part))))
-                  wait-fn (requiring-resolve 'com.rpl.rama.test/wait-for-microbatch-processed-count)]
-              (wait-fn ipc module-name "indexer" total)))
+                  wait-fn (requiring-resolve 'com.rpl.rama.test/wait-for-microbatch-processed-count)
+                  pending-clears-qt (:pending-clears-qt sync-config)]
+              (loop []
+                (wait-fn ipc module-name "indexer"
+                         (reduce + (for [part (range num-partitions)]
+                                     (:end-offset (rama/foreign-depot-partition-info triple-depot part)))))
+                (when (and pending-clears-qt
+                           (pos? (invoke-query-with-timeout pending-clears-qt timeout-ms)))
+                  (Thread/sleep 20)
+                  (recur)))))
 
           ;; Commit namespace operations with tracking
           (when (pos? ns-op-count)
@@ -913,7 +923,10 @@
          ;; so no cross-instance counters are needed.
          sync-config (when sync-commits
                        {:enabled true
-                        :module-name module-name})]
+                        :module-name module-name
+                        ;; absent on a module older than bounded graph clears
+                        :pending-clears-qt (try (rama/foreign-query ipc module-name "pending-clear-count")
+                                                (catch Exception _ nil))})]
      (proxy [AbstractSail] []
        (getConnectionInternal []
          (log/debug "Opening new SAIL connection")

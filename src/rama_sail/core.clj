@@ -34,6 +34,10 @@
 (def ^{:doc "Default context value for the default graph"} DEFAULT-CONTEXT-VAL ser/DEFAULT-CONTEXT-VAL)
 (def ^{:doc "RDF type predicate IRI"} RDF-TYPE-PREDICATE qh/RDF-TYPE-PREDICATE)
 
+(def ^{:doc "True for a *triple-depot record the indexer can apply; it drops anything else.
+  Check records with this before appending them directly. See rama-sail.module.indexer/valid-depot-record?."}
+  valid-depot-record? idx/valid-depot-record?)
+
 (defn depot-partition-key [[op payload _tx-time-or-opts]]
   (case op
     :clear-context (nth payload 3)

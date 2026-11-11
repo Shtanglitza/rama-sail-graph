@@ -12,6 +12,7 @@
             [com.rpl.rama.test :as rtest]
             [com.rpl.rama.path :refer [keypath]]
             [rama-sail.core :refer [RdfStorageModule]]
+            [rama-sail.module.indexer :as idx]
             [rama-sail.sail.adapter :as rsail]
             [rama-sail.sail.serialization :as ser])
   (:import (org.eclipse.rdf4j.model Resource)
@@ -39,13 +40,21 @@
    so far. wait-for-microbatch-processed-count counts DEPOT RECORDS (not
    iterations), so the exact target is the sum of the depot partitions'
    end-offsets — no manual counter to drift when a commit appends several
-   records."
+   records. A graph clear is applied in bounded slices over several
+   microbatches (the indexer appends a wake-up record per slice), so the
+   barrier repeats until no clear is pending."
   []
   (let [depot (rama/foreign-depot *ipc* module-name "*triple-depot")
         num-partitions (:num-partitions (rama/foreign-object-info depot))
-        total (reduce + (for [part (range num-partitions)]
-                          (:end-offset (rama/foreign-depot-partition-info depot part))))]
-    (rtest/wait-for-microbatch-processed-count *ipc* module-name "indexer" total)))
+        pending-clears (rama/foreign-query *ipc* module-name "pending-clear-count")]
+    (loop []
+      (rtest/wait-for-microbatch-processed-count
+       *ipc* module-name "indexer"
+       (reduce + (for [part (range num-partitions)]
+                   (:end-offset (rama/foreign-depot-partition-info depot part)))))
+      (when (pos? (rama/foreign-invoke-query pending-clears))
+        (Thread/sleep 20)
+        (recur)))))
 
 (defn unique-iri
   "Generate unique IRI for test isolation."
@@ -836,3 +845,35 @@
             (wait-mb!)
             (is (= 1 (count-statements conn s nil nil [g])))
             (is (= 0 (count-statements conn s nil nil [nil])))))))))
+
+(deftest test-sync-commit-waits-for-a-clear-applied-in-slices
+  ;; The indexer deletes a bounded number of quads per microbatch (see
+  ;; indexer-test). With :sync-commits the commit of a clear must return only
+  ;; once every slice is applied, not after the microbatch that registered it.
+  (with-redefs [idx/clear-quads-per-microbatch 7
+                idx/clear-subjects-per-page 3]
+    (let [repo (doto (SailRepository. (rsail/create-rama-sail *ipc* module-name {:sync-commits true}))
+                 (.init))]
+      (try
+        (with-open [^SailRepositoryConnection conn (.getConnection repo)]
+          (let [g (.createIRI VF (unique-iri "sliced-clear-g"))
+                p (.createIRI VF "http://ex/sliced-clear-p")
+                in-g (into-array Resource [g])]
+            (.begin conn)
+            (dotimes [i 40]
+              (.add conn (.createIRI VF (unique-iri (str "sliced-clear-s" i))) p (.createLiteral VF (str i)) in-g))
+            (.commit conn)
+            (is (= 40 (count-statements conn nil nil nil [g])))
+
+            (.begin conn)
+            (.clear conn in-g)
+            (.commit conn)
+            (is (= 0 (count-statements conn nil nil nil [g]))
+                "all 40 quads are gone when the commit returns, though the clear took several microbatches")
+
+            (.begin conn)
+            (.add conn (.createIRI VF (unique-iri "sliced-clear-after")) p (.createLiteral VF "after") in-g)
+            (.commit conn)
+            (is (= 1 (count-statements conn nil nil nil [g])))))
+        (finally (.shutDown repo))))))
+

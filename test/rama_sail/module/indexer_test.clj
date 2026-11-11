@@ -14,7 +14,8 @@
             [com.rpl.rama :as rama]
             [com.rpl.rama.path :refer [keypath view]]
             [com.rpl.rama.test :as rtest]
-            [rama-sail.core :refer [RdfStorageModule]]))
+            [rama-sail.core :refer [RdfStorageModule]]
+            [rama-sail.module.indexer :as idx]))
 
 (def module-name (rama/get-module-name RdfStorageModule))
 
@@ -168,3 +169,132 @@
       (rama/foreign-append! ns-depot [:clear-ns])
       (is (settle! none-present?)
           "every partition must be cleared, not just the one the record landed on"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Graph clears run in bounded slices
+;;; ---------------------------------------------------------------------------
+;;; A :clear-context used to delete every quad of the graph in the microbatch
+;;; that carried it. Past Rama's phase timeout that microbatch fails and is
+;;; retried from the start with the same data, forever: clearing a 40K-quad
+;;; graph froze the indexer. Clears are now registered in $$pending-clears and
+;;; applied a bounded number of quads per microbatch.
+
+(deftest test-clear-slice
+  (let [page [["s1" "p" "a"] ["s1" "p" "b"] ["s2" "p" "a"] ["s3" "p" "a"] ["s3" "q" "b"]]]
+    (testing "takes whole subjects while they fit the budget"
+      (is (= {:quads (subvec page 0 3) :next-cursor "s2" :exhausted? false}
+             (idx/clear-slice page 10 3)))
+      (is (= {:quads (subvec page 0 3) :next-cursor "s2" :exhausted? false}
+             (idx/clear-slice page 10 4))
+          "s3 has two quads and only one fits"))
+    (testing "a subject larger than the budget is still taken, so the clear progresses"
+      (is (= {:quads (subvec page 0 2) :next-cursor "s1" :exhausted? false}
+             (idx/clear-slice page 10 1))))
+    (testing "a short page taken whole ends the scan"
+      (is (= {:quads page :next-cursor "s3" :exhausted? true}
+             (idx/clear-slice page 10 100))))
+    (testing "a full page may have more subjects after it"
+      (is (false? (:exhausted? (idx/clear-slice page 3 100)))))
+    (testing "an empty graph is done"
+      (is (= {:quads [] :next-cursor "" :exhausted? true}
+             (idx/clear-slice [] 10 100))))))
+
+(deftest test-merge-pending-clear
+  (is (= {:tx 5 :cursor ""} (idx/merge-pending-clear nil 5)))
+  (is (= {:tx 9 :cursor ""} (idx/merge-pending-clear {:tx 5 :cursor "s7"} 9))
+      "a later clear restarts the scan: quads stamped between the two may lie behind the cursor")
+  (is (= {:tx 5 :cursor "s7"} (idx/merge-pending-clear {:tx 5 :cursor "s7"} 5)))
+  (is (= {:tx 5 :cursor "s7"} (idx/merge-pending-clear {:tx 5 :cursor "s7"} 3))))
+
+(defn- wait-until
+  "Poll until f returns truthy or timeout-ms passes. Returns the last value of f."
+  [timeout-ms f]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (let [v (f)]
+        (if (or v (> (System/currentTimeMillis) deadline))
+          v
+          (do (Thread/sleep 250) (recur)))))))
+
+(defn- graph-quads [g]
+  (set (rama/foreign-invoke-query (rama/foreign-query *ipc* module-name "find-triples") nil nil nil g)))
+
+(defn- pending-clears []
+  (rama/foreign-invoke-query (rama/foreign-query *ipc* module-name "pending-clear-count")))
+
+(deftest test-clear-larger-than-budget-runs-in-slices
+  ;; 7 quads per task per microbatch and 3 subjects per page: clearing this
+  ;; 61-quad graph takes a dozen microbatches, each woken by the previous one.
+  (with-redefs [idx/clear-quads-per-microbatch 7
+                idx/clear-subjects-per-page 3]
+    (let [g (unique-iri "sliced-g")
+          other (unique-iri "sliced-other-g")
+          p (unique-iri "sliced-p")
+          subj #(str "<http://ex/sliced-s" (format "%03d" %) ">")
+          ;; 40 subjects with 1-2 quads each, plus one with 10 quads (> budget)
+          quads (concat (for [i (range 40), j (range (inc (mod i 2)))]
+                          [(subj i) p (str "\"v" j "\"") g])
+                        (for [j (range 10)] [(subj 999) p (str "\"big" j "\"") g]))
+          kept [(subj 5) p "\"added after the clear\"" g]
+          other-quads (for [i (range 5)] [(subj i) p "\"other\"" other])
+          triples-before (global-stat :total-triples)]
+      (is (= 70 (count quads)))
+      (doseq [q (concat quads other-quads)]
+        (rama/foreign-append! (depot) [:add q 1000]))
+      (is (settle! #(= (+ triples-before 75) (global-stat :total-triples))) "load visible")
+
+      (rama/foreign-append! (depot) [:clear-context [nil nil nil g] 2000])
+      (rama/foreign-append! (depot) [:add kept 3000])
+      ;; about a dozen microbatches, one slice each
+      (is (wait-until 90000 #(and (zero? (pending-clears)) (= #{kept} (graph-quads g))))
+          "the clear finishes and removes exactly the quads stamped at or before it")
+      (is (= #{kept} (graph-quads g)))
+      (is (= (set other-quads) (graph-quads other)) "another graph is untouched")
+      (is (= (+ triples-before 6) (global-stat :total-triples))
+          "each cleared quad is counted out exactly once")
+      (is (= 6 (rama/foreign-select-one (keypath p :count) (pstate "$$predicate-stats"))))
+
+      (testing "the indexer keeps processing after a multi-slice clear"
+        (let [late [(subj 1) p "\"late\"" g]]
+          (rama/foreign-append! (depot) [:add late 4000])
+          (is (settle! #(= #{kept late} (graph-quads g)))))))))
+
+(deftest test-clear-of-empty-graph-leaves-nothing-pending
+  (rama/foreign-append! (depot) [:clear-context [nil nil nil (unique-iri "no-such-g")] 1000])
+  (Thread/sleep 1500)
+  (is (settle! #(zero? (pending-clears)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Malformed depot records are dropped, not retried forever
+;;; ---------------------------------------------------------------------------
+;;; A record that throws in the topology fails its microbatch, which Rama
+;;; retries from the start with the same data, forever. The depot accepts any
+;;; object, so the indexer must not let a wrong-shaped record throw.
+
+(deftest test-valid-depot-record
+  (let [q ["<s>" "<p>" "\"o\"" "<g>"]]
+    (is (idx/valid-depot-record? [:add q]))
+    (is (idx/valid-depot-record? [:add q 1000]))
+    (is (idx/valid-depot-record? [:del q nil]))
+    (is (idx/valid-depot-record? [:clear-context [nil nil nil "<g>"] 1000]))
+    (doseq [bad [nil "garbage" [] [:add] [:add nil] [:add (pop q)] [:add (conj q "<x>")]
+                 [:add (assoc q 2 5)] [:add q "not-a-time"] [:add q 1000 :extra]
+                 [:del (assoc q 1 nil)] [:clear-context [nil nil nil nil]]
+                 [:no-such-op q] [:clear-continue ["<g>"]]]]
+      (is (not (idx/valid-depot-record? bad)) (pr-str bad)))))
+
+(deftest test-malformed-records-do-not-block-the-indexer
+  (let [g (unique-iri "malformed-g")
+        good [(unique-iri "malformed-s") (unique-iri "malformed-p") "\"ok\"" g]]
+    (doseq [bad [[:add nil]
+                 [:add ["<http://ex/only-s>" "<http://ex/only-p>"]]
+                 [:add ["<http://ex/s>" "<http://ex/p>" 5 g]]
+                 [:add ["<http://ex/s>" "<http://ex/p>" "\"o\"" g] "not-a-time"]
+                 [:del ["<http://ex/s>" nil nil g]]
+                 [:clear-context ["<http://ex/x>" nil nil nil]]
+                 [:no-such-op ["<http://ex/s>" "<http://ex/p>" "\"o\"" g]]]]
+      (rama/foreign-append! (depot) bad))
+    (rama/foreign-append! (depot) [:add good])
+    (is (wait-until 30000 #(= #{good} (graph-quads g)))
+        "a valid record appended after malformed ones is still indexed")))
+

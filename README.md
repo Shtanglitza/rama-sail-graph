@@ -142,7 +142,9 @@ Server flags:
   (com.rpl.rama.test/launch-module! ipc core/RdfStorageModule {:tasks 4 :threads 2})
   (let [module-name (rama/get-module-name core/RdfStorageModule)
         depot (rama/foreign-depot ipc module-name "*triple-depot")]
-    ;; Add triples
+    ;; Add triples. A record is [op [s p o c]] or [op [s p o c] tx-time-millis], op :add / :del
+    ;; (four string terms) or :clear-context (graph in the fourth position). The indexer drops
+    ;; anything else with a warning; core/valid-depot-record? checks a record before appending.
     (rama/foreign-append! depot [:add ["<alice>" "<knows>" "<bob>" "::rama-internal::default-graph"]])
     ;; Query
     (rama/foreign-invoke-query
@@ -209,6 +211,8 @@ Rama module with quad-based storage using four complementary indices. The module
 | `$$cspo` | C -> S -> P -> {O} | Named graph queries |
 
 Deletion uses physical index removal — deleted quads are removed from all four indices immediately. Adds and deletes are idempotent (set semantics for indices, `$$quad-tx-time` tracking for statistics correctness).
+
+Clearing a graph (`CLEAR GRAPH`, `DROP GRAPH`, `clear()`, or a `:clear-context` depot record) is applied in bounded slices: the indexer registers the clear in `$$pending-clears` and deletes up to `clear-quads-per-microbatch` quads (default 1,000) per task per microbatch until the graph is empty. A small graph is still gone in the microbatch that carries its clear. A large one empties over several microbatches, during which readers see part of it; the `pending-clear-count` query topology returns 0 once every clear is fully applied. The bound exists because a microbatch that runs past Rama's phase timeout is retried from the start with the same data, so an unbounded clear of a large graph would block the indexer.
 
 ### Query Topologies
 
