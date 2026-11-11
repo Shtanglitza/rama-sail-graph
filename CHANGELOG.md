@@ -19,6 +19,12 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an optional `--auth-token` (Bearer) gate, and a configurable `--cors-origin`.
 
 ### Added
+- **CI runs every test namespace.** Eight namespaces were never run in CI, among them the
+  SPARQL server's UPDATE security tests, the RDF4J SAIL compliance tests and the property-path
+  caps. The test lists now live in `project.clj` (`lein test :unit`, `:integration`, `:w3c`),
+  the release workflow runs the same gate as CI instead of two unit namespaces, and
+  `ci-gate-test` fails when a new test namespace is in none of them. `find-bgp-test` runs
+  against the real module again.
 - SPARQL server flags: `--allow-updates`, `--auth-token`, `--cors-origin`; startup warns on
   the risky writable + wildcard-CORS + no-token combination.
 - Property-path evaluation cap (`*path-materialization-limit*`): unbounded `?x :p* ?y` over a

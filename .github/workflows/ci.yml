@@ -33,7 +33,8 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
           restore-keys: ${{ runner.os }}-maven-
-      - run: lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test rama-sail.query.helpers-test rama-sail.query.expr-test rama-sail.query.term-order-test rama-sail.sail.bulk-load-test rama-sail.sail.serialization-roundtrip-test
+      # Test lists live in project.clj :test-selectors (shared with release.yml).
+      - run: lein test :unit
 
   # Runs on PRs too: the e2e suite shares one in-process cluster per
   # namespace, so the whole job is minutes, not tens of minutes.
@@ -53,7 +54,7 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
           restore-keys: ${{ runner.os }}-maven-
-      - run: lein test :only rama-sail.sail.e2e-test rama-sail.query.transaction-test rama-sail.query.find-triples-test rama-sail.module.indexer-test rama-sail.query.core-test rama-sail.query.aggregate-test rama-sail.sail.optimizer-equivalence-test rama-sail.sail.memorystore-parity-test rama-sail.sail.random-query-parity-test
+      - run: lein test :integration
 
   # W3C conformance harnesses guard the skip lists both ways (unexpected
   # failures AND unexpected passes fail the job). Push-to-main only.
@@ -74,4 +75,4 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
           restore-keys: ${{ runner.os }}-maven-
-      - run: lein test :only rama-sail.sail.w3c.sparql11-property-path-test rama-sail.sail.w3c.sparql12-test
+      - run: lein test :w3c

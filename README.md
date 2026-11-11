@@ -74,8 +74,11 @@ Then add the locally installed coordinate to `project.clj`:
 # Check compilation (~30s)
 lein check
 
-# Run unit tests (~5s, no Rama cluster needed)
-lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test
+# Run unit tests (no Rama cluster needed)
+lein test :unit
+
+# Run the integration tests CI runs (in-process Rama cluster)
+lein test :integration
 
 # Run full test suite (~2-5min, starts in-process Rama cluster)
 lein test
@@ -521,8 +524,7 @@ The following optimizations are applied automatically during query planning:
 - **RDF 1.2 partial**: Triple terms work via RDF-star (`<< s p o >>`), but RDF 1.2 `<<( s p o )>>` syntax, `~ :reifier` syntax, `{| |}` annotations, and `rdf:reifies` semantics are not yet supported. 5/41 W3C SPARQL 1.2 conformance tests pass; 36 are quarantined
 - **Triple term decomposition is client-side**: Extracting subject/predicate/object from triple terms uses string parsing on the SAIL client, not distributed Rama topologies. Constant triple-term lookups are O(1) distributed, but variable decomposition and component filtering are post-fetch
 - **Query timeout**: Cancellation is best-effort; Rama cluster queries may continue after client timeout
-- **SPARQL endpoint**: No authentication, rate limiting, or TLS — intended for development use
-- **No CI**: Tests are run locally; CI configuration is not yet included
+- **SPARQL endpoint**: Read-only by default; SPARQL UPDATE must be enabled explicitly and can require a Bearer token. There is no TLS, rate limiting or request size limit, and results are buffered in memory, so put it behind a reverse proxy outside development
 
 ## License
 
