@@ -450,63 +450,63 @@ Q8 and Q10 return 0 rows on these generated datasets and Q1 almost always does, 
 
 | Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
 |-------|----------|----------|----------|-----------|-------------|
-| Q1 | 4.27 | 104.28 | 105.41 | 10.58 | 0.1 |
-| Q2 | 5.80 | 7.85 | 106.70 | 8.01 | 3.1 |
-| Q3 | 2.82 | 6.25 | 104.18 | 7.13 | 1.2 |
-| Q4 | 4.46 | 5.81 | 48.54 | 5.66 | 0.9 |
-| Q5 | 8.33 | 9.37 | 31.34 | 8.82 | 3.4 |
-| Q7 | 2.49 | 3.23 | 3.63 | 2.62 | 5.8 |
-| Q8 | 1.97 | 3.37 | 90.64 | 3.89 | 0.0 |
-| Q10 | 4.90 | 5.97 | 61.70 | 6.36 | 0.0 |
-| Q11 | 1.15 | 53.18 | 101.42 | 6.71 | 5.0 |
-| QJ1 | 12.50 | 45.02 | 131.56 | 18.97 | 100.0 |
-| QJ2 | 2.49 | 3.37 | 24.73 | 2.96 | 12.0 |
-| QJ3 | 16.99 | 46.43 | 52.04 | 19.12 | 100.0 |
-| QJ4 | 5.39 | 8.37 | 34.12 | 6.36 | 100.0 |
+| Q1 | 4.43 | 52.84 | 104.44 | 9.74 | 0.0 |
+| Q2 | 6.01 | 33.16 | 108.38 | 9.99 | 2.9 |
+| Q3 | 2.88 | 7.32 | 45.31 | 4.41 | 1.3 |
+| Q4 | 4.83 | 6.48 | 15.09 | 5.20 | 1.3 |
+| Q5 | 8.27 | 22.41 | 108.32 | 11.56 | 3.2 |
+| Q7 | 2.60 | 4.09 | 9.44 | 2.89 | 7.6 |
+| Q8 | 2.00 | 3.33 | 35.65 | 2.80 | 0.0 |
+| Q10 | 5.26 | 61.85 | 192.29 | 12.47 | 0.0 |
+| Q11 | 0.96 | 1.68 | 101.43 | 3.24 | 5.0 |
+| QJ1 | 12.70 | 27.41 | 69.48 | 15.42 | 100.0 |
+| QJ2 | 3.00 | 114.19 | 118.27 | 15.90 | 11.9 |
+| QJ3 | 13.60 | 41.52 | 118.77 | 18.24 | 100.0 |
+| QJ4 | 4.12 | 5.92 | 22.93 | 4.79 | 100.0 |
 
 #### 59K Triples (1,000 products)
 
 | Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
 |-------|----------|----------|----------|-----------|-------------|
-| Q1 | 13.31 | 58.48 | 112.26 | 17.61 | 0.1 |
-| Q2 | 6.57 | 106.63 | 108.92 | 12.93 | 2.8 |
-| Q3 | 4.13 | 5.59 | 103.80 | 6.26 | 5.2 |
-| Q4 | 16.99 | 84.56 | 97.41 | 23.70 | 2.0 |
-| Q5 | 26.71 | 81.68 | 183.06 | 33.29 | 4.7 |
-| Q7 | 2.62 | 5.51 | 99.99 | 4.70 | 6.8 |
-| Q8 | 1.71 | 4.64 | 77.22 | 3.49 | 0.0 |
-| Q10 | 25.55 | 124.56 | 136.68 | 37.10 | 0.0 |
-| Q11 | 0.89 | 1.02 | 1.07 | 0.90 | 5.0 |
-| QJ1 | 101.22 | 181.49 | 211.64 | 118.64 | 100.0 |
-| QJ2 | 3.73 | 4.18 | 4.36 | 3.75 | 39.9 |
-| QJ3 | 157.35 | 231.14 | 233.09 | 174.29 | 100.0 |
-| QJ4 | 46.01 | 87.24 | 155.65 | 53.62 | 100.0 |
+| Q1 | 14.57 | 49.42 | 118.18 | 19.54 | 0.0 |
+| Q2 | 7.26 | 10.82 | 112.69 | 9.95 | 2.9 |
+| Q3 | 4.28 | 6.34 | 63.18 | 5.69 | 5.4 |
+| Q4 | 18.21 | 52.17 | 118.67 | 22.12 | 1.3 |
+| Q5 | 28.24 | 67.81 | 179.50 | 36.04 | 4.7 |
+| Q7 | 2.83 | 3.20 | 4.12 | 2.91 | 6.2 |
+| Q8 | 2.27 | 8.26 | 102.44 | 6.49 | 0.0 |
+| Q10 | 26.79 | 56.76 | 134.35 | 31.60 | 0.0 |
+| Q11 | 1.31 | 73.69 | 102.94 | 6.88 | 5.0 |
+| QJ1 | 29.82 | 91.79 | 137.14 | 38.32 | 100.0 |
+| QJ2 | 4.10 | 4.99 | 104.80 | 8.06 | 40.1 |
+| QJ3 | 35.83 | 95.36 | 121.85 | 43.59 | 100.0 |
+| QJ4 | 9.32 | 103.44 | 109.20 | 16.59 | 100.0 |
 
 #### Scaling: p50 Comparison (6K → 59K)
 
 | Query | 6K p50 | 59K p50 | Slowdown |
 |-------|--------|---------|----------|
-| Q1 | 4.3 | 13.3 | 3.1x |
-| Q2 | 5.8 | 6.6 | 1.1x |
-| Q3 | 2.8 | 4.1 | 1.5x |
-| Q4 | 4.5 | 17.0 | 3.8x |
-| Q5 | 8.3 | 26.7 | 3.2x |
-| Q7 | 2.5 | 2.6 | 1.1x |
-| Q8 | 2.0 | 1.7 | 0.9x |
-| Q10 | 4.9 | 25.6 | 5.2x |
-| Q11 | 1.1 | 0.9 | 0.8x |
-| QJ1 | 12.5 | 101.2 | 8.1x |
-| QJ2 | 2.5 | 3.7 | 1.5x |
-| QJ3 | 17.0 | 157.3 | 9.3x |
-| QJ4 | 5.4 | 46.0 | 8.5x |
+| Q1 | 4.4 | 14.6 | 3.3x |
+| Q2 | 6.0 | 7.3 | 1.2x |
+| Q3 | 2.9 | 4.3 | 1.5x |
+| Q4 | 4.8 | 18.2 | 3.8x |
+| Q5 | 8.3 | 28.2 | 3.4x |
+| Q7 | 2.6 | 2.8 | 1.1x |
+| Q8 | 2.0 | 2.3 | 1.1x |
+| Q10 | 5.3 | 26.8 | 5.1x |
+| Q11 | 1.0 | 1.3 | 1.4x |
+| QJ1 | 12.7 | 29.8 | 2.3x |
+| QJ2 | 3.0 | 4.1 | 1.4x |
+| QJ3 | 13.6 | 35.8 | 2.6x |
+| QJ4 | 4.1 | 9.3 | 2.3x |
 
-For a 10x data increase, Q2, Q3, Q7, Q8, Q11 and QJ2 stay within 1.5x, and Q1, Q4, Q5 and Q10 grow 3-5x. QJ1, QJ3 and QJ4 grow 8-9x because they still compute every join row before LIMIT applies.
+For a 10x data increase, Q2, Q3, Q7, Q8, Q11 and QJ2 stay within 1.5x, QJ1, QJ3 and QJ4 grow 2-3x, and Q1, Q4, Q5 and Q10 grow 3-5x.
 
 ### Query Optimizations
 
 The following optimizations are applied automatically during query planning:
 
-- **LIMIT pushdown**: Applies LIMIT inside BGPs and self-joins, passing through PROJECT and BIND, where truncating cannot change the result. It stops at joins, FILTER, DISTINCT and ORDER BY. BGPs and self-joins truncate after reading their data, so this shortens results and binding construction but does not avoid the scan
+- **LIMIT pushdown**: Applies LIMIT inside BGPs and self-joins, passing through PROJECT and BIND, where truncating cannot change the result. BGPs and self-joins truncate after reading their data, so this shortens results and binding construction but does not avoid the scan. A LIMIT over a chain of property lookups first tries reading a small multiple of the rows it needs from the driving pattern and falls back to the full plan if that yields too few rows, so results stay exact. Plans with ORDER BY or DISTINCT still compute every row
 - **Adaptive filter selectivity**: Estimates filter selectivity by operator type (equality=0.05, range=0.3, inequality=0.8) instead of a flat 0.3, improving join ordering decisions
 - **AND decomposition**: Splits compound AND filters into independent conjuncts that can be pushed separately to each join side
 - **Selinger-style join ordering**: Dynamic programming optimizer for multi-way join chains using predicate statistics

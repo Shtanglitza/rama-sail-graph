@@ -1025,3 +1025,87 @@
                                         (opt-entry b)]})]
           (is (= base (:base plan)))
           (is (= 2 (count (:optionals plan)))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; LIMIT attempts over lookup chains
+;;; ---------------------------------------------------------------------------
+
+(def ^:private limit-stats
+  {"<huge>" {:count 1000000 :distinct-subjects 1000000 :distinct-objects 1000000}
+   "<big>" {:count 100000 :distinct-subjects 100000 :distinct-objects 100000}
+   "<c>" {:count 200000 :distinct-subjects 200000 :distinct-objects 200000}})
+
+(defn- slice-of
+  ([plan limit] (slice-of plan limit 0))
+  ([plan limit offset] {:op :slice :sub-plan plan :offset offset :limit limit}))
+
+(defn- limited [plan]
+  (binding [opt/*predicate-stats* limit-stats]
+    (opt/push-limit-down plan)))
+
+(defn- driver-limits [plan]
+  (mapv #(:result-limit (last (take-while some? (iterate :sub-plan %)))) (:attempts plan)))
+
+(def ^:private two-bgps (bgp-join (w7-bgp "?s" "<huge>" "?a") (w7-bgp "?s" "<big>" "?b")))
+
+(deftest test-limit-attempts
+  (testing "an inner join becomes a chain driven by its smallest BGP"
+    (let [plan (limited (slice-of two-bgps 10))]
+      (is (= [40 320] (driver-limits plan)))
+      (is (every? #(= {:op :batch-enrich
+                       :sub-plan (assoc (w7-bgp "?s" "<big>" "?b") :result-limit (get-in % [:sub-plan :result-limit]))
+                       :predicate "<huge>" :subject-var "?s" :object-var "?a" :context nil}
+                      %)
+                  (:attempts plan)))))
+  (testing "the plan itself is untouched, so it remains the exact answer"
+    (is (= two-bgps (:sub-plan (limited (slice-of two-bgps 10))))))
+  (testing "OFFSET counts towards the rows needed"
+    (is (= [60 480] (driver-limits (limited (slice-of two-bgps 10 5))))))
+  (testing "attempts that would read the whole driver are dropped"
+    (is (= [16000] (driver-limits (limited (slice-of two-bgps 4000)))))
+    (is (nil? (:attempts (limited (slice-of two-bgps 30000))))))
+  (testing "the limit passes through row-wise operators"
+    (let [plan (limited (slice-of {:op :project :vars ["?s"]
+                                   :sub-plan {:op :filter :expr {:type :bound :var "?a"} :sub-plan two-bgps}}
+                                  10))]
+      (is (= :project (:op (first (:attempts plan)))))
+      (is (= :filter (get-in plan [:attempts 0 :sub-plan :op])))
+      (is (= [40 320] (driver-limits plan)))))
+  (testing "a self-join can drive the chain"
+    (let [self-join {:op :self-join :predicate "<big>" :join-var "?o" :left-subject "?s"
+                     :right-subject "?t" :filter nil :context nil}
+          plan (limited (slice-of {:op :batch-enrich :sub-plan self-join :predicate "<huge>"
+                                   :subject-var "?s" :object-var "?a" :context nil}
+                                  10))]
+      (is (= [40 320] (driver-limits plan)))
+      (testing "also when a lookup is still a hash join above it"
+        (let [plan (limited (slice-of (bgp-join self-join (w7-bgp "?s" "<huge>" "?a")) 10))]
+          (is (= [40 320] (driver-limits plan)))
+          (is (= :batch-enrich (:op (first (:attempts plan)))))))))
+  (testing "OPTIONAL lookups stay above the inner chain"
+    (let [opt-lookup {:op :batch-enrich :optional? true :sub-plan two-bgps :predicate "<c>"
+                      :subject-var "?s" :object-var "?z" :context nil}
+          attempt (first (:attempts (limited (slice-of opt-lookup 10))))]
+      (is (:optional? attempt))
+      (is (= "<c>" (:predicate attempt)))
+      (is (= "<huge>" (get-in attempt [:sub-plan :predicate])))
+      (is (= 40 (get-in attempt [:sub-plan :sub-plan :result-limit])))))
+  (testing "an inner lookup above an OPTIONAL is not reordered across it"
+    (let [optional {:op :batch-enrich :optional? true :sub-plan (w7-bgp "?s" "<big>" "?b")
+                    :predicate "<c>" :subject-var "?s" :object-var "?z" :context nil}
+          inner {:op :batch-enrich :sub-plan optional :predicate "<huge>"
+                 :subject-var "?s" :object-var "?a" :context nil}
+          attempt (first (:attempts (limited (slice-of inner 10))))]
+      (is (= "<huge>" (:predicate attempt)))
+      (is (:optional? (:sub-plan attempt)))))
+  (testing "plans that must not get attempts"
+    (doseq [[why plan]
+            {"no property lookup to save" (slice-of (w7-bgp "?s" "<big>" "?a") 10)
+             "ORDER BY needs every row" (slice-of {:op :order :order-specs [] :sub-plan two-bgps} 10)
+             "DISTINCT is not row-wise" (slice-of {:op :distinct :sub-plan two-bgps} 10)
+             "no LIMIT" (slice-of two-bgps -1)
+             "cross product cannot chain" (slice-of {:op :join :join-vars []
+                                                     :left (w7-bgp "?s" "<huge>" "?a")
+                                                     :right (w7-bgp "?t" "<big>" "?b")}
+                                                    10)}]
+      (is (nil? (:attempts (limited plan))) why))))

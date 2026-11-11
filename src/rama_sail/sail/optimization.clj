@@ -1321,6 +1321,92 @@
          (or (< (count vars) 2)
              (apply distinct? vars)))))
 
+;; LIMIT over a chain of property lookups. Inner lookups can drop rows, so
+;; truncating the driver cannot be exact. Instead the :slice carries cheaper
+;; :attempts: the query with a truncated driver. Every attempt returns a sub-bag
+;; of the full result, so one that yields enough rows is a valid answer. The
+;; executor falls through to the next attempt otherwise, and finally to the
+;; unchanged :sub-plan, so results never depend on the guess.
+
+(def ^:private limit-attempt-multipliers
+  "Driver rows per attempt, as multiples of the rows the LIMIT needs."
+  [4 32])
+
+(defn- inner-sources
+  "The BGPs and self-joins of a tree of inner joins and inner batch-enriches, or
+   nil when the tree holds anything else."
+  [plan]
+  (case (:op plan)
+    (:bgp :self-join) [plan]
+    :join (when-let [left (inner-sources (:left plan))]
+            (when-let [right (inner-sources (:right plan))]
+              (into left right)))
+    :batch-enrich (when-not (:optional? plan)
+                    (when-let [sources (inner-sources (:sub-plan plan))]
+                      (conj sources {:op :bgp
+                                     :pattern {:s (:subject-var plan) :p (:predicate plan)
+                                               :o (:object-var plan) :c (:context plan)}})))
+    nil))
+
+(defn- lookup-chain
+  "`driver` followed by every other source as a forward property lookup, or nil
+   when some source cannot be reached that way."
+  [driver sources]
+  (loop [plan driver
+         todo (remove #(identical? % driver) sources)]
+    (if (empty? todo)
+      plan
+      (when-let [[lookup enriched] (first (keep #(some->> (batch-enrich-node plan %) (vector %)) todo))]
+        (recur enriched (remove #(identical? % lookup) todo))))))
+
+(defn- chain-inner-joins
+  "`plan` with its inner join tree rebuilt as a lookup chain from the smallest
+   source that can drive one. The join order is chosen for a truncated driver, so
+   only limit attempts use it; the size check of `apply-batch-enrich` assumes
+   the whole input."
+  [plan]
+  (case (:op plan)
+    (:project :bind :filter)
+    (update plan :sub-plan chain-inner-joins)
+
+    (:join :batch-enrich)
+    (or (when-let [sources (inner-sources plan)]
+          (some #(lookup-chain % sources) (sort-by estimate-plan-cardinality sources)))
+        (if (= :batch-enrich (:op plan))
+          (update plan :sub-plan chain-inner-joins)
+          plan))
+
+    plan))
+
+(defn- chain-driver
+  "The source operator feeding a chain of row-wise operators, or nil."
+  [plan]
+  (case (:op plan)
+    (:project :bind :filter :batch-enrich) (chain-driver (:sub-plan plan))
+    (:bgp :self-join) plan
+    nil))
+
+(defn- limit-chain-driver
+  "`plan`, whose `chain-driver` exists, with that driver truncated to n rows."
+  [plan n]
+  (if (:sub-plan plan)
+    (update plan :sub-plan limit-chain-driver n)
+    (assoc plan :result-limit n)))
+
+(defn- limit-attempts
+  "Attempts for producing `needed` rows from `sub-plan` without reading all of
+   its driver. Empty unless lookups would be saved and an attempt reads less
+   than the driver holds."
+  [sub-plan needed]
+  (let [chain (chain-inner-joins sub-plan)]
+    (when-let [driver (when (pos? (count-ops chain :batch-enrich)) (chain-driver chain))]
+      (let [driver-rows (estimate-plan-cardinality driver)]
+        (into []
+              (comp (map #(* % needed))
+                    (filter #(< % driver-rows))
+                    (map #(limit-chain-driver chain %)))
+              limit-attempt-multipliers)))))
+
 (defn push-limit-down
   "Push LIMIT hints into operators that can terminate early without changing
    results. Walks the plan tree and, when a :slice with a positive limit wraps
@@ -1340,7 +1426,9 @@
      rows; the former x4 / x2 multiplier heuristics were unsound and removed
    - :order — ORDER BY needs all input rows to produce the correct top-N;
      a distributed top-N combiner is future work (see
-     docs/rama-performance-opportunities.md, Priority 2)"
+     docs/rama-performance-opportunities.md, Priority 2)
+
+   A :slice over a chain of property lookups also gets `limit-attempts`."
   [plan]
   (letfn [(push-limit [plan limit]
             ;; Push limit to a semantics-preserving target operator
@@ -1372,8 +1460,10 @@
                 (if limit
                   ;; Push the limit into sub-plan, accounting for offset
                   (let [offset (max 0 (or (:offset plan) 0))
-                        effective-limit (+ limit offset)]
-                    (update plan :sub-plan #(push-limit % effective-limit)))
+                        effective-limit (+ limit offset)
+                        attempts (limit-attempts (:sub-plan plan) effective-limit)]
+                    (cond-> (update plan :sub-plan #(push-limit % effective-limit))
+                      (seq attempts) (assoc :attempts attempts)))
                   ;; No limit to push, just recurse
                   (update plan :sub-plan push-limit-down)))
 
@@ -1432,7 +1522,8 @@
    3. Detect and transform self-join patterns
    4. Use materialized type views for rdf:type patterns (adaptive)
    5. Transform property-lookup joins to batch-enrich
-   6. Push LIMIT into joins and self-joins for early termination"
+   6. Push LIMIT into BGPs and self-joins, and add cheaper attempts for LIMIT
+      over lookup chains"
   [plan]
   (let [optimized (with-scope-cache
                     (-> plan
