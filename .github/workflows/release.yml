@@ -23,7 +23,10 @@ jobs:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('project.clj') }}
           restore-keys: ${{ runner.os }}-maven-
-      - run: lein test :only rama-sail.sail.optimizer-test rama-sail.sail.adapter-test
+      # Same gate as CI (project.clj :test-selectors), plus the W3C suites.
+      - run: lein test :unit
+      - run: lein test :integration
+      - run: lein test :w3c
       - run: lein uberjar
       - uses: softprops/action-gh-release@v2
         with:

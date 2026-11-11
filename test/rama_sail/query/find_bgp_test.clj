@@ -1,44 +1,20 @@
 (ns rama-sail.query.find-bgp-test
   (:require [clojure.test :refer :all]
             [com.rpl.rama :as rama]
-            [com.rpl.rama.path :as path]
             [com.rpl.rama.test :as rtest]
-            [rama-sail.core :as core]
-            [rama-sail.module.queries :as queries]))
-
-;; 1. Define a self-contained module for testing find-bgp
-(rama/defmodule FindBgpTestModule [setup topologies]
-  (rama/declare-depot setup *quad-depot (rama/hash-by core/depot-partition-key))
-
-  ;; -- Indices & ETL (Same as RdfStorageModule) --
-  (let [mb (rama/microbatch-topology topologies "indexer")]
-    (rama/declare-pstate mb $$spoc {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
-    (rama/declare-pstate mb $$posc {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
-    (rama/declare-pstate mb $$ospc {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
-    (rama/declare-pstate mb $$cspo {String (rama/map-schema String (rama/map-schema String (rama/set-schema String {:subindex? true}) {:subindex? true}) {:subindex? true})})
-    (rama/<<sources mb
-                    (rama/source> *quad-depot :> %microbatch)
-                    (%microbatch :> [_ [*s *p *o *c]])
-                    (rama/|hash *s) (rama/local-transform> [(path/keypath *s *p *o) path/NIL->SET path/NONE-ELEM (path/termval *c)] $$spoc)
-                    (rama/|hash *p) (rama/local-transform> [(path/keypath *p *o *s) path/NIL->SET path/NONE-ELEM (path/termval *c)] $$posc)
-                    (rama/|hash *o) (rama/local-transform> [(path/keypath *o *s *p) path/NIL->SET path/NONE-ELEM (path/termval *c)] $$ospc)
-                    (rama/|hash *c) (rama/local-transform> [(path/keypath *c *s *p) path/NIL->SET path/NONE-ELEM (path/termval *o)] $$cspo)))
-
-  ;; -- Topologies under test --
-  (queries/find-triples-query-topology topologies) ;; Dependency
-  (queries/find-bgp-query-topology topologies))    ;; Target
+            [rama-sail.core :as core]))
 
 (deftest test-find-bgp-bindings
   (with-open [ipc (rtest/create-ipc)]
-    (rtest/launch-module! ipc FindBgpTestModule {:tasks 4 :threads 2})
+    (rtest/launch-module! ipc core/RdfStorageModule {:tasks 4 :threads 2})
 
-    (let [module-name (rama/get-module-name FindBgpTestModule)
-          depot       (rama/foreign-depot ipc module-name "*quad-depot")
+    (let [module-name (rama/get-module-name core/RdfStorageModule)
+          depot       (rama/foreign-depot ipc module-name "*triple-depot")
           find-bgp    (rama/foreign-query ipc module-name "find-bgp")
 
           ;; Helper to run BGP query
           query-bgp (fn [pattern]
-                      (let [res (rama/foreign-invoke-query find-bgp pattern)]
+                      (let [res (rama/foreign-invoke-query find-bgp pattern nil)]
                         (set res)))]
 
       ;; --- DATA SETUP ---
