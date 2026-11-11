@@ -336,6 +336,19 @@
                     (|origin)
                     (aggs/+set-agg *ctx :> *contexts)))
 
+;; --- PENDING GRAPH CLEARS ---
+
+(defn pending-clear-count-query-topology
+  "Number of graph clears the indexer has registered but not finished applying
+   (it deletes a bounded slice per microbatch). 0 means every clear processed
+   so far is fully visible."
+  [topologies]
+  (<<query-topology topologies "pending-clear-count" [:> *count]
+                    (|all)
+                    (local-select> [(subselect MAP-KEYS) (view count)] $$pending-clears :> *n)
+                    (|origin)
+                    (aggs/+sum *n :> *count)))
+
 ;; --- COUNT STATEMENTS ---
 
 (defn count-statements-query-topology [topologies]
@@ -699,6 +712,7 @@
   (bind-query-topology topologies)
   (order-query-topology topologies)
   (list-contexts-query-topology topologies)
+  (pending-clear-count-query-topology topologies)
   (count-statements-query-topology topologies)
   (get-predicate-stats-query-topology topologies)
   (get-all-predicate-stats-query-topology topologies)

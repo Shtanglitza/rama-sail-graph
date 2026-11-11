@@ -78,6 +78,16 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- **Clearing a large graph no longer freezes the indexer.** `CLEAR GRAPH`, `DROP GRAPH`, `clear()`
+  and `:clear-context` depot records deleted every quad of the graph in one microbatch. A microbatch
+  that runs past Rama's phase timeout is retried from the start with the same data, so clearing a
+  large graph (40,000 quads on a 4-task in-process cluster) never finished and blocked every later
+  write. A clear is now registered in a new `$$pending-clears` PState and applied in bounded slices,
+  up to 1,000 quads per task per microbatch (`clear-quads-per-microbatch`). Behavior change: a graph
+  larger than that empties over several microbatches, so readers can see it partly cleared; the new
+  `pending-clear-count` query topology returns 0 when every clear is fully applied, and
+  `:sync-commits` waits for it. Module-side: update the module (it adds a PState and a query
+  topology). `:del` and clears now share one `delete-quad` operation.
 - Bench loader lost data silently: unacknowledged appends overran the depot's append buffer, so
   only 46,393 of the 59,328 triples in the 1,000-product dataset were indexed. It now sends
   acknowledged appends through a sliding window with retries and throws if any append still fails.

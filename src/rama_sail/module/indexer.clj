@@ -4,7 +4,8 @@
    Use these functions from within a defmodule body to set up the core RDF indexing pipeline."
   (:use [com.rpl.rama]
         [com.rpl.rama.path])
-  (:require [rama-sail.query.helpers :as qh]
+  (:require [com.rpl.rama.ops :as ops]
+            [rama-sail.query.helpers :as qh]
             [rama-sail.sail.serialization :as ser]))
 
 (def ^{:doc "RDF type predicate IRI"} RDF-TYPE-PREDICATE qh/RDF-TYPE-PREDICATE)
@@ -129,22 +130,189 @@
   ;; Context-aware cardinality tracking for type views
   (declare-pstate mb $$type-subject-count {String (map-schema String Long {:subindex? true})})
   (declare-pstate mb $$subject-type-count {String (map-schema String Long {:subindex? true})})
+  ;; Graph clears in progress: c -> {:tx clear tx-time, :cursor last subject cleared}.
+  ;; Lives on the graph's task (where $$cspo holds the graph); empty when idle.
+  (declare-pstate mb $$pending-clears {String (fixed-keys-schema {:tx Long :cursor String})})
   ;; Temporal tracking: s -> p -> o -> c -> tx-time
   (declare-pstate mb $$quad-tx-time {String (map-schema String (map-schema String (map-schema String Long {:subindex? true}) {:subindex? true}) {:subindex? true})}))
 
+;; --- Bounded graph clears ---
+
+(def clear-quads-per-microbatch
+  "Most quads one task deletes for pending graph clears in one microbatch. A
+   microbatch reads at most depot.microbatch.max.records (default 1000) records
+   per partition, so this keeps clear work in the same range as ordinary load."
+  1000)
+
+(def clear-subjects-per-page
+  "Subjects of a graph read per $$cspo page while clearing."
+  200)
+
+(defn clear-quads-budget [] clear-quads-per-microbatch)
+(defn clear-page-subjects [] clear-subjects-per-page)
+
+(defn merge-pending-clear
+  "Pending-clear entry for a graph after a clear at `tx`. A later clear restarts
+   the scan, since quads created between the two stamps may lie behind the
+   cursor; an older or equal one changes nothing."
+  [pending tx]
+  (if (and pending (>= (:tx pending) tx))
+    pending
+    {:tx tx :cursor ""}))
+
+(defn clear-slice
+  "Next slice of a graph clear. `page` holds the [s p o] triples of up to
+   `page-subjects` subjects in subject order. Takes whole subjects while they
+   fit in `budget` quads (always at least one, so a subject larger than the
+   budget still makes progress). Returns the quads to delete, the cursor (last
+   subject taken) and whether the graph has been scanned to its end."
+  [page page-subjects budget]
+  (let [by-subject (partition-by first page)
+        taken (loop [taken [] n 0 groups by-subject]
+                (if-let [g (first groups)]
+                  (if (or (empty? taken) (<= (+ n (count g)) budget))
+                    (recur (conj taken g) (+ n (count g)) (rest groups))
+                    taken)
+                  taken))]
+    {:quads (into [] cat taken)
+     :next-cursor (or (some-> (last taken) first first) "")
+     :exhausted? (and (< (count by-subject) page-subjects)
+                      (= (count taken) (count by-subject)))}))
+
+(deframaop delete-quad
+  "Physically removes quad [s p o c] from every index, statistic and type view,
+   if it exists and was created at or before `*max-tx`. Emits nothing.
+   Shared by :del (max-tx = Long/MAX_VALUE) and graph clears (max-tx = the
+   clear's tx-time: last-write-wins against later adds)."
+  [*s *p *o *c *max-tx]
+  ;; Module PStates are not in scope in a deframaop: resolve them by name on
+  ;; whichever task the code is running on.
+  (<<with-substitutions
+   [$$cspo (this-module-pobject-task-global "$$cspo")
+    $$global-stats (this-module-pobject-task-global "$$global-stats")
+    $$ospc (this-module-pobject-task-global "$$ospc")
+    $$posc (this-module-pobject-task-global "$$posc")
+    $$pred-obj-count (this-module-pobject-task-global "$$pred-obj-count")
+    $$pred-subj-count (this-module-pobject-task-global "$$pred-subj-count")
+    $$predicate-stats (this-module-pobject-task-global "$$predicate-stats")
+    $$quad-tx-time (this-module-pobject-task-global "$$quad-tx-time")
+    $$spoc (this-module-pobject-task-global "$$spoc")
+    $$subject-type-count (this-module-pobject-task-global "$$subject-type-count")
+    $$subject-types (this-module-pobject-task-global "$$subject-types")
+    $$type-subject-count (this-module-pobject-task-global "$$type-subject-count")
+    $$type-subjects (this-module-pobject-task-global "$$type-subjects")]
+    (|hash *s)
+    (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *quad-creation-time)
+    ;; Delete only a quad that exists and was created at or before *max-tx
+    (<<if (and> (some? *quad-creation-time)
+                (>= *max-tx *quad-creation-time))
+          ;; Claim the delete atomically with the check (same task, no
+          ;; partitioner in between): a duplicate delete of this quad later in
+          ;; the microbatch sees the entry gone and does not double-decrement
+          ;; statistics.
+          (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time)
+          (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$quad-tx-time)
+          (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$quad-tx-time)
+          (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$quad-tx-time)
+
+          ;; Remove from all indices, pruning newly-empty containers
+          (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
+          (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$spoc)
+          (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$spoc)
+          (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$spoc)
+          (local-select> [(keypath *s) (view some?)] $$spoc :> *subj-still-exists)
+
+          (|hash *p)
+          (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
+          (local-transform> [(keypath *p *o *s) (if-path (pred empty?) NONE>)] $$posc)
+          (local-transform> [(keypath *p *o) (if-path (pred empty?) NONE>)] $$posc)
+          (local-transform> [(keypath *p) (if-path (pred empty?) NONE>)] $$posc)
+
+          (|hash *o)
+          (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
+          (local-transform> [(keypath *o *s *p) (if-path (pred empty?) NONE>)] $$ospc)
+          (local-transform> [(keypath *o *s) (if-path (pred empty?) NONE>)] $$ospc)
+          (local-transform> [(keypath *o) (if-path (pred empty?) NONE>)] $$ospc)
+
+          (|hash *c)
+          (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
+          (local-transform> [(keypath *c *s *p) (if-path (pred empty?) NONE>)] $$cspo)
+          (local-transform> [(keypath *c *s) (if-path (pred empty?) NONE>)] $$cspo)
+          (local-transform> [(keypath *c) (if-path (pred empty?) NONE>)] $$cspo)
+
+          (|hash *p)
+          (local-select> [(keypath *p :count)] $$predicate-stats :> *cur-pred-count)
+          (identity (= *cur-pred-count 1) :> *pred-vanished)
+          ;; termval: value already read above — (term ...) would re-read
+          (dec-floor-zero *cur-pred-count :> *next-pred-count)
+          (local-transform> [(keypath *p :count) (termval *next-pred-count)] $$predicate-stats)
+
+          ;; Decrement distinct subjects only when last triple for (pred, subject) removed
+          (local-select> [(keypath *p *s)] $$pred-subj-count :> *cur-subj-count)
+          (dec-floor-zero *cur-subj-count :> *next-subj-count)
+          (local-transform> [(keypath *p *s) (termval *next-subj-count)] $$pred-subj-count)
+          (<<if (= *cur-subj-count 1)
+                ;; Last occurrence - decrement distinct count AND cleanup the mapping
+                (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
+                (local-transform> [(keypath *p *s) NONE>] $$pred-subj-count))
+
+          ;; Decrement distinct objects only when last triple for (pred, object) removed
+          (local-select> [(keypath *p *o)] $$pred-obj-count :> *cur-obj-count)
+          (dec-floor-zero *cur-obj-count :> *next-obj-count)
+          (local-transform> [(keypath *p *o) (termval *next-obj-count)] $$pred-obj-count)
+          (<<if (= *cur-obj-count 1)
+                ;; Last occurrence - decrement distinct count AND cleanup the mapping
+                (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
+                (local-transform> [(keypath *p *o) NONE>] $$pred-obj-count))
+
+          (|global)
+          (local-transform> [(keypath :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
+          (<<if (not *subj-still-exists)
+                (local-transform> [(keypath :total-subjects) (nil->val 0) (term dec-floor-zero)] $$global-stats))
+          (<<if *pred-vanished
+                (local-transform> [(keypath :total-predicates) (nil->val 0) (term dec-floor-zero)] $$global-stats))
+          ;; Update type views if this is an rdf:type triple (context-aware cardinality)
+          (<<if (= *p RDF-TYPE-PREDICATE)
+                ;; Decrement type->subject occurrence count
+                (|hash *o)
+                (local-select> [(keypath *o *s)] $$type-subject-count :> *cur-ts-count)
+                (dec-floor-zero *cur-ts-count :> *next-ts-count)
+                (local-transform> [(keypath *o *s) (termval *next-ts-count)] $$type-subject-count)
+                ;; Only remove from type view if this was the LAST occurrence
+                (<<if (= *cur-ts-count 1)
+                      (local-transform> [(keypath *o) (set-elem *s) NONE>] $$type-subjects)
+                      (local-transform> [(keypath *o) (if-path (pred empty?) NONE>)] $$type-subjects)
+                      (local-transform> [(keypath *o *s) NONE>] $$type-subject-count))
+                ;; Decrement subject->type occurrence count (symmetric)
+                (|hash *s)
+                (local-select> [(keypath *s *o)] $$subject-type-count :> *cur-st-count)
+                (dec-floor-zero *cur-st-count :> *next-st-count)
+                (local-transform> [(keypath *s *o) (termval *next-st-count)] $$subject-type-count)
+                ;; Only remove from subject-types view if this was the LAST occurrence
+                (<<if (= *cur-st-count 1)
+                      (local-transform> [(keypath *s) (set-elem *o) NONE>] $$subject-types)
+                      (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$subject-types)
+                      (local-transform> [(keypath *s *o) NONE>] $$subject-type-count))))))
+
 (defn rdf-indexer-sources
   "Wires up the core RDF indexer ETL on microbatch topology `mb`.
-   Handles :add, :del, and :clear-context operations from *triple-depot.
+   Handles :add, :del, and :clear-context operations from *triple-depot. A
+   graph clear is registered in $$pending-clears and applied in bounded slices,
+   one per microbatch.
    Requires all PStates from declare-rdf-index-pstates to be declared on `mb`."
   [mb]
   (<<sources mb
              (source> *triple-depot :> %microbatch)
-             ;; Format: [op [s p o c] tx-time]
+             ;; --- Depot records ---
+             ;; Format: [op [s p o c] tx-time]. A batch block so that the clear
+             ;; slices below run after every record of this microbatch.
+             (<<batch
              (%microbatch :> *msg)
              (first *msg :> *op)
+             ;; [:clear-continue ...] only wakes the indexer (see below)
+             (filter> (contains? #{:add :del :clear-context} *op))
 
              (<<cond
-              ;; --- ADD/DEL/CLEAR-CONTEXT: Quad operations ---
               (default>)
               ;; Format: [op [s p o c] tx-time]
               (identity (second *msg) :> [*s *p *o *c])
@@ -248,209 +416,61 @@
                                  (local-transform> [(keypath *s) NIL->SET NONE-ELEM (termval *o)] $$subject-types))))
 
                (case> (= *op :del))
-               ;; Delete a quad: physically remove from all indices
-
-               (|hash *s)
-               ;; Check if quad ever existed
-               (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *quad-existed)
-
-               (<<if (some? *quad-existed)
-                     ;; Claim the delete IMMEDIATELY (same task, no partitioner in
-                     ;; between the check and this removal): a duplicate :del of the
-                     ;; same quad later in this microbatch sees the entry gone and
-                     ;; does not double-decrement statistics.
-                     (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time)
-                     (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$quad-tx-time)
-                     (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$quad-tx-time)
-                     (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$quad-tx-time)
-
-                     ;; Remove from all 4 indices, pruning newly-empty containers so
-                     ;; churn workloads don't grow the indices without bound.
-                     (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
-                     (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$spoc)
-                     (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$spoc)
-                     (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$spoc)
-                     ;; Did this delete remove the subject's last triple?
-                     ;; (Sampled on the subject task before hopping away.)
-                     (local-select> [(keypath *s) (view some?)] $$spoc :> *subj-still-exists)
-
-                     (|hash *p)
-                     (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
-                     (local-transform> [(keypath *p *o *s) (if-path (pred empty?) NONE>)] $$posc)
-                     (local-transform> [(keypath *p *o) (if-path (pred empty?) NONE>)] $$posc)
-                     (local-transform> [(keypath *p) (if-path (pred empty?) NONE>)] $$posc)
-
-                     (|hash *o)
-                     (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
-                     (local-transform> [(keypath *o *s *p) (if-path (pred empty?) NONE>)] $$ospc)
-                     (local-transform> [(keypath *o *s) (if-path (pred empty?) NONE>)] $$ospc)
-                     (local-transform> [(keypath *o) (if-path (pred empty?) NONE>)] $$ospc)
-
-                     (|hash *c)
-                     (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
-                     (local-transform> [(keypath *c *s *p) (if-path (pred empty?) NONE>)] $$cspo)
-                     (local-transform> [(keypath *c *s) (if-path (pred empty?) NONE>)] $$cspo)
-                     (local-transform> [(keypath *c) (if-path (pred empty?) NONE>)] $$cspo)
-
-                     ;; Update statistics - decrement counts for deleted triple.
-                     ;; :count read and decrement are adjacent on the predicate task,
-                     ;; so the 1->0 transition (predicate vanishing) is race-free.
-                     (|hash *p)
-                     (local-select> [(keypath *p :count)] $$predicate-stats :> *cur-pred-count)
-                     (identity (= *cur-pred-count 1) :> *pred-vanished)
-                     ;; termval: value already read above — (term ...) would re-read
-                     (dec-floor-zero *cur-pred-count :> *next-pred-count)
-                     (local-transform> [(keypath *p :count) (termval *next-pred-count)] $$predicate-stats)
-
-                     ;; Decrement distinct subjects only when last triple for (pred, subject) removed
-                     (local-select> [(keypath *p *s)] $$pred-subj-count :> *cur-subj-count)
-                     (dec-floor-zero *cur-subj-count :> *next-subj-count)
-                     (local-transform> [(keypath *p *s) (termval *next-subj-count)] $$pred-subj-count)
-                     (<<if (= *cur-subj-count 1)
-                           ;; Last occurrence - decrement distinct count AND cleanup the mapping
-                           (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
-                           (local-transform> [(keypath *p *s) NONE>] $$pred-subj-count))
-
-                     ;; Decrement distinct objects only when last triple for (pred, object) removed
-                     (local-select> [(keypath *p *o)] $$pred-obj-count :> *cur-obj-count)
-                     (dec-floor-zero *cur-obj-count :> *next-obj-count)
-                     (local-transform> [(keypath *p *o) (termval *next-obj-count)] $$pred-obj-count)
-                     (<<if (= *cur-obj-count 1)
-                           ;; Last occurrence - decrement distinct count AND cleanup the mapping
-                           (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
-                           (local-transform> [(keypath *p *o) NONE>] $$pred-obj-count))
-
-                     ;; Update global statistics
-                     (|global)
-                     (local-transform> [(keypath :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
-                     (<<if (not *subj-still-exists)
-                           (local-transform> [(keypath :total-subjects) (nil->val 0) (term dec-floor-zero)] $$global-stats))
-                     (<<if *pred-vanished
-                           (local-transform> [(keypath :total-predicates) (nil->val 0) (term dec-floor-zero)] $$global-stats))
-
-                     ;; --- Materialized View Maintenance (delete) ---
-                     ;; If this is an rdf:type triple, update type views with context-aware cardinality.
-                     ;; Only remove from view when this is the LAST context having this (type, subject) pair.
-                     (<<if (= *p RDF-TYPE-PREDICATE)
-                           ;; *o is the type, *s is the subject
-                           ;; Decrement type->subject occurrence count
-                           (|hash *o)
-                           (local-select> [(keypath *o *s)] $$type-subject-count :> *cur-ts-count)
-                           (dec-floor-zero *cur-ts-count :> *next-ts-count)
-                           (local-transform> [(keypath *o *s) (termval *next-ts-count)] $$type-subject-count)
-                           ;; Only remove from type view if this was the LAST occurrence
-                           (<<if (= *cur-ts-count 1)
-                                 (local-transform> [(keypath *o) (set-elem *s) NONE>] $$type-subjects)
-                                 (local-transform> [(keypath *o) (if-path (pred empty?) NONE>)] $$type-subjects)
-                                 (local-transform> [(keypath *o *s) NONE>] $$type-subject-count))
-                           ;; Decrement subject->type occurrence count (symmetric)
-                           (|hash *s)
-                           (local-select> [(keypath *s *o)] $$subject-type-count :> *cur-st-count)
-                           (dec-floor-zero *cur-st-count :> *next-st-count)
-                           (local-transform> [(keypath *s *o) (termval *next-st-count)] $$subject-type-count)
-                           ;; Only remove from subject-types view if this was the LAST occurrence
-                           (<<if (= *cur-st-count 1)
-                                 (local-transform> [(keypath *s) (set-elem *o) NONE>] $$subject-types)
-                                 (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$subject-types)
-                                 (local-transform> [(keypath *s *o) NONE>] $$subject-type-count))))
+               (delete-quad *s *p *o *c Long/MAX_VALUE)
 
                (case> (= *op :clear-context))
-               ;; Clear all quads in a context. Mode-dependent deletion.
-               ;; Respects last-write-wins: only deletes quads whose creation time <= clear tx-time.
-               ;; 1. Read all (S, P, O) from $$cspo[c]
-               (local-select> [(keypath *c) ALL (collect-one FIRST)
-                               LAST ALL (collect-one FIRST)
-                               LAST ALL] $$cspo {:allow-yield? true}
-                              :> [*s *p *o])
-               ;; 2. Check existing state
-               (|hash *s)
-               (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *quad-creation-time)
-               ;; 3. Apply deletion if quad exists and clear is not older than creation
-               (<<if (and> (some? *quad-creation-time)
-                           (>= *tx-time *quad-creation-time))
-                     ;; Claim the delete atomically with the check (same task): a
-                     ;; duplicate :clear-context or concurrent :del of this quad in
-                     ;; the same microbatch sees the entry gone.
-                     (local-transform> [(keypath *s *p *o *c) NONE>] $$quad-tx-time)
-                     (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$quad-tx-time)
-                     (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$quad-tx-time)
-                     (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$quad-tx-time)
+               ;; Only REGISTER the clear here. Deleting every quad of the graph
+               ;; in this microbatch is unbounded work: past the phase timeout
+               ;; the microbatch fails and retries from the start with the same
+               ;; data, forever, blocking the indexer. The batch block below
+               ;; deletes a bounded slice per microbatch instead.
+               ;; A single :clear-context record is already on c's partition
+               ;; (depot-partition-key); the hop makes that explicit.
+               (|hash *c)
+               (local-select> [(keypath *c)] $$pending-clears :> *pending)
+               (merge-pending-clear *pending *tx-time :> *merged)
+               (local-transform> [(keypath *c) (termval *merged)] $$pending-clears))))
 
-                     ;; Remove from all indices, pruning newly-empty containers
-                     (local-transform> [(keypath *s *p *o) (set-elem *c) NONE>] $$spoc)
-                     (local-transform> [(keypath *s *p *o) (if-path (pred empty?) NONE>)] $$spoc)
-                     (local-transform> [(keypath *s *p) (if-path (pred empty?) NONE>)] $$spoc)
-                     (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$spoc)
-                     (local-select> [(keypath *s) (view some?)] $$spoc :> *subj-still-exists)
-
-                     (|hash *p)
-                     (local-transform> [(keypath *p *o *s) (set-elem *c) NONE>] $$posc)
-                     (local-transform> [(keypath *p *o *s) (if-path (pred empty?) NONE>)] $$posc)
-                     (local-transform> [(keypath *p *o) (if-path (pred empty?) NONE>)] $$posc)
-                     (local-transform> [(keypath *p) (if-path (pred empty?) NONE>)] $$posc)
-
-                     (|hash *o)
-                     (local-transform> [(keypath *o *s *p) (set-elem *c) NONE>] $$ospc)
-                     (local-transform> [(keypath *o *s *p) (if-path (pred empty?) NONE>)] $$ospc)
-                     (local-transform> [(keypath *o *s) (if-path (pred empty?) NONE>)] $$ospc)
-                     (local-transform> [(keypath *o) (if-path (pred empty?) NONE>)] $$ospc)
-
-                     (|hash *c)
-                     (local-transform> [(keypath *c *s *p) (set-elem *o) NONE>] $$cspo)
-                     (local-transform> [(keypath *c *s *p) (if-path (pred empty?) NONE>)] $$cspo)
-                     (local-transform> [(keypath *c *s) (if-path (pred empty?) NONE>)] $$cspo)
-                     (local-transform> [(keypath *c) (if-path (pred empty?) NONE>)] $$cspo)
-
-                     (|hash *p)
-                     (local-select> [(keypath *p :count)] $$predicate-stats :> *cur-pred-count)
-                     (identity (= *cur-pred-count 1) :> *pred-vanished)
-                     ;; termval: value already read above — (term ...) would re-read
-                     (dec-floor-zero *cur-pred-count :> *next-pred-count)
-                     (local-transform> [(keypath *p :count) (termval *next-pred-count)] $$predicate-stats)
-
-                     ;; Decrement distinct subjects only when last triple for (pred, subject) removed
-                     (local-select> [(keypath *p *s)] $$pred-subj-count :> *cur-subj-count)
-                     (dec-floor-zero *cur-subj-count :> *next-subj-count)
-                     (local-transform> [(keypath *p *s) (termval *next-subj-count)] $$pred-subj-count)
-                     (<<if (= *cur-subj-count 1)
-                           ;; Last occurrence - decrement distinct count AND cleanup the mapping
-                           (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
-                           (local-transform> [(keypath *p *s) NONE>] $$pred-subj-count))
-
-                     ;; Decrement distinct objects only when last triple for (pred, object) removed
-                     (local-select> [(keypath *p *o)] $$pred-obj-count :> *cur-obj-count)
-                     (dec-floor-zero *cur-obj-count :> *next-obj-count)
-                     (local-transform> [(keypath *p *o) (termval *next-obj-count)] $$pred-obj-count)
-                     (<<if (= *cur-obj-count 1)
-                           ;; Last occurrence - decrement distinct count AND cleanup the mapping
-                           (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term dec-floor-zero)] $$predicate-stats)
-                           (local-transform> [(keypath *p *o) NONE>] $$pred-obj-count))
-
-                     (|global)
-                     (local-transform> [(keypath :total-triples) (nil->val 0) (term dec-floor-zero)] $$global-stats)
-                     (<<if (not *subj-still-exists)
-                           (local-transform> [(keypath :total-subjects) (nil->val 0) (term dec-floor-zero)] $$global-stats))
-                     (<<if *pred-vanished
-                           (local-transform> [(keypath :total-predicates) (nil->val 0) (term dec-floor-zero)] $$global-stats))
-                     ;; Update type views if this is an rdf:type triple (context-aware cardinality)
-                     (<<if (= *p RDF-TYPE-PREDICATE)
-                           ;; Decrement type->subject occurrence count
-                           (|hash *o)
-                           (local-select> [(keypath *o *s)] $$type-subject-count :> *cur-ts-count)
-                           (dec-floor-zero *cur-ts-count :> *next-ts-count)
-                           (local-transform> [(keypath *o *s) (termval *next-ts-count)] $$type-subject-count)
-                           ;; Only remove from type view if this was the LAST occurrence
-                           (<<if (= *cur-ts-count 1)
-                                 (local-transform> [(keypath *o) (set-elem *s) NONE>] $$type-subjects)
-                                 (local-transform> [(keypath *o) (if-path (pred empty?) NONE>)] $$type-subjects)
-                                 (local-transform> [(keypath *o *s) NONE>] $$type-subject-count))
-                           ;; Decrement subject->type occurrence count (symmetric)
-                           (|hash *s)
-                           (local-select> [(keypath *s *o)] $$subject-type-count :> *cur-st-count)
-                           (dec-floor-zero *cur-st-count :> *next-st-count)
-                           (local-transform> [(keypath *s *o) (termval *next-st-count)] $$subject-type-count)
-                           ;; Only remove from subject-types view if this was the LAST occurrence
-                           (<<if (= *cur-st-count 1)
-                                 (local-transform> [(keypath *s) (set-elem *o) NONE>] $$subject-types)
-                                 (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$subject-types)
-                                 (local-transform> [(keypath *s *o) NONE>] $$subject-type-count))))))))
+             ;; --- Bounded graph clears ---
+             ;; Runs once per microbatch on every task, AFTER the batch block
+             ;; above completed on all tasks, so a clear registered in this
+             ;; microbatch starts here: a graph smaller than the budget is gone
+             ;; by the time the microbatch that carried its clear commits.
+             (<<batch
+              (|all)
+              ;; bound first: a call inside a path's options map is not evaluated
+              (clear-page-subjects :> *page-size)
+              (clear-quads-budget :> *task-budget)
+              (loop<- [*budget *task-budget *after "" :> *gc *clear-tx *slice]
+                      (local-select> [(sorted-map-range-from *after {:max-amt 1 :inclusive? false})
+                                      (subselect ALL)]
+                                     $$pending-clears :> *entries)
+                      (<<if (seq *entries)
+                            (identity (first *entries) :> [*pc {:keys [*tx *cursor]}])
+                            (local-select> [(keypath *pc)
+                                            (sorted-map-range-from *cursor {:max-amt *page-size
+                                                                            :inclusive? false})
+                                            (subselect ALL (collect-one FIRST)
+                                                       LAST ALL (collect-one FIRST)
+                                                       LAST ALL)]
+                                           $$cspo :> *page)
+                            (clear-slice *page *page-size *budget
+                                         :> {:keys [*quads *next-cursor *exhausted?]})
+                            (<<if *exhausted?
+                                  (local-transform> [(keypath *pc) NONE>] $$pending-clears)
+                                  (else>)
+                                  (local-transform> [(keypath *pc :cursor) (termval *next-cursor)] $$pending-clears))
+                            (:> *pc *tx *quads)
+                            (- *budget (count *quads) :> *left)
+                            (<<if (> *left 0)
+                                  (continue> *left (ifexpr *exhausted? *pc *after))
+                                  (else>)
+                                  ;; Budget spent with clears possibly left: wake the
+                                  ;; indexer for the next slice. With no new depot data
+                                  ;; the next microbatch could be up to a minute away.
+                                  ;; The record carries no work, so a duplicate from a
+                                  ;; retried microbatch is harmless.
+                                  (depot-partition-append! *triple-depot [:clear-continue [*pc]] :append-ack))
+                            (else>)))
+              (ops/explode *slice :> [*s *p *o])
+              (delete-quad *s *p *o *gc *clear-tx))))
