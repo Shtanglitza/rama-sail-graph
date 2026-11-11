@@ -264,3 +264,37 @@
   (Thread/sleep 1500)
   (is (settle! #(zero? (pending-clears)))))
 
+;;; ---------------------------------------------------------------------------
+;;; Malformed depot records are dropped, not retried forever
+;;; ---------------------------------------------------------------------------
+;;; A record that throws in the topology fails its microbatch, which Rama
+;;; retries from the start with the same data, forever. The depot accepts any
+;;; object, so the indexer must not let a wrong-shaped record throw.
+
+(deftest test-valid-depot-record
+  (let [q ["<s>" "<p>" "\"o\"" "<g>"]]
+    (is (idx/valid-depot-record? [:add q]))
+    (is (idx/valid-depot-record? [:add q 1000]))
+    (is (idx/valid-depot-record? [:del q nil]))
+    (is (idx/valid-depot-record? [:clear-context [nil nil nil "<g>"] 1000]))
+    (doseq [bad [nil "garbage" [] [:add] [:add nil] [:add (pop q)] [:add (conj q "<x>")]
+                 [:add (assoc q 2 5)] [:add q "not-a-time"] [:add q 1000 :extra]
+                 [:del (assoc q 1 nil)] [:clear-context [nil nil nil nil]]
+                 [:no-such-op q] [:clear-continue ["<g>"]]]]
+      (is (not (idx/valid-depot-record? bad)) (pr-str bad)))))
+
+(deftest test-malformed-records-do-not-block-the-indexer
+  (let [g (unique-iri "malformed-g")
+        good [(unique-iri "malformed-s") (unique-iri "malformed-p") "\"ok\"" g]]
+    (doseq [bad [[:add nil]
+                 [:add ["<http://ex/only-s>" "<http://ex/only-p>"]]
+                 [:add ["<http://ex/s>" "<http://ex/p>" 5 g]]
+                 [:add ["<http://ex/s>" "<http://ex/p>" "\"o\"" g] "not-a-time"]
+                 [:del ["<http://ex/s>" nil nil g]]
+                 [:clear-context ["<http://ex/x>" nil nil nil]]
+                 [:no-such-op ["<http://ex/s>" "<http://ex/p>" "\"o\"" g]]]]
+      (rama/foreign-append! (depot) bad))
+    (rama/foreign-append! (depot) [:add good])
+    (is (wait-until 30000 #(= #{good} (graph-quads g)))
+        "a valid record appended after malformed ones is still indexed")))
+

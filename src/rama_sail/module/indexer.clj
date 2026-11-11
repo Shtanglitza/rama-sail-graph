@@ -4,7 +4,8 @@
    Use these functions from within a defmodule body to set up the core RDF indexing pipeline."
   (:use [com.rpl.rama]
         [com.rpl.rama.path])
-  (:require [com.rpl.rama.ops :as ops]
+  (:require [clojure.tools.logging :as log]
+            [com.rpl.rama.ops :as ops]
             [rama-sail.query.helpers :as qh]
             [rama-sail.sail.serialization :as ser]))
 
@@ -135,6 +136,40 @@
   (declare-pstate mb $$pending-clears {String (fixed-keys-schema {:tx Long :cursor String})})
   ;; Temporal tracking: s -> p -> o -> c -> tx-time
   (declare-pstate mb $$quad-tx-time {String (map-schema String (map-schema String (map-schema String Long {:subindex? true}) {:subindex? true}) {:subindex? true})}))
+
+;; --- Depot record validation ---
+
+(defn valid-depot-record?
+  "True for a record the indexer can apply: `[op [s p o c]]` or
+   `[op [s p o c] tx-time]` with op :add or :del and four string terms, or
+   op :clear-context and a string graph in the fourth position; tx-time is an
+   integer or nil.
+
+   The depot accepts any object, and a record that throws in the topology
+   fails its microbatch, which Rama retries from the start with the same data,
+   forever. So the indexer checks every record with this and drops the rest.
+   Direct depot writers can use it to check records before appending."
+  [record]
+  (and (sequential? record)
+       (<= 2 (count record) 3)
+       (let [[op quad tx-time] record]
+         (and (sequential? quad)
+              (= 4 (count quad))
+              (or (nil? tx-time) (integer? tx-time))
+              (case op
+                (:add :del) (every? string? quad)
+                :clear-context (string? (nth quad 3))
+                false)))))
+
+(defn indexable-record?
+  "valid-depot-record?, logging what is dropped. A [:clear-continue ...] record
+   is the indexer's own wake-up for pending clears and is skipped silently."
+  [record]
+  (cond
+    (valid-depot-record? record) true
+    (and (sequential? record) (= :clear-continue (first record))) false
+    :else (do (log/warn "Indexer dropped a malformed *triple-depot record:" (pr-str record))
+              false)))
 
 ;; --- Bounded graph clears ---
 
@@ -308,9 +343,10 @@
              ;; slices below run after every record of this microbatch.
              (<<batch
              (%microbatch :> *msg)
+             ;; Drops malformed records (they would throw and block the indexer
+             ;; forever) and the [:clear-continue ...] wake-ups appended below.
+             (filter> (indexable-record? *msg))
              (first *msg :> *op)
-             ;; [:clear-continue ...] only wakes the indexer (see below)
-             (filter> (contains? #{:add :del :clear-context} *op))
 
              (<<cond
               (default>)

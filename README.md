@@ -142,7 +142,9 @@ Server flags:
   (com.rpl.rama.test/launch-module! ipc core/RdfStorageModule {:tasks 4 :threads 2})
   (let [module-name (rama/get-module-name core/RdfStorageModule)
         depot (rama/foreign-depot ipc module-name "*triple-depot")]
-    ;; Add triples
+    ;; Add triples. A record is [op [s p o c]] or [op [s p o c] tx-time-millis], op :add / :del
+    ;; (four string terms) or :clear-context (graph in the fourth position). The indexer drops
+    ;; anything else with a warning; core/valid-depot-record? checks a record before appending.
     (rama/foreign-append! depot [:add ["<alice>" "<knows>" "<bob>" "::rama-internal::default-graph"]])
     ;; Query
     (rama/foreign-invoke-query

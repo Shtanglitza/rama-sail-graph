@@ -78,6 +78,11 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- **A malformed depot record no longer takes the indexer down.** The depot accepts any object, and a
+  wrong-shaped `*triple-depot` record (missing terms, a non-string term, a non-integer tx-time) threw
+  in the indexer, which crashed the worker and was retried forever. The indexer now drops such
+  records with a warning. `rama-sail.core/valid-depot-record?` lets direct depot writers check a
+  record before appending it.
 - **Clearing a large graph no longer freezes the indexer.** `CLEAR GRAPH`, `DROP GRAPH`, `clear()`
   and `:clear-context` depot records deleted every quad of the graph in one microbatch. A microbatch
   that runs past Rama's phase timeout is retried from the start with the same data, so clearing a
