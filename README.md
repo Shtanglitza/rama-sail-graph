@@ -143,8 +143,9 @@ Server flags:
   (let [module-name (rama/get-module-name core/RdfStorageModule)
         depot (rama/foreign-depot ipc module-name "*triple-depot")]
     ;; Add triples. A record is [op [s p o c]] or [op [s p o c] tx-time-millis], op :add / :del
-    ;; (four string terms) or :clear-context (graph in the fourth position). The indexer drops
-    ;; anything else with a warning; core/valid-depot-record? checks a record before appending.
+    ;; (four string terms) or :clear-context (graph in the fourth position), or
+    ;; [:commit [record ...]] to have up to 10,000 of them accepted all-or-nothing. The indexer
+    ;; drops anything else with a warning; core/valid-depot-record? checks a record before appending.
     (rama/foreign-append! depot [:add ["<alice>" "<knows>" "<bob>" "::rama-internal::default-graph"]])
     ;; Query
     (rama/foreign-invoke-query
@@ -211,6 +212,8 @@ Rama module with quad-based storage using four complementary indices. The module
 | `$$cspo` | C -> S -> P -> {O} | Named graph queries |
 
 Deletion uses physical index removal — deleted quads are removed from all four indices immediately. Adds and deletes are idempotent (set semantics for indices, `$$quad-tx-time` tracking for statistics correctness).
+
+A SAIL `commit()` appends the whole commit as one `[:commit [op ...]]` depot record (one per 5,000 operations for larger commits), so it is accepted all-or-nothing in one round trip. All commit records go to a single depot partition, the commit log; the indexer stores them in `$$commit-queue` and applies up to `commit-ops-per-microbatch` operations (default 4,000) per microbatch, oldest commit first, so commits take effect in append order. A commit within that budget is fully applied in the microbatch that receives it; a larger one becomes visible over several microbatches, and `pending-commit-count` returns 0 once every commit is applied. Single-operation records appended directly to the depot are applied immediately and are not ordered against queued commits.
 
 Clearing a graph (`CLEAR GRAPH`, `DROP GRAPH`, `clear()`, or a `:clear-context` depot record) is applied in bounded slices: the indexer registers the clear in `$$pending-clears` and deletes up to `clear-quads-per-microbatch` quads (default 1,000) per task per microbatch until the graph is empty. A small graph is still gone in the microbatch that carries its clear. A large one empties over several microbatches, during which readers see part of it; the `pending-clear-count` query topology returns 0 once every clear is fully applied. The bound exists because a microbatch that runs past Rama's phase timeout is retried from the start with the same data, so an unbounded clear of a large graph would block the indexer.
 

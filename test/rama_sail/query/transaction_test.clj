@@ -40,19 +40,21 @@
    so far. wait-for-microbatch-processed-count counts DEPOT RECORDS (not
    iterations), so the exact target is the sum of the depot partitions'
    end-offsets — no manual counter to drift when a commit appends several
-   records. A graph clear is applied in bounded slices over several
-   microbatches (the indexer appends a wake-up record per slice), so the
-   barrier repeats until no clear is pending."
+   records. Queued commits and graph clears are applied in bounded slices over
+   several microbatches (the indexer appends a wake-up record per slice), so
+   the barrier repeats until neither is pending."
   []
   (let [depot (rama/foreign-depot *ipc* module-name "*triple-depot")
         num-partitions (:num-partitions (rama/foreign-object-info depot))
+        pending-commits (rama/foreign-query *ipc* module-name "pending-commit-count")
         pending-clears (rama/foreign-query *ipc* module-name "pending-clear-count")]
     (loop []
       (rtest/wait-for-microbatch-processed-count
        *ipc* module-name "indexer"
        (reduce + (for [part (range num-partitions)]
                    (:end-offset (rama/foreign-depot-partition-info depot part)))))
-      (when (pos? (rama/foreign-invoke-query pending-clears))
+      (when (or (pos? (rama/foreign-invoke-query pending-commits))
+                (pos? (rama/foreign-invoke-query pending-clears)))
         (Thread/sleep 20)
         (recur)))))
 
@@ -875,5 +877,48 @@
             (.add conn (.createIRI VF (unique-iri "sliced-clear-after")) p (.createLiteral VF "after") in-g)
             (.commit conn)
             (is (= 1 (count-statements conn nil nil nil [g])))))
+        (finally (.shutDown repo))))))
+
+(deftest test-commit-is-sent-as-commit-records
+  (let [stamped (vec (for [i (range 12)] [:add [(str "<s" i ">") "<p>" "<o>" "<g>"] 1000]))
+        records @#'rsail/commit-depot-records]
+    (testing "one :commit record per chunk, ops in order"
+      (is (= [[:commit stamped]] (records stamped true 5000)))
+      (is (= [[:commit (subvec stamped 0 5)] [:commit (subvec stamped 5 10)] [:commit (subvec stamped 10 12)]]
+             (records stamped true 5))))
+    (testing "a module without commit records gets one record per op"
+      (is (= stamped (records stamped false 5))))))
+
+(deftest test-large-commit-in-chunks-and-slices
+  ;; 60 ops with 25 per :commit record and 7 ops applied per microbatch: three
+  ;; records, applied over about nine microbatches. :sync-commits returns only
+  ;; when all of it is visible.
+  (with-redefs [idx/commit-ops-per-microbatch 7]
+    (let [repo (doto (SailRepository. (rsail/create-rama-sail *ipc* module-name {:sync-commits true
+                                                                                 :commit-chunk-size 25}))
+                 (.init))]
+      (try
+        (with-open [^SailRepositoryConnection conn (.getConnection repo)]
+          (let [g (.createIRI VF (unique-iri "chunked-g"))
+                p (.createIRI VF "http://ex/chunked-p")
+                in-g (into-array Resource [g])
+                subj (vec (for [i (range 60)] (.createIRI VF (unique-iri (str "chunked-s" i)))))]
+            (.begin conn)
+            (doseq [s subj] (.add conn s p (.createLiteral VF "v") in-g))
+            (.commit conn)
+            (is (= 60 (count-statements conn nil nil nil [g])))
+
+            (testing "a following commit that removes half and clears nothing"
+              (.begin conn)
+              (doseq [s (take 30 subj)] (.remove conn s p nil in-g))
+              (.commit conn)
+              (is (= 30 (count-statements conn nil nil nil [g]))))
+
+            (testing "clear and re-add in one commit"
+              (.begin conn)
+              (.clear conn in-g)
+              (doseq [s (take 40 subj)] (.add conn s p (.createLiteral VF "again") in-g))
+              (.commit conn)
+              (is (= 40 (count-statements conn nil nil nil [g]))))))
         (finally (.shutDown repo))))))
 

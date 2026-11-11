@@ -349,6 +349,16 @@
                     (|origin)
                     (aggs/+sum *n :> *count)))
 
+(defn pending-commit-count-query-topology
+  "Number of :commit records the indexer has queued but not finished applying.
+   Its presence also tells a client that the module accepts :commit records."
+  [topologies]
+  (<<query-topology topologies "pending-commit-count" [:> *count]
+                    (|all)
+                    (local-select> [(subselect MAP-KEYS) (view count)] $$commit-queue :> *n)
+                    (|origin)
+                    (aggs/+sum *n :> *count)))
+
 ;; --- COUNT STATEMENTS ---
 
 (defn count-statements-query-topology [topologies]
@@ -713,6 +723,7 @@
   (order-query-topology topologies)
   (list-contexts-query-topology topologies)
   (pending-clear-count-query-topology topologies)
+  (pending-commit-count-query-topology topologies)
   (count-statements-query-topology topologies)
   (get-predicate-stats-query-topology topologies)
   (get-all-predicate-stats-query-topology topologies)

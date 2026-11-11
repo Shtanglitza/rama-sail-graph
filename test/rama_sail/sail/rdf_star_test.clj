@@ -5,6 +5,7 @@
   (:require [clojure.test :refer :all]
             [com.rpl.rama :as rama]
             [com.rpl.rama.test :as rtest]
+            [rama-sail.test-helpers :as th]
             [rama-sail.core :refer [RdfStorageModule]]
             [rama-sail.sail.adapter :as rsail])
   (:import (org.eclipse.rdf4j.model Resource)
@@ -49,7 +50,7 @@
         (.add conn triple-term asserted-by carol (into-array Resource []))
         (.commit conn)
         ;; 3 depot appends (1 base + 2 annotations)
-        (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 3)
+        (th/wait-indexed! ipc module-name)
 
         (testing "Query annotation by known triple term subject"
           (let [sparql "SELECT ?pred ?val WHERE {
@@ -103,7 +104,7 @@
         (.add conn fact2 source linkedin (into-array Resource []))
         (.commit conn)
         ;; 4 depot appends
-        (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 4)
+        (th/wait-indexed! ipc module-name)
 
         (testing "Find all facts from a specific source"
           (let [sparql "SELECT ?s ?o WHERE {
@@ -154,7 +155,7 @@
                   (into-array Resource []))))
         (.commit conn)
         ;; 6 depot appends (3 base + 3 annotations)
-        (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 6)
+        (th/wait-indexed! ipc module-name)
 
         (testing "Filter by confidence > 0.8"
           (let [sparql "SELECT ?s ?o ?conf WHERE {

@@ -9,6 +9,32 @@
            [org.eclipse.rdf4j.repository.sail SailRepository]))
 
 ;;; ---------------------------------------------------------------------------
+;;; Indexer barrier
+;;; ---------------------------------------------------------------------------
+
+(defn wait-indexed!
+  "Block until the indexer has applied everything appended to *triple-depot so
+   far. wait-for-microbatch-processed-count counts depot RECORDS, and a SAIL
+   commit is one :commit record however many statements it holds, so the
+   target is the sum of the depot partitions' end-offsets, never a count of
+   statements. Queued commits and graph clears are applied in bounded slices
+   over several microbatches, so the barrier repeats until neither is pending."
+  [ipc module-name]
+  (let [depot (rama/foreign-depot ipc module-name "*triple-depot")
+        num-partitions (:num-partitions (rama/foreign-object-info depot))
+        pending-commits (rama/foreign-query ipc module-name "pending-commit-count")
+        pending-clears (rama/foreign-query ipc module-name "pending-clear-count")]
+    (loop []
+      (rtest/wait-for-microbatch-processed-count
+       ipc module-name "indexer"
+       (reduce + (for [part (range num-partitions)]
+                   (:end-offset (rama/foreign-depot-partition-info depot part)))))
+      (when (or (pos? (rama/foreign-invoke-query pending-commits))
+                (pos? (rama/foreign-invoke-query pending-clears)))
+        (Thread/sleep 20)
+        (recur)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Module Test Fixtures
 ;;; ---------------------------------------------------------------------------
 

@@ -39,6 +39,21 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are shrunk to a minimal query. `RANDOM_QUERY_SEED` / `RANDOM_QUERY_COUNT` override the run.
 
 ### Changed
+- **A SAIL commit is one depot record.** `commit()` appended one record per operation, one network
+  round trip each, and a failure partway left half a commit in the store. It now appends the whole
+  commit as a single `[:commit [op ...]]` record (several for commits over 5,000 operations,
+  `:commit-chunk-size`), so a commit of up to that size is accepted all-or-nothing. The indexer
+  stores it in a new `$$commit-queue` PState and applies up to 4,000 operations per microbatch
+  (`commit-ops-per-microbatch`), oldest commit first: every commit record goes to one depot
+  partition, so commits take effect in the order they were appended. On a local cluster a
+  20,000-statement commit went from 597 s to return (599 s until visible) to 0.24 s to return (21 s
+  until visible). Direct per-quad depot appends are unchanged (59K load 69.1 s vs 70.6 s).
+  Readers can see part of a large commit while it is applied; the new `pending-commit-count` query
+  topology returns 0 when every commit is fully applied, and `:sync-commits` waits for it.
+  **Deploy order is free:** the SAIL sends commit records only when the module has that query
+  topology and otherwise appends one record per operation as before. Tests that waited for "N
+  records processed" after an N-statement commit must use depot offsets instead
+  (`test-helpers/wait-indexed!`).
 - **`LIMIT` over property lookups stops reading early.** The planner adds cheaper attempts that
   truncate the driving pattern, and the executor falls back to the full plan when an attempt yields
   too few rows, so results stay exact. On BSBM with 59K triples the median query mix time fell from

@@ -131,6 +131,9 @@
   ;; Context-aware cardinality tracking for type views
   (declare-pstate mb $$type-subject-count {String (map-schema String Long {:subindex? true})})
   (declare-pstate mb $$subject-type-count {String (map-schema String Long {:subindex? true})})
+  ;; Commits waiting to be applied, in arrival order: seq -> {:ops [quad-op ...], :pos next op}.
+  ;; All on the task of the commit-log depot partition; empty when idle.
+  (declare-pstate mb $$commit-queue {Long (fixed-keys-schema {:ops Object :pos Long})})
   ;; Graph clears in progress: c -> {:tx clear tx-time, :cursor last subject cleared}.
   ;; Lives on the graph's task (where $$cspo holds the graph); empty when idle.
   (declare-pstate mb $$pending-clears {String (fixed-keys-schema {:tx Long :cursor String})})
@@ -139,16 +142,10 @@
 
 ;; --- Depot record validation ---
 
-(defn valid-depot-record?
-  "True for a record the indexer can apply: `[op [s p o c]]` or
-   `[op [s p o c] tx-time]` with op :add or :del and four string terms, or
-   op :clear-context and a string graph in the fourth position; tx-time is an
-   integer or nil.
-
-   The depot accepts any object, and a record that throws in the topology
-   fails its microbatch, which Rama retries from the start with the same data,
-   forever. So the indexer checks every record with this and drops the rest.
-   Direct depot writers can use it to check records before appending."
+(defn valid-quad-op?
+  "True for one quad operation: `[op [s p o c]]` or `[op [s p o c] tx-time]`
+   with op :add or :del and four string terms, or op :clear-context and a
+   string graph in the fourth position; tx-time is an integer or nil."
   [record]
   (and (sequential? record)
        (<= 2 (count record) 3)
@@ -161,15 +158,74 @@
                 :clear-context (string? (nth quad 3))
                 false)))))
 
+(def max-commit-ops
+  "Most quad operations the indexer accepts in one :commit record. Queueing a
+   commit is one PState write of all its ops, which must stay small work for
+   one microbatch. Writers split larger commits into several records."
+  10000)
+
+(defn valid-depot-record?
+  "True for a record the indexer can apply: one quad operation (see
+   valid-quad-op?), or `[:commit [quad-op ...]]` holding 1 to max-commit-ops
+   valid quad operations (one SAIL commit, queued and applied in order).
+
+   The depot accepts any object, and a record that throws in the topology
+   fails its microbatch, which Rama retries from the start with the same data,
+   forever. So the indexer checks every record with this and drops the rest.
+   Direct depot writers can use it to check records before appending."
+  [record]
+  (or (valid-quad-op? record)
+      (and (sequential? record)
+           (= 2 (count record))
+           (= :commit (first record))
+           (let [ops (second record)]
+             (and (sequential? ops)
+                  (<= 1 (count ops) max-commit-ops)
+                  (every? valid-quad-op? ops))))))
+
 (defn indexable-record?
-  "valid-depot-record?, logging what is dropped. A [:clear-continue ...] record
-   is the indexer's own wake-up for pending clears and is skipped silently."
+  "valid-depot-record?, logging what is dropped. A [:clear-continue ...]
+   or [:commit-continue ...] record is the indexer's own wake-up for pending
+   work and is skipped silently."
   [record]
   (cond
     (valid-depot-record? record) true
-    (and (sequential? record) (= :clear-continue (first record))) false
+    (and (sequential? record) (#{:clear-continue :commit-continue} (first record))) false
     :else (do (log/warn "Indexer dropped a malformed *triple-depot record:" (pr-str record))
               false)))
+
+;; --- Commit queue ---
+;; A :commit record carries a whole SAIL commit. Applying it inline would be
+;; unbounded work for one microbatch (see graph clears below), so it is queued
+;; in $$commit-queue and applied a bounded number of ops per microbatch. All
+;; :commit records go to one depot partition (core/depot-partition-key), so
+;; the queue is the arrival order of commits and they are applied in it.
+
+(def commit-ops-per-microbatch
+  "Most queued commit ops applied in one microbatch. Commits are applied from
+   one task, so this is the whole cluster's share, about what the depot's
+   per-partition record limit admits across four partitions."
+  4000)
+
+(defn commit-ops-budget [] commit-ops-per-microbatch)
+
+(defn next-commit-seq
+  "Queue key for a new commit, after `last-keys` (the last key, if any)."
+  [last-keys]
+  (if-let [k (first last-keys)] (inc k) 0))
+
+(defn commit-slice
+  "Next ops of a queued commit from position `pos`, at most `budget`."
+  [ops pos budget]
+  (let [end (min (count ops) (+ pos (max budget 0)))]
+    {:part (subvec (vec ops) pos end)
+     :next-pos end
+     :done? (= end (count ops))}))
+
+(defn quad-op-parts
+  "[s p o c tx-time] of a quad op; an op without a tx-time gets the current time."
+  [[_op [s p o c] tx-time]]
+  [s p o c (or tx-time (System/currentTimeMillis))])
 
 ;; --- Bounded graph clears ---
 
@@ -329,148 +385,203 @@
                       (local-transform> [(keypath *s) (if-path (pred empty?) NONE>)] $$subject-types)
                       (local-transform> [(keypath *s *o) NONE>] $$subject-type-count))))))
 
+(deframaop apply-quad-op
+  "Applies one quad operation (:add, :del or :clear-context), whether it came
+   as its own depot record or from a queued commit. Emits nothing."
+  [*op *s *p *o *c *tx-time]
+  ;; Module PStates are not in scope in a deframaop: resolve them by name on
+  ;; whichever task the code is running on.
+  (<<with-substitutions
+   [$$cspo (this-module-pobject-task-global "$$cspo")
+    $$global-stats (this-module-pobject-task-global "$$global-stats")
+    $$ospc (this-module-pobject-task-global "$$ospc")
+    $$pending-clears (this-module-pobject-task-global "$$pending-clears")
+    $$posc (this-module-pobject-task-global "$$posc")
+    $$pred-obj-count (this-module-pobject-task-global "$$pred-obj-count")
+    $$pred-subj-count (this-module-pobject-task-global "$$pred-subj-count")
+    $$predicate-stats (this-module-pobject-task-global "$$predicate-stats")
+    $$quad-tx-time (this-module-pobject-task-global "$$quad-tx-time")
+    $$spoc (this-module-pobject-task-global "$$spoc")
+    $$subject-type-count (this-module-pobject-task-global "$$subject-type-count")
+    $$subject-types (this-module-pobject-task-global "$$subject-types")
+    $$type-subject-count (this-module-pobject-task-global "$$type-subject-count")
+    $$type-subjects (this-module-pobject-task-global "$$type-subjects")]
+    (<<cond
+     (case> (= *op :add))
+     ;; Check if this quad already exists (for idempotent stats tracking)
+     (|hash *s)
+     (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *existing-tx-time)
+     ;; Quad is becoming visible iff it doesn't already exist
+     (identity (nil? *existing-tx-time) :> *becoming-visible)
+
+     ;; Claim visibility IMMEDIATELY, on the same task as the check with
+     ;; no partitioner in between: ops between partitioners run atomically
+     ;; per event, so a duplicate :add of the same quad later in this
+     ;; microbatch observes the entry and is NOT "becoming visible".
+     ;; (Previously the write happened 4 hops later, so concurrent
+     ;; duplicates each saw nil and permanently double-counted stats.)
+     ;;
+     ;; A re-add of an already-visible quad must still advance its
+     ;; creation stamp to max(existing, tx): a :clear-context of the same
+     ;; context (different partition, so unordered relative to this add
+     ;; within a microbatch) deletes iff clear-tx >= creation-tx. Without
+     ;; the refresh, "CLEAR GRAPH g; re-INSERT unchanged quads into g"
+     ;; deleted those quads whenever the add happened to run first.
+     ;; Existing stamp already read above -> termval is a pure write.
+     (<<if (or> *becoming-visible (> *tx-time *existing-tx-time))
+           (local-transform> [(keypath *s *p *o *c) (termval *tx-time)] $$quad-tx-time)
+           (else>))
+
+     ;; Subject visibility must be sampled BEFORE the $$spoc insert on
+     ;; this same task: a brand-new subject means :total-subjects grows.
+     (local-select> [(keypath *s) (view some?)] $$spoc :> *subj-existed)
+     (new-subject? *becoming-visible *subj-existed :> *new-subject)
+
+     ;; Update indices (idempotent - set semantics)
+     (local-transform> [(keypath *s *p *o) NIL->SET NONE-ELEM (termval *c)] $$spoc)
+     (|hash *p) (local-transform> [(keypath *p *o *s) NIL->SET NONE-ELEM (termval *c)] $$posc)
+     (|hash *o) (local-transform> [(keypath *o *s *p) NIL->SET NONE-ELEM (termval *c)] $$ospc)
+     (|hash *c) (local-transform> [(keypath *c *s *p) NIL->SET NONE-ELEM (termval *o)] $$cspo)
+
+     ;; Only update statistics if quad is BECOMING VISIBLE (not already visible)
+     ;; This ensures idempotent adds don't inflate counts
+     (<<if *becoming-visible
+           ;; Update statistics with accurate distinct tracking.
+           ;; The :count read and increment are adjacent on the predicate
+           ;; task, so the 0->1 transition (new predicate) is race-free.
+           (|hash *p)
+           (local-select> [(keypath *p :count)] $$predicate-stats :> *prev-pred-count)
+           (nil-or-zero? *prev-pred-count :> *new-predicate)
+           ;; termval: value already read above — (term inc) would re-read
+           (inc-or-init *prev-pred-count :> *next-pred-count)
+           (local-transform> [(keypath *p :count) (termval *next-pred-count)] $$predicate-stats)
+
+           ;; Track distinct subjects: increment only when first triple for (pred, subject)
+           (local-select> [(keypath *p *s)] $$pred-subj-count :> *prev-subj-count)
+           (inc-or-init *prev-subj-count :> *next-subj-count)
+           (local-transform> [(keypath *p *s) (termval *next-subj-count)] $$pred-subj-count)
+           (<<if (nil? *prev-subj-count)
+                 (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term inc)] $$predicate-stats))
+
+           ;; Track distinct objects: increment only when first triple for (pred, object)
+           (local-select> [(keypath *p *o)] $$pred-obj-count :> *prev-obj-count)
+           (inc-or-init *prev-obj-count :> *next-obj-count)
+           (local-transform> [(keypath *p *o) (termval *next-obj-count)] $$pred-obj-count)
+           (<<if (nil? *prev-obj-count)
+                 (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term inc)] $$predicate-stats))
+
+           ;; Update global statistics (single global partition)
+           (|global)
+           (local-transform> [(keypath :total-triples) (nil->val 0) (term inc)] $$global-stats)
+           (<<if *new-subject
+                 (local-transform> [(keypath :total-subjects) (nil->val 0) (term inc)] $$global-stats))
+           (<<if *new-predicate
+                 (local-transform> [(keypath :total-predicates) (nil->val 0) (term inc)] $$global-stats))
+
+           ;; --- Materialized View Maintenance (add) ---
+           ;; If this is an rdf:type triple, update type views with context-aware cardinality.
+           (<<if (= *p RDF-TYPE-PREDICATE)
+                 ;; *o is the type, *s is the subject
+                 ;; Track type->subject occurrence count
+                 (|hash *o)
+                 (local-select> [(keypath *o *s)] $$type-subject-count :> *prev-ts-count)
+                 (inc-or-init *prev-ts-count :> *next-ts-count)
+                 (local-transform> [(keypath *o *s) (termval *next-ts-count)] $$type-subject-count)
+                 ;; Only add to type view if this is the FIRST occurrence
+                 (<<if (nil? *prev-ts-count)
+                       (local-transform> [(keypath *o) NIL->SET NONE-ELEM (termval *s)] $$type-subjects))
+                 ;; Track subject->type occurrence count (symmetric)
+                 (|hash *s)
+                 (local-select> [(keypath *s *o)] $$subject-type-count :> *prev-st-count)
+                 (inc-or-init *prev-st-count :> *next-st-count)
+                 (local-transform> [(keypath *s *o) (termval *next-st-count)] $$subject-type-count)
+                 ;; Only add to subject-types view if this is the FIRST occurrence
+                 (<<if (nil? *prev-st-count)
+                       (local-transform> [(keypath *s) NIL->SET NONE-ELEM (termval *o)] $$subject-types))))
+
+     (case> (= *op :del))
+     (delete-quad *s *p *o *c Long/MAX_VALUE)
+
+     (case> (= *op :clear-context))
+     ;; Only REGISTER the clear here. Deleting every quad of the graph
+     ;; in this microbatch is unbounded work: past the phase timeout
+     ;; the microbatch fails and retries from the start with the same
+     ;; data, forever, blocking the indexer. The batch block below
+     ;; deletes a bounded slice per microbatch instead.
+     ;; A single :clear-context record is already on c's partition
+     ;; (depot-partition-key); the hop makes that explicit.
+     (|hash *c)
+     (local-select> [(keypath *c)] $$pending-clears :> *pending)
+     (merge-pending-clear *pending *tx-time :> *merged)
+     (local-transform> [(keypath *c) (termval *merged)] $$pending-clears))))
+
 (defn rdf-indexer-sources
   "Wires up the core RDF indexer ETL on microbatch topology `mb`.
-   Handles :add, :del, and :clear-context operations from *triple-depot. A
-   graph clear is registered in $$pending-clears and applied in bounded slices,
-   one per microbatch.
+   Handles :add, :del, and :clear-context operations from *triple-depot, sent
+   one per record or as a :commit record. Commits ($$commit-queue) and graph
+   clears ($$pending-clears) are applied in bounded slices, one per microbatch.
    Requires all PStates from declare-rdf-index-pstates to be declared on `mb`."
   [mb]
   (<<sources mb
              (source> *triple-depot :> %microbatch)
              ;; --- Depot records ---
-             ;; Format: [op [s p o c] tx-time]. A batch block so that the clear
-             ;; slices below run after every record of this microbatch.
+             ;; [op [s p o c] tx-time] is applied here; [:commit [quad-op ...]] is
+             ;; queued. A batch block so that the batches below run after every
+             ;; record of this microbatch.
              (<<batch
-             (%microbatch :> *msg)
-             ;; Drops malformed records (they would throw and block the indexer
-             ;; forever) and the [:clear-continue ...] wake-ups appended below.
-             (filter> (indexable-record? *msg))
-             (first *msg :> *op)
-
-             (<<cond
-              (default>)
-              ;; Format: [op [s p o c] tx-time]
-              (identity (second *msg) :> [*s *p *o *c])
-              (identity (nth *msg 2 nil) :> *raw-tx-time)
-              (<<if (nil? *raw-tx-time)
-                    (identity (System/currentTimeMillis) :> *tx-time)
+              (%microbatch :> *msg)
+              ;; Drops malformed records (they would throw and block the indexer
+              ;; forever) and the wake-up records appended below.
+              (filter> (indexable-record? *msg))
+              (first *msg :> *op)
+              (<<if (= *op :commit)
+                    ;; Queue the commit behind those already waiting. Reads see
+                    ;; this microbatch's earlier writes, so two commits in one
+                    ;; microbatch get consecutive keys.
+                    (local-select> [(sorted-map-range-to-end 1) (subselect MAP-KEYS)]
+                                   $$commit-queue :> *last-keys)
+                    (next-commit-seq *last-keys :> *seq)
+                    (second *msg :> *commit-ops)
+                    (local-transform> [(keypath *seq) (termval {:ops *commit-ops :pos 0})] $$commit-queue)
                     (else>)
-                    (identity *raw-tx-time :> *tx-time))
+                    (quad-op-parts *msg :> [*s *p *o *c *tx-time])
+                    (apply-quad-op *op *s *p *o *c *tx-time)))
 
-              (<<cond
-               (case> (= *op :add))
-               ;; Check if this quad already exists (for idempotent stats tracking)
-               (|hash *s)
-               (local-select> [(keypath *s *p *o *c)] $$quad-tx-time :> *existing-tx-time)
-               ;; Quad is becoming visible iff it doesn't already exist
-               (identity (nil? *existing-tx-time) :> *becoming-visible)
-
-               ;; Claim visibility IMMEDIATELY, on the same task as the check with
-               ;; no partitioner in between: ops between partitioners run atomically
-               ;; per event, so a duplicate :add of the same quad later in this
-               ;; microbatch observes the entry and is NOT "becoming visible".
-               ;; (Previously the write happened 4 hops later, so concurrent
-               ;; duplicates each saw nil and permanently double-counted stats.)
-               ;;
-               ;; A re-add of an already-visible quad must still advance its
-               ;; creation stamp to max(existing, tx): a :clear-context of the same
-               ;; context (different partition, so unordered relative to this add
-               ;; within a microbatch) deletes iff clear-tx >= creation-tx. Without
-               ;; the refresh, "CLEAR GRAPH g; re-INSERT unchanged quads into g"
-               ;; deleted those quads whenever the add happened to run first.
-               ;; Existing stamp already read above -> termval is a pure write.
-               (<<if (or> *becoming-visible (> *tx-time *existing-tx-time))
-                     (local-transform> [(keypath *s *p *o *c) (termval *tx-time)] $$quad-tx-time)
-                     (else>))
-
-               ;; Subject visibility must be sampled BEFORE the $$spoc insert on
-               ;; this same task: a brand-new subject means :total-subjects grows.
-               (local-select> [(keypath *s) (view some?)] $$spoc :> *subj-existed)
-               (new-subject? *becoming-visible *subj-existed :> *new-subject)
-
-               ;; Update indices (idempotent - set semantics)
-               (local-transform> [(keypath *s *p *o) NIL->SET NONE-ELEM (termval *c)] $$spoc)
-               (|hash *p) (local-transform> [(keypath *p *o *s) NIL->SET NONE-ELEM (termval *c)] $$posc)
-               (|hash *o) (local-transform> [(keypath *o *s *p) NIL->SET NONE-ELEM (termval *c)] $$ospc)
-               (|hash *c) (local-transform> [(keypath *c *s *p) NIL->SET NONE-ELEM (termval *o)] $$cspo)
-
-               ;; Only update statistics if quad is BECOMING VISIBLE (not already visible)
-               ;; This ensures idempotent adds don't inflate counts
-               (<<if *becoming-visible
-                     ;; Update statistics with accurate distinct tracking.
-                     ;; The :count read and increment are adjacent on the predicate
-                     ;; task, so the 0->1 transition (new predicate) is race-free.
-                     (|hash *p)
-                     (local-select> [(keypath *p :count)] $$predicate-stats :> *prev-pred-count)
-                     (nil-or-zero? *prev-pred-count :> *new-predicate)
-                     ;; termval: value already read above — (term inc) would re-read
-                     (inc-or-init *prev-pred-count :> *next-pred-count)
-                     (local-transform> [(keypath *p :count) (termval *next-pred-count)] $$predicate-stats)
-
-                     ;; Track distinct subjects: increment only when first triple for (pred, subject)
-                     (local-select> [(keypath *p *s)] $$pred-subj-count :> *prev-subj-count)
-                     (inc-or-init *prev-subj-count :> *next-subj-count)
-                     (local-transform> [(keypath *p *s) (termval *next-subj-count)] $$pred-subj-count)
-                     (<<if (nil? *prev-subj-count)
-                           (local-transform> [(keypath *p :distinct-subjects) (nil->val 0) (term inc)] $$predicate-stats))
-
-                     ;; Track distinct objects: increment only when first triple for (pred, object)
-                     (local-select> [(keypath *p *o)] $$pred-obj-count :> *prev-obj-count)
-                     (inc-or-init *prev-obj-count :> *next-obj-count)
-                     (local-transform> [(keypath *p *o) (termval *next-obj-count)] $$pred-obj-count)
-                     (<<if (nil? *prev-obj-count)
-                           (local-transform> [(keypath *p :distinct-objects) (nil->val 0) (term inc)] $$predicate-stats))
-
-                     ;; Update global statistics (single global partition)
-                     (|global)
-                     (local-transform> [(keypath :total-triples) (nil->val 0) (term inc)] $$global-stats)
-                     (<<if *new-subject
-                           (local-transform> [(keypath :total-subjects) (nil->val 0) (term inc)] $$global-stats))
-                     (<<if *new-predicate
-                           (local-transform> [(keypath :total-predicates) (nil->val 0) (term inc)] $$global-stats))
-
-                     ;; --- Materialized View Maintenance (add) ---
-                     ;; If this is an rdf:type triple, update type views with context-aware cardinality.
-                     (<<if (= *p RDF-TYPE-PREDICATE)
-                           ;; *o is the type, *s is the subject
-                           ;; Track type->subject occurrence count
-                           (|hash *o)
-                           (local-select> [(keypath *o *s)] $$type-subject-count :> *prev-ts-count)
-                           (inc-or-init *prev-ts-count :> *next-ts-count)
-                           (local-transform> [(keypath *o *s) (termval *next-ts-count)] $$type-subject-count)
-                           ;; Only add to type view if this is the FIRST occurrence
-                           (<<if (nil? *prev-ts-count)
-                                 (local-transform> [(keypath *o) NIL->SET NONE-ELEM (termval *s)] $$type-subjects))
-                           ;; Track subject->type occurrence count (symmetric)
-                           (|hash *s)
-                           (local-select> [(keypath *s *o)] $$subject-type-count :> *prev-st-count)
-                           (inc-or-init *prev-st-count :> *next-st-count)
-                           (local-transform> [(keypath *s *o) (termval *next-st-count)] $$subject-type-count)
-                           ;; Only add to subject-types view if this is the FIRST occurrence
-                           (<<if (nil? *prev-st-count)
-                                 (local-transform> [(keypath *s) NIL->SET NONE-ELEM (termval *o)] $$subject-types))))
-
-               (case> (= *op :del))
-               (delete-quad *s *p *o *c Long/MAX_VALUE)
-
-               (case> (= *op :clear-context))
-               ;; Only REGISTER the clear here. Deleting every quad of the graph
-               ;; in this microbatch is unbounded work: past the phase timeout
-               ;; the microbatch fails and retries from the start with the same
-               ;; data, forever, blocking the indexer. The batch block below
-               ;; deletes a bounded slice per microbatch instead.
-               ;; A single :clear-context record is already on c's partition
-               ;; (depot-partition-key); the hop makes that explicit.
-               (|hash *c)
-               (local-select> [(keypath *c)] $$pending-clears :> *pending)
-               (merge-pending-clear *pending *tx-time :> *merged)
-               (local-transform> [(keypath *c) (termval *merged)] $$pending-clears))))
+             ;; --- Queued commits ---
+             ;; After the record batch, so a commit queued in this microbatch
+             ;; starts here: one within the budget is fully applied by the time
+             ;; the microbatch that carried it commits. Oldest commit first.
+             (<<batch
+              (|all)
+              (commit-ops-budget :> *task-budget)
+              (loop<- [*budget *task-budget :> *slice]
+                      (local-select> [(sorted-map-range-from-start 1) (subselect ALL)]
+                                     $$commit-queue :> *entries)
+                      (<<if (seq *entries)
+                            (identity (first *entries) :> [*seq {:keys [*ops *pos]}])
+                            (commit-slice *ops *pos *budget :> {:keys [*part *next-pos *done?]})
+                            (<<if *done?
+                                  (local-transform> [(keypath *seq) NONE>] $$commit-queue)
+                                  (else>)
+                                  (local-transform> [(keypath *seq :pos) (termval *next-pos)] $$commit-queue))
+                            (:> *part)
+                            (- *budget (count *part) :> *left)
+                            (<<if (> *left 0)
+                                  (continue> *left)
+                                  (else>)
+                                  ;; Budget spent with commits possibly left: wake the
+                                  ;; indexer (see the clear batch below).
+                                  (depot-partition-append! *triple-depot [:commit-continue [nil]] :append-ack))
+                            (else>)))
+              (ops/explode *slice :> *queued-op)
+              (first *queued-op :> *op)
+              (quad-op-parts *queued-op :> [*s *p *o *c *tx-time])
+              (apply-quad-op *op *s *p *o *c *tx-time))
 
              ;; --- Bounded graph clears ---
-             ;; Runs once per microbatch on every task, AFTER the batch block
+             ;; Runs once per microbatch on every task, AFTER the batch blocks
              ;; above completed on all tasks, so a clear registered in this
-             ;; microbatch starts here: a graph smaller than the budget is gone
+             ;; microbatch (by a record or a queued commit) starts here: a graph smaller than the budget is gone
              ;; by the time the microbatch that carried its clear commits.
              (<<batch
               (|all)

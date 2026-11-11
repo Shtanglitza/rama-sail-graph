@@ -5,6 +5,7 @@
   (:require [clojure.test :refer :all]
             [com.rpl.rama :as rama]
             [com.rpl.rama.test :as rtest]
+            [rama-sail.test-helpers :as th]
             [rama-sail.core :refer [RdfStorageModule]]
             [rama-sail.sail.adapter :as rsail])
   (:import [org.eclipse.rdf4j.model Resource]
@@ -38,9 +39,11 @@
 
 (use-fixtures :once property-path-fixture)
 
-(defn- wait-mb! [n]
-  (swap! *mb-count* + n)
-  (rtest/wait-for-microbatch-processed-count *ipc* module-name "indexer" @*mb-count*))
+(defn- wait-mb!
+  "Barrier after a commit. The argument (statements committed) is not used: a
+   commit is one depot record, so the barrier works from depot offsets."
+  [_n]
+  (th/wait-indexed! *ipc* module-name))
 
 (defn- query-results
   "Execute a SPARQL SELECT query and return results as a vector of maps."

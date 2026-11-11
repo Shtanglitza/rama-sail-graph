@@ -255,6 +255,25 @@
            [[] 0 false]
            ops)))
 
+(def ^:const DEFAULT-COMMIT-CHUNK-SIZE
+  "Most ops per :commit depot record. A commit up to this size is one record,
+   appended all-or-nothing; a larger one is split into several records, each
+   atomic on its own. Must not exceed the indexer's max-commit-ops."
+  5000)
+
+(defn- commit-depot-records
+  "Depot records for one commit's stamped ops (from assign-commit-tx-times).
+   With commit records, chunks of up to `chunk-size` ops become
+   `[:commit ops]` records, which the indexer queues and applies in append
+   order; without (a module that predates them), each op is its own record."
+  [stamped-ops commit-records? chunk-size]
+  (if commit-records?
+    (mapv (fn [chunk] [:commit (vec chunk)]) (partition-all chunk-size stamped-ops))
+    stamped-ops))
+
+(defn- record-op-count [record]
+  (if (= :commit (first record)) (count (second record)) 1))
+
 (defn- find-matching-pending-adds
   "Find pending add operations matching a removal pattern."
   [pending-ops s-str p-str o-str c-str]
@@ -324,9 +343,11 @@
 (defn- create-connection [parent-sail ipc triple-depot query-qt list-contexts-qt count-statements-qt
                           ns-depot get-ns-qt list-ns-qt
                           get-all-stats-qt get-global-stats-qt
-                          timeout-ms sync-config]
+                          timeout-ms sync-config write-config]
   ;; Transaction buffers - operations are buffered until commit
   ;; sync-config: {:enabled true :module-name "..." :pending-clears-qt query-or-nil}
+  ;; write-config: {:pending-commits-qt query-or-nil :chunk-size n}; the query exists
+  ;; only on a module that accepts :commit records (see commit-depot-records)
   ;; Statistics are fetched lazily on first query and cached for connection lifetime
   (let [pending-ops (atom [])  ;; Vector of [:add quad] or [:del quad] or [:clear-context quad]
         pending-ns-ops (atom [])  ;; Vector of namespace operations [:set-ns prefix iri], [:remove-ns prefix], [:clear-ns]
@@ -643,12 +664,16 @@
           ;; Commit triple operations with tracking for partial failure diagnosis.
           ;; Stamps come from assign-commit-tx-times: bounded clear/add epochs,
           ;; NOT one millisecond per op (which future-dated bulk commits so that a
-          ;; later CLEAR/DROP skipped most of their quads).
+          ;; later CLEAR/DROP skipped most of their quads). With commit records a
+          ;; commit of up to :chunk-size ops is ONE append: all-or-nothing, and one
+          ;; round trip instead of one per op.
           (when (pos? op-count)
             (errors/with-transaction-error-handling "triple-commit" committed-triple-ops op-count
-              (doseq [record (assign-commit-tx-times ops tx-time)]
+              (doseq [record (commit-depot-records (assign-commit-tx-times ops tx-time)
+                                                   (some? (:pending-commits-qt write-config))
+                                                   (:chunk-size write-config))]
                 (rama/foreign-append! triple-depot record)
-                (swap! committed-triple-ops inc))))
+                (swap! committed-triple-ops + (record-op-count record)))))
           ;; In sync mode, ALWAYS wait for microbatch processing to complete.
           ;; Even with 0 triple ops, we must sync to ensure any pending microbatches
           ;; from previous commits (e.g., other SAIL instances) are fully visible.
@@ -659,20 +684,20 @@
           ;; of the depot partitions' end-offsets — everything appended so far,
           ;; by this SAIL instance or any other client. No shared counter needed.
           ;;
-          ;; A graph clear is applied in bounded slices over several
-          ;; microbatches, and the indexer appends a wake-up record per slice,
-          ;; so repeat the barrier until no clear is pending.
+          ;; Queued commits and graph clears are applied in bounded slices over
+          ;; several microbatches, and the indexer appends a wake-up record per
+          ;; slice, so repeat the barrier until neither is pending.
           (when (:enabled sync-config)
             (let [module-name (:module-name sync-config)
                   num-partitions (:num-partitions (rama/foreign-object-info triple-depot))
                   wait-fn (requiring-resolve 'com.rpl.rama.test/wait-for-microbatch-processed-count)
-                  pending-clears-qt (:pending-clears-qt sync-config)]
+                  pending? (fn [qt] (and qt (pos? (invoke-query-with-timeout qt timeout-ms))))]
               (loop []
                 (wait-fn ipc module-name "indexer"
                          (reduce + (for [part (range num-partitions)]
                                      (:end-offset (rama/foreign-depot-partition-info triple-depot part)))))
-                (when (and pending-clears-qt
-                           (pos? (invoke-query-with-timeout pending-clears-qt timeout-ms)))
+                (when (or (pending? (:pending-commits-qt write-config))
+                          (pending? (:pending-clears-qt sync-config)))
                   (Thread/sleep 20)
                   (recur)))))
 
@@ -896,15 +921,23 @@
      :query-timeout-ms - Query timeout in milliseconds (default: 60000)
      :sync-commits     - If true, wait for microbatch processing after each commit.
                          Use this in tests to ensure data is immediately visible.
-                         Requires com.rpl.rama.test namespace to be available."
+                         Requires com.rpl.rama.test namespace to be available.
+     :commit-chunk-size - Most ops per :commit depot record (default 5000). A
+                         commit up to this size is one record, appended
+                         all-or-nothing; a larger one is split.
+   A commit is sent as :commit records when the module has the
+   \"pending-commit-count\" query topology, and as one record per op otherwise
+   (a module that predates commit records would drop them)."
   ([ipc module-name]
    (create-rama-sail ipc module-name {}))
-  ([ipc module-name {:keys [query-timeout-ms sync-commits]
+  ([ipc module-name {:keys [query-timeout-ms sync-commits commit-chunk-size]
                      :or {query-timeout-ms DEFAULT-QUERY-TIMEOUT-MS
-                          sync-commits false}}]
+                          sync-commits false
+                          commit-chunk-size DEFAULT-COMMIT-CHUNK-SIZE}}]
    {:pre [(some? ipc)
           (and (string? module-name) (not (clojure.string/blank? module-name)))
-          (and (number? query-timeout-ms) (pos? query-timeout-ms))]}
+          (and (number? query-timeout-ms) (pos? query-timeout-ms))
+          (pos-int? commit-chunk-size)]}
    (log/info "Creating RamaSail for module:" module-name "with timeout:" query-timeout-ms "ms"
              (if sync-commits " (sync-commits enabled)" " (sync-commits disabled)"))
    (let [depot               (rama/foreign-depot ipc module-name "*triple-depot")
@@ -926,14 +959,20 @@
                         :module-name module-name
                         ;; absent on a module older than bounded graph clears
                         :pending-clears-qt (try (rama/foreign-query ipc module-name "pending-clear-count")
-                                                (catch Exception _ nil))})]
+                                                (catch Exception _ nil))})
+         write-config {:pending-commits-qt (try (rama/foreign-query ipc module-name "pending-commit-count")
+                                                (catch Exception _ nil))
+                       :chunk-size commit-chunk-size}]
+     (when-not (:pending-commits-qt write-config)
+       (log/warn "Module" module-name "does not accept :commit records; committing one depot"
+                 "record per op (not atomic, one round trip per op). Update the module."))
      (proxy [AbstractSail] []
        (getConnectionInternal []
          (log/debug "Opening new SAIL connection")
          (create-connection this ipc depot qt list-contexts-qt count-statements-qt
                             ns-depot get-ns-qt list-ns-qt
                             get-all-stats-qt get-global-stats-qt
-                            query-timeout-ms sync-config))
+                            query-timeout-ms sync-config write-config))
        (isWritable [] true)
        (getValueFactory [] VF)
        (shutDownInternal []

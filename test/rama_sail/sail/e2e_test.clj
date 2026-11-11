@@ -8,6 +8,7 @@
   (:require [clojure.test :refer :all]
             [com.rpl.rama :as rama]
             [com.rpl.rama.test :as rtest]
+            [rama-sail.test-helpers :as th]
             [rama-sail.core :refer [RdfStorageModule]]
             [rama-sail.sail.adapter :as rsail])
   (:import (org.eclipse.rdf4j.model Resource)
@@ -601,7 +602,7 @@
           (.add conn s p o2 (into-array Resource [g2]))
           (.add conn s p o3 (into-array Resource []))  ;; Default graph
           (.commit conn)
-          (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 3))
+          (th/wait-indexed! ipc module-name))
 
         (testing "Verify Data Before Clear"
           (let [all-stmts (with-open [iter (.getStatements conn nil nil nil true (into-array Resource []))]
@@ -613,7 +614,7 @@
           (.clear conn (into-array Resource []))  ;; Empty array = clear all
           (.commit conn)
           ;; Wait for clear operations (3 contexts cleared)
-          (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 6))
+          (th/wait-indexed! ipc module-name))
 
         (testing "Verify All Data is Gone"
           (let [all-stmts (with-open [iter (.getStatements conn nil nil nil true (into-array Resource []))]
