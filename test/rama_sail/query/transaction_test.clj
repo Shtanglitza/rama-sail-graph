@@ -15,7 +15,8 @@
             [rama-sail.module.indexer :as idx]
             [rama-sail.sail.adapter :as rsail]
             [rama-sail.sail.serialization :as ser])
-  (:import (org.eclipse.rdf4j.model Resource)
+  (:import (org.eclipse.rdf4j.common.transaction IsolationLevels)
+           (org.eclipse.rdf4j.model Resource)
            [org.eclipse.rdf4j.query BindingSet]
            [org.eclipse.rdf4j.model Literal]
            [org.eclipse.rdf4j.repository.sail SailRepository SailRepositoryConnection]
@@ -921,4 +922,26 @@
               (.commit conn)
               (is (= 40 (count-statements conn nil nil nil [g]))))))
         (finally (.shutDown repo))))))
+
+(deftest test-advertised-isolation-levels
+  ;; RamaSail has no snapshots and no conflict detection. It used to inherit
+  ;; AbstractSail's defaults, which made every transaction nominally
+  ;; SERIALIZABLE (RDF4J's SailIsolationLevelTest fails that, see
+  ;; compliance-test). It advertises what it provides: no transaction sees
+  ;; another's uncommitted data.
+  (let [sail (rsail/create-rama-sail *ipc* module-name)
+        repo (doto (SailRepository. sail) (.init))]
+    (try
+      (is (= [IsolationLevels/NONE IsolationLevels/READ_UNCOMMITTED IsolationLevels/READ_COMMITTED]
+             (vec (.getSupportedIsolationLevels sail))))
+      (is (= IsolationLevels/READ_COMMITTED (.getDefaultIsolationLevel sail)))
+      (with-open [^SailRepositoryConnection conn (.getConnection repo)]
+        (doseq [level [IsolationLevels/NONE IsolationLevels/READ_UNCOMMITTED IsolationLevels/READ_COMMITTED]]
+          (.begin conn level)
+          (.rollback conn))
+        (doseq [level [IsolationLevels/SNAPSHOT_READ IsolationLevels/SNAPSHOT IsolationLevels/SERIALIZABLE]]
+          (is (thrown? Exception (.begin conn level))
+              (str level " must be refused, not silently downgraded"))
+          (when (.isActive conn) (.rollback conn))))
+      (finally (.shutDown repo)))))
 

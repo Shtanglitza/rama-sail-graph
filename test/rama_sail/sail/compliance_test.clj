@@ -10,11 +10,20 @@
   (:import [org.junit.platform.launcher.core LauncherDiscoveryRequestBuilder LauncherFactory]
            [org.junit.platform.launcher.listeners SummaryGeneratingListener TestExecutionSummary$Failure]
            [org.junit.platform.engine.discovery DiscoverySelectors ClassSelector]
-           [rama_sail RamaSailRDFStoreTest]))
+           [rama_sail RamaSailIsolationLevelTest RamaSailRDFStoreTest]))
+
+(declare ^:private run-junit-class)
 
 (deftest ^:compliance run-rdf4j-compliance-tests
-  (testing "RDF4J RDFStoreTest compliance suite"
-    (let [selector (DiscoverySelectors/selectClass RamaSailRDFStoreTest)
+  (run-junit-class "RDFStoreTest" RamaSailRDFStoreTest))
+
+(deftest ^:compliance run-rdf4j-isolation-level-tests
+  ;; Runs RDF4J's checks for every isolation level RamaSail reports as supported.
+  (run-junit-class "SailIsolationLevelTest" RamaSailIsolationLevelTest))
+
+(defn- run-junit-class [suite-name ^Class test-class]
+  (testing (str "RDF4J " suite-name " suite")
+    (let [selector (DiscoverySelectors/selectClass test-class)
           request (-> (LauncherDiscoveryRequestBuilder/request)
                       (.selectors (into-array ClassSelector [selector]))
                       (.build))
@@ -30,7 +39,7 @@
             skipped (.getTestsSkippedCount summary)]
 
         (println)
-        (println "=== RDF4J RDFStoreTest Compliance Results ===")
+        (println (str "=== RDF4J " suite-name " Results ==="))
         (println (format "Total: %d | Passed: %d | Failed: %d | Skipped: %d"
                          total succeeded failed skipped))
         (println)
@@ -49,4 +58,4 @@
 
         ;; Assert for clojure.test reporting
         (is (zero? failed)
-            (format "RDF4J compliance: %d/%d tests failed" failed total))))))
+            (format "RDF4J %s: %d/%d tests failed" suite-name failed total))))))

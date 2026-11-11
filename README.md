@@ -263,6 +263,8 @@ RamaSail passes 40 of 40 tests in the RDF4J **RDFStoreTest** compliance suite (`
 - Dual connections — two separate `SailConnection` instances operating concurrently on the same store, each maintaining independent transaction state
 - BNode reuse — blank node identity preserved when the same BNode is used across multiple statements within a connection
 
+**Transaction isolation.** RamaSail supports `NONE`, `READ_UNCOMMITTED` and `READ_COMMITTED` (the default), and passes RDF4J's **SailIsolationLevelTest** for them (10 of 10). A transaction's operations are buffered on its connection until commit, so no transaction sees another's uncommitted data. `begin()` with `SNAPSHOT_READ`, `SNAPSHOT` or `SERIALIZABLE` throws: there is no snapshot of the store and no conflict detection. A query reads the live indices, so it can observe a commit that lands while it runs, including part of a large one, and two transactions that read and then write the same data both succeed. A commit is durable when `commit()` returns but becomes queryable afterwards, when the indexer has applied it.
+
 **SPARQL operators** handled server-side via Rama topologies:
 
 | Supported | Falls Back To RDF4J Local Evaluation | Explicitly Unsupported / Not Yet Working |

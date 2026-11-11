@@ -39,6 +39,12 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are shrunk to a minimal query. `RANDOM_QUERY_SEED` / `RANDOM_QUERY_COUNT` override the run.
 
 ### Changed
+- **RamaSail advertises the isolation levels it provides.** It inherited RDF4J's `AbstractSail`
+  defaults, under which every transaction nominally ran as `SERIALIZABLE`; RDF4J's
+  `SailIsolationLevelTest`, now part of the compliance tests, fails that level against this store.
+  Supported levels are now `NONE`, `READ_UNCOMMITTED` and `READ_COMMITTED` (default). Behavior
+  change: `begin()` with `SNAPSHOT_READ`, `SNAPSHOT` or `SERIALIZABLE` throws instead of silently
+  running with weaker guarantees. Transactions started without a level are unaffected.
 - **A SAIL commit is one depot record.** `commit()` appended one record per operation, one network
   round trip each, and a failure partway left half a commit in the store. It now appends the whole
   commit as a single `[:commit [op ...]]` record (several for commits over 5,000 operations,

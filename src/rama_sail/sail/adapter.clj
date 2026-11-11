@@ -9,6 +9,7 @@
             [rama-sail.sail.optimization :as opt :refer [*predicate-stats* *global-stats* optimize-plan]]
             [rama-sail.sail.serialization :as ser :refer [val->str str->val DEFAULT-CONTEXT-VAL VF]])
   (:import (java.util Iterator)
+           (org.eclipse.rdf4j.common.transaction IsolationLevels)
            (org.eclipse.rdf4j.query QueryInterruptedException)
            (org.eclipse.rdf4j.query.algebra.evaluation EvaluationStrategy TripleSource)
            (org.eclipse.rdf4j.query.algebra.evaluation.federation FederatedServiceResolver)
@@ -915,6 +916,20 @@
             (log/debug "Buffering clear-context:" ctx)
             (swap! pending-ops conj [:clear-context [nil nil nil ctx]])))))))
 
+(def ^:private supported-isolation-levels
+  "The isolation levels RamaSail provides. A transaction's operations are
+   buffered on its connection until commit, so no other transaction ever sees
+   uncommitted data: READ_COMMITTED, and the weaker levels with it.
+
+   Not SNAPSHOT_READ, SNAPSHOT or SERIALIZABLE: there is no snapshot of the
+   store and no conflict detection. A query reads the live indices, so it can
+   observe a commit that lands while it runs, including part of one (a commit
+   is applied over one or more microbatches, and tasks expose a microbatch at
+   slightly different times), and two transactions that read then write the
+   same data both succeed. AbstractSail's defaults advertised SERIALIZABLE,
+   which RDF4J's SailIsolationLevelTest shows this store does not provide."
+  [IsolationLevels/NONE IsolationLevels/READ_UNCOMMITTED IsolationLevels/READ_COMMITTED])
+
 (defn create-rama-sail
   "Create a RamaSail backed by a Rama module.
    Options:
@@ -974,6 +989,10 @@
                             get-all-stats-qt get-global-stats-qt
                             query-timeout-ms sync-config write-config))
        (isWritable [] true)
+       ;; begin() with a stronger level (SNAPSHOT_READ, SNAPSHOT, SERIALIZABLE)
+       ;; now fails instead of silently running with weaker guarantees.
+       (getSupportedIsolationLevels [] supported-isolation-levels)
+       (getDefaultIsolationLevel [] IsolationLevels/READ_COMMITTED)
        (getValueFactory [] VF)
        (shutDownInternal []
          (log/info "Shutting down RamaSail")
