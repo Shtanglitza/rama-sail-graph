@@ -38,9 +38,16 @@
   Check records with this before appending them directly. See rama-sail.module.indexer/valid-depot-record?."}
   valid-depot-record? idx/valid-depot-record?)
 
-(defn depot-partition-key [[op payload _tx-time-or-opts]]
+(def ^:private COMMIT-LOG-KEY "rama-sail/commit-log")
+
+(defn depot-partition-key
+  "Routes a quad op by subject and a :clear-context by graph. Every :commit
+   record goes to one partition, the commit log, so commits are queued and
+   applied in the order they were appended."
+  [[op payload _tx-time-or-opts]]
   (case op
     :clear-context (nth payload 3)
+    :commit COMMIT-LOG-KEY
     (first payload)))
 
 (defn declare-rdf-depots

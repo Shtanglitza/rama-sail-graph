@@ -281,7 +281,13 @@
                  [:add (assoc q 2 5)] [:add q "not-a-time"] [:add q 1000 :extra]
                  [:del (assoc q 1 nil)] [:clear-context [nil nil nil nil]]
                  [:no-such-op q] [:clear-continue ["<g>"]]]]
-      (is (not (idx/valid-depot-record? bad)) (pr-str bad)))))
+      (is (not (idx/valid-depot-record? bad)) (pr-str bad)))
+    (testing ":commit records"
+      (is (idx/valid-depot-record? [:commit [[:add q 1000] [:del q 1000] [:clear-context [nil nil nil "<g>"] 1000]]]))
+      (doseq [bad [[:commit] [:commit nil] [:commit []] [:commit [[:add q] [:add (pop q)]]]
+                   [:commit [[:commit [[:add q]]]]] [:commit [[:add q]] :extra]
+                   [:commit (vec (repeat (inc idx/max-commit-ops) [:add q 1]))]]]
+        (is (not (idx/valid-depot-record? bad)) (pr-str (take 2 bad)))))))
 
 (deftest test-malformed-records-do-not-block-the-indexer
   (let [g (unique-iri "malformed-g")
@@ -297,4 +303,61 @@
     (rama/foreign-append! (depot) [:add good])
     (is (wait-until 30000 #(= #{good} (graph-quads g)))
         "a valid record appended after malformed ones is still indexed")))
+
+;;; ---------------------------------------------------------------------------
+;;; :commit records are queued and applied in order, in bounded slices
+;;; ---------------------------------------------------------------------------
+
+(deftest test-commit-slice
+  (let [ops [:a :b :c :d :e]]
+    (is (= {:part [:a :b] :next-pos 2 :done? false} (idx/commit-slice ops 0 2)))
+    (is (= {:part [:c :d :e] :next-pos 5 :done? true} (idx/commit-slice ops 2 10)))
+    (is (= {:part [:e] :next-pos 5 :done? true} (idx/commit-slice ops 4 1)))
+    (is (= {:part [] :next-pos 2 :done? false} (idx/commit-slice ops 2 0)))))
+
+(defn- pending-commits []
+  (rama/foreign-invoke-query (rama/foreign-query *ipc* module-name "pending-commit-count")))
+
+(defn- idle? [] (and (zero? (pending-commits)) (zero? (pending-clears))))
+
+(deftest test-commit-record-applies-all-its-ops
+  (let [g (unique-iri "commit-g")
+        p (unique-iri "commit-p")
+        q (fn [i] [(str "<http://ex/commit-s" i ">") p (str "\"v" i "\"") g])]
+    (rama/foreign-append! (depot) [:commit (vec (for [i (range 20)] [:add (q i) 1000]))])
+    (is (wait-until 30000 #(= 20 (count (graph-quads g)))))
+    (testing "a commit that clears the graph and adds to it: the add is stamped later and survives"
+      (rama/foreign-append! (depot) [:commit [[:clear-context [nil nil nil g] 2000]
+                                              [:add (q 100) 2001]
+                                              [:del (q 3) 2001]]])
+      (is (wait-until 30000 #(and (idle?) (= #{(q 100)} (graph-quads g))))))
+    (is (= 1 (rama/foreign-select-one (keypath p :count) (pstate "$$predicate-stats"))))))
+
+(deftest test-commits-apply-in-append-order
+  ;; Commits touching the same quads must take effect in the order they were
+  ;; appended: every :commit record goes to one depot partition and the queue
+  ;; is drained oldest first, also across slices (budget 7 ops per microbatch).
+  (with-redefs [idx/commit-ops-per-microbatch 7]
+    (let [g (unique-iri "ordered-g")
+          p (unique-iri "ordered-p")
+          quads (vec (for [i (range 10)] [(str "<http://ex/ordered-s" i ">") p "\"v\"" g]))
+          ops (fn [op tx] (mapv (fn [q] [op q tx]) quads))]
+      ;; 15 rounds of add-all then delete-all, then a final add of the even ones
+      (dotimes [r 15]
+        (rama/foreign-append! (depot) [:commit (ops :add (+ 1000 (* 2 r)))])
+        (rama/foreign-append! (depot) [:commit (ops :del (+ 1001 (* 2 r)))]))
+      (rama/foreign-append! (depot) [:commit (vec (take-nth 2 (ops :add 5000)))])
+      (is (wait-until 120000 #(and (idle?) (= (set (take-nth 2 quads)) (graph-quads g))))
+          "final state is that of the last commit")
+      (is (= (set (take-nth 2 quads)) (graph-quads g)))
+      (is (= 5 (rama/foreign-select-one (keypath p :count) (pstate "$$predicate-stats")))
+          "statistics match: every add and delete was applied exactly once, in order"))))
+
+(deftest test-malformed-commit-is-dropped-whole
+  (let [g (unique-iri "bad-commit-g")
+        good [(unique-iri "bad-commit-s") (unique-iri "bad-commit-p") "\"ok\"" g]]
+    (rama/foreign-append! (depot) [:commit [[:add good 1000] [:add ["<http://ex/s>" "<http://ex/p>" 5 g] 1000]]])
+    (rama/foreign-append! (depot) [:add (assoc good 2 "\"marker\"")])
+    (is (wait-until 30000 #(= #{(assoc good 2 "\"marker\"")} (graph-quads g)))
+        "no op of a commit with a malformed op is applied; later records are")))
 

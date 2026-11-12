@@ -11,6 +11,7 @@
             [com.rpl.rama.aggs :as aggs]
             [com.rpl.rama.ops :as ops]
             [com.rpl.rama.test :as rtest]
+            [rama-sail.test-helpers :as th]
             [rama-sail.core :refer [RdfStorageModule]]
             [rama-sail.query.aggregation :refer [init-agg-state
                                                  update-agg-state
@@ -260,7 +261,7 @@
           (.add conn charlie rdf-type person (into-array Resource []))
           (.commit conn)
 
-          (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 3)
+          (th/wait-indexed! ipc module-name)
 
           ;; COUNT all people
           (let [sparql "SELECT (COUNT(?p) AS ?cnt) WHERE { ?p a <http://ex/Person> }"
@@ -301,7 +302,7 @@
           (.add conn dave works-at globex (into-array Resource []))
           (.commit conn)
 
-          (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 4)
+          (th/wait-indexed! ipc module-name)
 
           ;; Count employees per company
           (let [sparql "SELECT ?company (COUNT(?person) AS ?cnt) WHERE { ?person <http://ex/worksAt> ?company } GROUP BY ?company"
@@ -346,7 +347,7 @@
           (.add conn order3 amount (.createLiteral VF "50" int-type) (into-array Resource []))
           (.commit conn)
 
-          (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 3)
+          (th/wait-indexed! ipc module-name)
 
           ;; SUM all amounts
           (let [sparql "SELECT (SUM(?amt) AS ?total) WHERE { ?order <http://ex/amount> ?amt }"
@@ -386,7 +387,7 @@
           (.add conn test4 score (.createLiteral VF "100" int-type) (into-array Resource []))
           (.commit conn)
 
-          (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 4)
+          (th/wait-indexed! ipc module-name)
 
           ;; AVG of scores
           (let [sparql "SELECT (AVG(?s) AS ?avg) WHERE { ?test <http://ex/score> ?s }"
@@ -424,7 +425,7 @@
           (.add conn item3 price (.createLiteral VF "50" int-type) (into-array Resource []))
           (.commit conn)
 
-          (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 3)
+          (th/wait-indexed! ipc module-name)
 
           ;; MIN and MAX prices
           (let [sparql "SELECT (MIN(?p) AS ?minPrice) (MAX(?p) AS ?maxPrice) WHERE { ?item <http://ex/price> ?p }"
@@ -475,7 +476,7 @@
           (.add conn item4 price (.createLiteral VF "70" int-type) (into-array Resource []))
           (.commit conn)
 
-          (rtest/wait-for-microbatch-processed-count ipc module-name "indexer" 8)
+          (th/wait-indexed! ipc module-name)
 
           ;; GROUP BY category with COUNT, SUM, AVG
           (let [sparql "SELECT ?cat (COUNT(?item) AS ?cnt) (SUM(?p) AS ?total) (AVG(?p) AS ?avg)

@@ -143,8 +143,9 @@ Server flags:
   (let [module-name (rama/get-module-name core/RdfStorageModule)
         depot (rama/foreign-depot ipc module-name "*triple-depot")]
     ;; Add triples. A record is [op [s p o c]] or [op [s p o c] tx-time-millis], op :add / :del
-    ;; (four string terms) or :clear-context (graph in the fourth position). The indexer drops
-    ;; anything else with a warning; core/valid-depot-record? checks a record before appending.
+    ;; (four string terms) or :clear-context (graph in the fourth position), or
+    ;; [:commit [record ...]] to have up to 10,000 of them accepted all-or-nothing. The indexer
+    ;; drops anything else with a warning; core/valid-depot-record? checks a record before appending.
     (rama/foreign-append! depot [:add ["<alice>" "<knows>" "<bob>" "::rama-internal::default-graph"]])
     ;; Query
     (rama/foreign-invoke-query
@@ -212,6 +213,8 @@ Rama module with quad-based storage using four complementary indices. The module
 
 Deletion uses physical index removal — deleted quads are removed from all four indices immediately. Adds and deletes are idempotent (set semantics for indices, `$$quad-tx-time` tracking for statistics correctness).
 
+A SAIL `commit()` appends the whole commit as one `[:commit [op ...]]` depot record (one per 5,000 operations for larger commits), so it is accepted all-or-nothing in one round trip. All commit records go to a single depot partition, the commit log; the indexer stores them in `$$commit-queue` and applies up to `commit-ops-per-microbatch` operations (default 4,000) per microbatch, oldest commit first, so commits take effect in append order. A commit within that budget is fully applied in the microbatch that receives it; a larger one becomes visible over several microbatches, and `pending-commit-count` returns 0 once every commit is applied. Single-operation records appended directly to the depot are applied immediately and are not ordered against queued commits.
+
 Clearing a graph (`CLEAR GRAPH`, `DROP GRAPH`, `clear()`, or a `:clear-context` depot record) is applied in bounded slices: the indexer registers the clear in `$$pending-clears` and deletes up to `clear-quads-per-microbatch` quads (default 1,000) per task per microbatch until the graph is empty. A small graph is still gone in the microbatch that carries its clear. A large one empties over several microbatches, during which readers see part of it; the `pending-clear-count` query topology returns 0 once every clear is fully applied. The bound exists because a microbatch that runs past Rama's phase timeout is retried from the start with the same data, so an unbounded clear of a large graph would block the indexer.
 
 ### Query Topologies
@@ -259,6 +262,8 @@ RamaSail passes 40 of 40 tests in the RDF4J **RDFStoreTest** compliance suite (`
 - Concurrent add-while-querying
 - Dual connections — two separate `SailConnection` instances operating concurrently on the same store, each maintaining independent transaction state
 - BNode reuse — blank node identity preserved when the same BNode is used across multiple statements within a connection
+
+**Transaction isolation.** RamaSail supports `NONE`, `READ_UNCOMMITTED` and `READ_COMMITTED` (the default), and passes RDF4J's **SailIsolationLevelTest** for them (10 of 10). A transaction's operations are buffered on its connection until commit, so no transaction sees another's uncommitted data. `begin()` with `SNAPSHOT_READ`, `SNAPSHOT` or `SERIALIZABLE` throws: there is no snapshot of the store and no conflict detection. A query reads the live indices, so it can observe a commit that lands while it runs, including part of a large one, and two transactions that read and then write the same data both succeed. A commit is durable when `commit()` returns but becomes queryable afterwards, when the indexer has applied it.
 
 **SPARQL operators** handled server-side via Rama topologies:
 
