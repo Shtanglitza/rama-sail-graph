@@ -150,11 +150,13 @@
    - :include-joins - If true, include join-focused queries (default: false)
    - :joins-only - If true, only run join-focused queries (default: false)
    - :skip-load - Skip data loading (for cluster with pre-loaded data)
+   - :bulk-load - Load with rama-sail.bulk (:commit records) instead of one depot
+                  record per triple; a map of rama-sail.bulk/load-file! options
 
    Returns benchmark results."
   [& {:keys [mode conductor-host conductor-port module-name
              dataset-path warmup-n bench-n tasks threads
-             include-joins joins-only skip-load]
+             include-joins joins-only skip-load bulk-load]
       :or {mode :ipc
            conductor-host "localhost"
            conductor-port 1973
@@ -200,7 +202,13 @@
                          (do
                            (println "  Skipping data load (--skip-load)")
                            {:count 0 :time-ms 0 :triples-per-sec 0})
-                         (let [stats (loader/load-ntriples-with-connection! conn depot dataset-path)]
+                         (let [stats (if bulk-load
+                                       (let [st (apply (requiring-resolve 'rama-sail.bulk/load-file!)
+                                                       cluster mod-name dataset-path (mapcat identity bulk-load))]
+                                         ;; report time until everything is queryable, as the per-triple loader does
+                                         (assoc st :time-ms (:total-time-ms st)
+                                                :triples-per-sec (/ (:count st) (/ (:total-time-ms st) 1000.0))))
+                                       (loader/load-ntriples-with-connection! conn depot dataset-path))]
                            (println (format "  Loaded %d triples in %.2fms (%.0f triples/sec)"
                                             (:count stats)
                                             (:time-ms stats)

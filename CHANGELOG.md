@@ -19,6 +19,27 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an optional `--auth-token` (Bearer) gate, and a configurable `--cors-origin`.
 
 ### Added
+- **Bulk loading, about 18x faster on 1M triples.** A profile of the indexer showed it spends a load
+  committing microbatches to disk, not indexing: its worker threads were 40% idle and 44% in RocksDB
+  batch writes, fsync and log writes, with about 16% in the indexing dataflow. Three changes follow:
+  - Module launch options (`core/indexer-launch-options`): 5,000 records per depot partition per
+    microbatch and a PState flush batch of 100,000 paths. They apply when a module is first
+    launched; on an existing deployment set the two Rama dynamic options by hand (README, Bulk
+    Loading).
+  - `rama-sail.bulk`: `load-file!` (N-Triples, Turtle, TriG, RDF/XML, streamed) and `load-quads!`
+    append `:commit` records with backpressure, and return when the data is queryable.
+    `await-applied!` waits on a marker appended to the commit log, so it also covers records the
+    indexer has not read yet.
+  - `[:config {option value}]` depot records (`core/set-indexer-option!`) change
+    `commit-ops-per-microbatch` and `clear-quads-per-microbatch` at runtime. The default commit
+    budget is now 10,000 (was 4,000).
+
+  Loading 1,005,547 BSBM triples on a local single-node cluster: 1,899 s before (530/s), 825 s with
+  per-triple appends and the launch options, 107 s with the bulk loader (9,378/s).
+- 1M-triple scale benchmark in the README: the query mix grows from 225 ms at 59K triples to about
+  2.4 s; point lookups stay flat, filtered scans and `LIMIT`-over-join queries grow 10-19x.
+- Bench: `cluster-bench :bulk true :bulk-budget N`; the loader's indexing deadline scales with the
+  load size (it was a fixed 2 minutes).
 - **CI runs every test namespace.** Eight namespaces were never run in CI, among them the
   SPARQL server's UPDATE security tests, the RDF4J SAIL compliance tests and the property-path
   caps. The test lists now live in `project.clj` (`lein test :unit`, `:integration`, `:w3c`),
@@ -49,7 +70,7 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   round trip each, and a failure partway left half a commit in the store. It now appends the whole
   commit as a single `[:commit [op ...]]` record (several for commits over 5,000 operations,
   `:commit-chunk-size`), so a commit of up to that size is accepted all-or-nothing. The indexer
-  stores it in a new `$$commit-queue` PState and applies up to 4,000 operations per microbatch
+  stores it in a new `$$commit-queue` PState and applies a bounded number of operations per microbatch
   (`commit-ops-per-microbatch`), oldest commit first: every commit record goes to one depot
   partition, so commits take effect in the order they were appended. On a local cluster a
   20,000-statement commit went from 597 s to return (599 s until visible) to 0.24 s to return (21 s

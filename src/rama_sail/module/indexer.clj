@@ -134,6 +134,8 @@
   ;; Commits waiting to be applied, in arrival order: seq -> {:ops [quad-op ...], :pos next op}.
   ;; All on the task of the commit-log depot partition; empty when idle.
   (declare-pstate mb $$commit-queue {Long (fixed-keys-schema {:ops Object :pos Long})})
+  ;; Runtime settings from [:config ...] records, the same on every task: option -> value
+  (declare-pstate mb $$indexer-config {clojure.lang.Keyword Long})
   ;; Graph clears in progress: c -> {:tx clear tx-time, :cursor last subject cleared}.
   ;; Lives on the graph's task (where $$cspo holds the graph); empty when idle.
   (declare-pstate mb $$pending-clears {String (fixed-keys-schema {:tx Long :cursor String})})
@@ -164,10 +166,27 @@
    one microbatch. Writers split larger commits into several records."
   10000)
 
+(def config-options
+  "Indexer settings a [:config {option value}] record can change at runtime.
+   :sync-token is not a setting: a writer stores a token of its choice and
+   waits to read it back, which proves the indexer has read every record
+   appended to the commit log before it (see rama-sail.bulk/await-applied!)."
+  #{:commit-ops-per-microbatch :clear-quads-per-microbatch :sync-token})
+
+(defn valid-config? [config]
+  (and (map? config)
+       (seq config)
+       (every? (fn [[k v]]
+                 (and (contains? config-options k)
+                      (integer? v)
+                      (if (= k :sync-token) (<= 0 v) (<= 1 v 10000000))))
+               config)))
+
 (defn valid-depot-record?
   "True for a record the indexer can apply: one quad operation (see
-   valid-quad-op?), or `[:commit [quad-op ...]]` holding 1 to max-commit-ops
-   valid quad operations (one SAIL commit, queued and applied in order).
+   valid-quad-op?), `[:commit [quad-op ...]]` holding 1 to max-commit-ops
+   valid quad operations (one SAIL commit, queued and applied in order), or
+   `[:config {option value}]` (see config-options).
 
    The depot accepts any object, and a record that throws in the topology
    fails its microbatch, which Rama retries from the start with the same data,
@@ -175,6 +194,10 @@
    Direct depot writers can use it to check records before appending."
   [record]
   (or (valid-quad-op? record)
+      (and (sequential? record)
+           (= 2 (count record))
+           (= :config (first record))
+           (valid-config? (second record)))
       (and (sequential? record)
            (= 2 (count record))
            (= :commit (first record))
@@ -202,10 +225,14 @@
 ;; the queue is the arrival order of commits and they are applied in it.
 
 (def commit-ops-per-microbatch
-  "Most queued commit ops applied in one microbatch. Commits are applied from
-   one task, so this is the whole cluster's share, about what the depot's
-   per-partition record limit admits across four partitions."
-  4000)
+  "Default for the most queued commit ops applied in one microbatch. Commits
+   are applied from one task, so this is the whole cluster's share. A
+   microbatch must finish well inside Rama's phase timeout: 10,000 ops take
+   about 2 s with the module's launch options and about 10 s on a module still
+   running Rama's default flush settings, both measured on a laptop. Change it
+   at runtime with a [:config {:commit-ops-per-microbatch n}] record
+   (core/set-indexer-option!); a bulk load applies about 2.5x faster at 60,000."
+  10000)
 
 (defn commit-ops-budget [] commit-ops-per-microbatch)
 
@@ -230,7 +257,8 @@
 ;; --- Bounded graph clears ---
 
 (def clear-quads-per-microbatch
-  "Most quads one task deletes for pending graph clears in one microbatch. A
+  "Default (change at runtime with a [:config {:clear-quads-per-microbatch n}]
+   record) for the most quads one task deletes for pending graph clears in one microbatch. A
    microbatch reads at most depot.microbatch.max.records (default 1000) records
    per partition, so this keeps clear work in the same range as ordinary load."
   1000)
@@ -534,7 +562,14 @@
               ;; forever) and the wake-up records appended below.
               (filter> (indexable-record? *msg))
               (first *msg :> *op)
-              (<<if (= *op :commit)
+              (<<cond
+               (case> (= *op :config))
+               ;; Runtime settings, written to every task (read by the batches below)
+               (ops/explode (seq (second *msg)) :> [*option *value])
+               (|all)
+               (local-transform> [(keypath *option) (termval *value)] $$indexer-config)
+
+               (case> (= *op :commit))
                     ;; Queue the commit behind those already waiting. Reads see
                     ;; this microbatch's earlier writes, so two commits in one
                     ;; microbatch get consecutive keys.
@@ -543,9 +578,10 @@
                     (next-commit-seq *last-keys :> *seq)
                     (second *msg :> *commit-ops)
                     (local-transform> [(keypath *seq) (termval {:ops *commit-ops :pos 0})] $$commit-queue)
-                    (else>)
-                    (quad-op-parts *msg :> [*s *p *o *c *tx-time])
-                    (apply-quad-op *op *s *p *o *c *tx-time)))
+
+               (default>)
+               (quad-op-parts *msg :> [*s *p *o *c *tx-time])
+               (apply-quad-op *op *s *p *o *c *tx-time)))
 
              ;; --- Queued commits ---
              ;; After the record batch, so a commit queued in this microbatch
@@ -553,7 +589,8 @@
              ;; the microbatch that carried it commits. Oldest commit first.
              (<<batch
               (|all)
-              (commit-ops-budget :> *task-budget)
+              (local-select> [(keypath :commit-ops-per-microbatch)] $$indexer-config :> *configured)
+              (or> *configured (commit-ops-budget) :> *task-budget)
               (loop<- [*budget *task-budget :> *slice]
                       (local-select> [(sorted-map-range-from-start 1) (subselect ALL)]
                                      $$commit-queue :> *entries)
@@ -587,7 +624,8 @@
               (|all)
               ;; bound first: a call inside a path's options map is not evaluated
               (clear-page-subjects :> *page-size)
-              (clear-quads-budget :> *task-budget)
+              (local-select> [(keypath :clear-quads-per-microbatch)] $$indexer-config :> *configured)
+              (or> *configured (clear-quads-budget) :> *task-budget)
               (loop<- [*budget *task-budget *after "" :> *gc *clear-tx *slice]
                       (local-select> [(sorted-map-range-from *after {:max-amt 1 :inclusive? false})
                                       (subselect ALL)]

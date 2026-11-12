@@ -105,7 +105,7 @@
    Returns benchmark results map."
   [& {:keys [conductor-host conductor-port module-name
              dataset-path warmup-n bench-n
-             load-data include-joins joins-only]
+             load-data include-joins joins-only bulk-load]
       :or {conductor-host "localhost"
            conductor-port 1973
            module-name "rama-sail.core/RdfStorageModule"
@@ -148,6 +148,7 @@
    :module-name module-name
    :dataset-path dataset-path
    :skip-load (not load-data)
+   :bulk-load bulk-load
    :warmup-n warmup-n
    :bench-n bench-n
    :include-joins include-joins
@@ -209,6 +210,8 @@
      :warmup      - Warmup iterations (default: 5)
      :iterations  - Benchmark iterations (default: 50)
      :load        - Load data before benchmark (default: false)
+     :bulk        - Load with rama-sail.bulk (:commit records) (default: false)
+     :bulk-budget - With :bulk, the indexer's commit ops per microbatch during the load
      :joins       - Include join queries (default: false)
      :joins-only  - Only run join queries (default: false)
      :config      - Path to config EDN file (overrides other options)"
@@ -228,6 +231,8 @@
        :warmup-n (or (:warmup opts) 5)
        :bench-n (or (:iterations opts) 50)
        :load-data (or (:load opts) false)
+       :bulk-load (when (:bulk opts)
+                    (cond-> {} (:bulk-budget opts) (assoc :commit-ops-per-microbatch (:bulk-budget opts))))
        :include-joins (or (:joins opts) false)
        :joins-only (or (:joins-only opts) false)))))
 

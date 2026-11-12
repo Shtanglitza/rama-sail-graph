@@ -170,6 +170,30 @@ Server flags:
           (println bs))))))
 ```
 
+### Bulk Loading
+
+For loading a file, use `rama-sail.bulk` instead of a SAIL transaction. A transaction keeps every statement in client memory until commit; the bulk loader streams the file and appends it as `:commit` depot records, 5,000 quads per round trip, pausing when the indexer's queue is full.
+
+```clojure
+(require '[rama-sail.bulk :as bulk])
+
+;; N-Triples, Turtle, TriG or RDF/XML, by file extension. Returns when everything is queryable.
+(bulk/load-file! cluster module-name "data.nt")
+;; => {:count 1005547, :time-ms ..., :triples-per-sec ..., :total-time-ms ...}
+
+;; Apply faster for the duration of this load (store-wide while it runs, see below)
+(bulk/load-file! cluster module-name "data.nt" :commit-ops-per-microbatch 60000)
+
+;; Or from any sequence of [s p o c] canonical term strings
+(bulk/load-quads! cluster module-name quads)
+```
+
+Ingest speed is set by three things, which a profile of the indexer identified (it spends most of a load committing microbatches to disk, not indexing):
+
+- **Module launch options** (`core/indexer-launch-options`): 5,000 records per depot partition per microbatch and a PState flush batch of 100,000 paths, instead of Rama's defaults. They are applied when the module is first launched. A module that is *updated* keeps the options it was launched with: set `depot.microbatch.max.records` on `*triple-depot` and `topology.microbatch.pstate.flush.path.count` on the `indexer` topology with Rama's dynamic-option command or UI.
+- **The apply budget** for queued commits, `commit-ops-per-microbatch` (default 10,000). `(core/set-indexer-option! depot :commit-ops-per-microbatch n)` changes it at runtime, and `:commit-ops-per-microbatch` on a bulk load raises it for that load. One microbatch must finish well inside Rama's microbatch phase timeout, or it is retried forever, so raise it only on a cluster where you have measured how long a microbatch takes.
+- **Disk sync cost.** Every microbatch ends with RocksDB writes and fsyncs. The figures below are from a laptop running macOS, where fsync is slow.
+
 ### Triple Terms (RDF-Star / SPARQL 1.2)
 
 Triple terms allow statements about statements — attach provenance, confidence scores, or temporal metadata directly to triples:
@@ -213,7 +237,7 @@ Rama module with quad-based storage using four complementary indices. The module
 
 Deletion uses physical index removal — deleted quads are removed from all four indices immediately. Adds and deletes are idempotent (set semantics for indices, `$$quad-tx-time` tracking for statistics correctness).
 
-A SAIL `commit()` appends the whole commit as one `[:commit [op ...]]` depot record (one per 5,000 operations for larger commits), so it is accepted all-or-nothing in one round trip. All commit records go to a single depot partition, the commit log; the indexer stores them in `$$commit-queue` and applies up to `commit-ops-per-microbatch` operations (default 4,000) per microbatch, oldest commit first, so commits take effect in append order. A commit within that budget is fully applied in the microbatch that receives it; a larger one becomes visible over several microbatches, and `pending-commit-count` returns 0 once every commit is applied. Single-operation records appended directly to the depot are applied immediately and are not ordered against queued commits.
+A SAIL `commit()` appends the whole commit as one `[:commit [op ...]]` depot record (one per 5,000 operations for larger commits), so it is accepted all-or-nothing in one round trip. All commit records go to a single depot partition, the commit log; the indexer stores them in `$$commit-queue` and applies up to `commit-ops-per-microbatch` operations (default 10,000, adjustable at runtime) per microbatch, oldest commit first, so commits take effect in append order. A commit within that budget is fully applied in the microbatch that receives it; a larger one becomes visible over several microbatches, and `pending-commit-count` returns 0 once every commit is applied. Single-operation records appended directly to the depot are applied immediately and are not ordered against queued commits.
 
 Clearing a graph (`CLEAR GRAPH`, `DROP GRAPH`, `clear()`, or a `:clear-context` depot record) is applied in bounded slices: the indexer registers the clear in `$$pending-clears` and deletes up to `clear-quads-per-microbatch` quads (default 1,000) per task per microbatch until the graph is empty. A small graph is still gone in the microbatch that carries its clear. A large one empties over several microbatches, during which readers see part of it; the `pending-clear-count` query topology returns 0 once every clear is fully applied. The bound exists because a microbatch that runs past Rama's phase timeout is retried from the start with the same data, so an unbounded clear of a large graph would block the indexer.
 
@@ -513,6 +537,38 @@ Q8 and Q10 return 0 rows on these generated datasets and Q1 almost always does, 
 | QJ4 | 4.1 | 9.3 | 2.3x |
 
 For a 10x data increase, Q2, Q3, Q7, Q8, Q11 and QJ2 stay within 1.5x, QJ1, QJ3 and QJ4 grow 2-3x, and Q1, Q4, Q5 and Q10 grow 3-5x.
+
+#### 1M Triples (17,000 products)
+
+Same laptop and single-node cluster (4 tasks, 2 threads), dataset generated with `:num-products 17000`. Median p50 of three runs after a per-triple load:
+
+| Query | 59K p50 | 1M p50 | Slowdown (17x data) |
+|-------|---------|--------|---------------------|
+| Q1 | 14.6 | 144.7 | 9.9x |
+| Q2 | 7.3 | 6.6 | 0.9x |
+| Q3 | 4.3 | 6.2 | 1.4x |
+| Q4 | 18.2 | 266.4 | 14.6x |
+| Q5 | 28.2 | 385.8 | 13.7x |
+| Q7 | 2.8 | 5.5 | 2.0x |
+| Q8 | 2.3 | 2.0 | 0.9x |
+| Q10 | 26.8 | 519.3 | 19.4x |
+| Q11 | 1.3 | 1.0 | 0.8x |
+| QJ1 | 29.8 | 374.9 | 12.6x |
+| QJ2 | 4.1 | 8.2 | 2.0x |
+| QJ3 | 35.8 | 564.6 | 15.8x |
+| QJ4 | 9.3 | 111.0 | 11.9x |
+
+Query mix: about 2.4 s (225 ms at 59K). Lookups by subject or by a selective property stay flat (Q2, Q3, Q7, Q8, Q11, QJ2). Queries that filter a whole type or property (Q1, Q4, Q5, Q10) and `LIMIT` queries over a join (QJ1, QJ3, QJ4) grow with the data: the first pattern is still read in full before filtering or truncation. Filtered and limited index scans are the next query-side work.
+
+**Loading 1,005,547 triples:**
+
+| Path | Time | Rate |
+|------|------|------|
+| Per-triple depot appends, Rama's default microbatch options | 1,899 s | 530/s |
+| Per-triple depot appends, module launch options | 825 s | 1,218/s |
+| `rama-sail.bulk/load-file!` with `:commit-ops-per-microbatch 60000`, module launch options | 107 s | 9,378/s |
+
+On-disk size after the bulk load: 1.8 GB. See [Bulk Loading](#bulk-loading) for what the options are. For scale: dedicated offline bulk loaders of mature single-machine stores report 100,000 to over 1,000,000 triples per second on server hardware; this is an online, replicated write path measured on a laptop.
 
 ### Query Optimizations
 
