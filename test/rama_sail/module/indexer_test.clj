@@ -282,6 +282,13 @@
                  [:del (assoc q 1 nil)] [:clear-context [nil nil nil nil]]
                  [:no-such-op q] [:clear-continue ["<g>"]]]]
       (is (not (idx/valid-depot-record? bad)) (pr-str bad)))
+    (testing ":config records"
+      (is (idx/valid-depot-record? [:config {:commit-ops-per-microbatch 60000}]))
+      (is (idx/valid-depot-record? [:config {:commit-ops-per-microbatch 1 :clear-quads-per-microbatch 5000}]))
+      (doseq [bad [[:config] [:config {}] [:config nil] [:config {:no-such-option 5}]
+                   [:config {:commit-ops-per-microbatch 0}] [:config {:commit-ops-per-microbatch "many"}]
+                   [:config {:commit-ops-per-microbatch 5} :extra]]]
+        (is (not (idx/valid-depot-record? bad)) (pr-str bad))))
     (testing ":commit records"
       (is (idx/valid-depot-record? [:commit [[:add q 1000] [:del q 1000] [:clear-context [nil nil nil "<g>"] 1000]]]))
       (doseq [bad [[:commit] [:commit nil] [:commit []] [:commit [[:add q] [:add (pop q)]]]
@@ -360,4 +367,25 @@
     (rama/foreign-append! (depot) [:add (assoc good 2 "\"marker\"")])
     (is (wait-until 30000 #(= #{(assoc good 2 "\"marker\"")} (graph-quads g)))
         "no op of a commit with a malformed op is applied; later records are")))
+
+(deftest test-config-record-changes-the-commit-budget
+  ;; Budget 3 ops per microbatch, set at runtime: a 30-op commit then needs
+  ;; ten microbatches. Afterwards the default is restored for the other tests.
+  (let [g (unique-iri "config-g")
+        p (unique-iri "config-p")
+        quads (vec (for [i (range 30)] [(str "<http://ex/config-s" i ">") p "\"v\"" g]))
+        option (fn [] (rama/foreign-select-one (keypath :commit-ops-per-microbatch)
+                                               (pstate "$$indexer-config") {:pkey 0}))]
+    (try
+      (rama-sail.core/set-indexer-option! (depot) :commit-ops-per-microbatch 3)
+      (is (wait-until 30000 #(= 3 (option))) "the setting reaches the indexer")
+      (rama/foreign-append! (depot) [:commit (mapv (fn [q] [:add q 1000]) quads)])
+      (let [seen (loop [seen #{}]
+                   (let [n (count (graph-quads g))]
+                     (if (or (= 30 n) (> (count seen) 200)) (conj seen n) (do (Thread/sleep 100) (recur (conj seen n))))))]
+        (is (contains? seen 30))
+        (is (some #(< 0 % 30) seen) "the commit became visible in slices, so the budget applied"))
+      (finally
+        (rama-sail.core/set-indexer-option! (depot) :commit-ops-per-microbatch idx/commit-ops-per-microbatch)
+        (wait-until 30000 #(= idx/commit-ops-per-microbatch (option)))))))
 

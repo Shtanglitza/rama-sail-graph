@@ -87,6 +87,13 @@
           (do (Thread/sleep (long poll-ms))
               (recur n changed-at)))))))
 
+(defn indexing-deadline-ms
+  "How long to wait for `count` triples to be indexed: at least `max-wait-ms`
+   (default 2 minutes), and 5 ms per triple for large loads (indexing runs at
+   roughly 1 ms per triple, so a 1M-triple load needs far more than 2 minutes)."
+  [max-wait-ms count]
+  (max (or max-wait-ms 120000) (* 5 (or count 0))))
+
 (defn- indexed-triple-count [manager module-name]
   (:total-triples
    (rama/foreign-invoke-query (rama/foreign-query manager module-name "get-global-stats"))))
@@ -99,7 +106,7 @@
     (throw (ex-info "Module must be pre-deployed to cluster. Use scripts/deploy-module.sh" {})))
   (wait-for-indexer! [_ count]
     (await-indexed-triples! #(indexed-triple-count manager module-name) (or count 0)
-                            :max-wait-ms (or max-wait-ms 120000)))
+                            :max-wait-ms (indexing-deadline-ms max-wait-ms count)))
   (closeable? [_] true)
   (connection-type [_] :cluster)
 
@@ -116,7 +123,7 @@
     (throw (ex-info "Module must be pre-deployed to cluster. Use scripts/deploy-module.sh" {})))
   (wait-for-indexer! [_ count]
     (await-indexed-triples! #(indexed-triple-count manager module-name) (or count 0)
-                            :max-wait-ms (or max-wait-ms 120000)))
+                            :max-wait-ms (indexing-deadline-ms max-wait-ms count)))
   (closeable? [_] false)  ;; Pooled connections don't need explicit closing
   (connection-type [_] :cluster-pooled)
 
