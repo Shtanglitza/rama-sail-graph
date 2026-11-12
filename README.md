@@ -558,7 +558,27 @@ Same laptop and single-node cluster (4 tasks, 2 threads), dataset generated with
 | QJ3 | 35.8 | 564.6 | 15.8x |
 | QJ4 | 9.3 | 111.0 | 11.9x |
 
-Query mix: about 2.4 s (225 ms at 59K). Lookups by subject or by a selective property stay flat (Q2, Q3, Q7, Q8, Q11, QJ2). Queries that filter a whole type or property (Q1, Q4, Q5, Q10) and `LIMIT` queries over a join (QJ1, QJ3, QJ4) grow with the data: the first pattern is still read in full before filtering or truncation. Filtered and limited index scans are the next query-side work.
+Query mix: about 2.4 s (225 ms at 59K). Lookups by subject or by a selective property stay flat (Q2, Q3, Q7, Q8, Q11, QJ2). The other seven grew with the data because a whole property was read where a few lookups or a short scan would do.
+
+**After limited scans and lookups instead of scans** (same 1M store, module updated in place, runs alternated main, branch, branch, main; median p50 in ms):
+
+| Query | Before | After | Speedup |
+|-------|--------|-------|---------|
+| Q1 | 181.4 | 7.5 | 24x |
+| Q2 | 10.4 | 11.4 | - |
+| Q3 | 8.8 | 7.6 | - |
+| Q4 | 317.3 | 8.1 | 39x |
+| Q5 | 421.1 | 18.7 | 23x |
+| Q7 | 8.6 | 8.1 | - |
+| Q8 | 3.5 | 2.9 | - |
+| Q10 | 535.4 | 5.8 | 92x |
+| Q11 | 1.9 | 1.2 | - |
+| QJ1 | 441.0 | 20.6 | 21x |
+| QJ2 | 11.0 | 9.3 | - |
+| QJ3 | 571.4 | 20.9 | 27x |
+| QJ4 | 127.2 | 6.2 | 21x |
+
+Query mix: 2.6-2.9 s before, 0.16-0.20 s after, which is below the 225 ms mix measured at 59K triples before these changes. Two runs per variant; Q1, Q8 and Q10 return no rows on this dataset. `ORDER BY ... LIMIT` and `DISTINCT ... LIMIT` over a large intermediate result still compute every row.
 
 **Loading 1,005,547 triples:**
 
@@ -574,13 +594,13 @@ On-disk size after the bulk load: 1.8 GB. See [Bulk Loading](#bulk-loading) for 
 
 The following optimizations are applied automatically during query planning:
 
-- **LIMIT pushdown**: Applies LIMIT inside BGPs and self-joins, passing through PROJECT and BIND, where truncating cannot change the result. BGPs and self-joins truncate after reading their data, so this shortens results and binding construction but does not avoid the scan. A LIMIT over a chain of property lookups first tries reading a small multiple of the rows it needs from the driving pattern and falls back to the full plan if that yields too few rows, so results stay exact. Plans with ORDER BY or DISTINCT still compute every row
+- **LIMIT pushdown with limited scans**: Applies LIMIT inside BGPs and self-joins, passing through PROJECT and BIND, where truncating cannot change the result. A limited BGP reads the index in key order and stops after about as many quads as it needs, instead of reading every match. A LIMIT over a chain of property lookups (or a self-join followed by lookups) first tries reading a small multiple of the rows it needs from the driving pattern and falls back to the full plan if that yields too few rows, so results stay exact. Plans with ORDER BY or DISTINCT still compute every row
 - **Adaptive filter selectivity**: Estimates filter selectivity by operator type (equality=0.05, range=0.3, inequality=0.8) instead of a flat 0.3, improving join ordering decisions
 - **AND decomposition**: Splits compound AND filters into independent conjuncts that can be pushed separately to each join side
 - **Selinger-style join ordering**: Dynamic programming optimizer for multi-way join chains using predicate statistics
 - **Self-join optimization**: Detects same-predicate joins with inequality filters and uses group-and-pair generation instead of Cartesian product
 - **Colocated subject joins**: Exploits subject hash partitioning for partition-local joins
-- **Batch property enrichment**: Replaces a hash join on a property with a batched lookup keyed by the other input's bindings. It applies on either side of a join, when the input is no larger than the property, and to `OPTIONAL` property patterns with no filter
+- **Batch property enrichment**: Replaces a hash join on a property with a batched lookup keyed by the other input's bindings, by subject or, when the other input binds the object, by object. It applies on either side of a join, when the input is no larger than the property, and to `OPTIONAL` property patterns with no filter. A filter on the property's values is applied after the lookup, so `?s :price ?p FILTER(?p < 100)` joined with a few subjects reads their prices instead of scanning every price
 - **Materialized type views**: Pre-computed indices for `rdf:type` pattern lookups
 
 ## Known Limitations

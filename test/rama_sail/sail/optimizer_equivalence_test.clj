@@ -7,7 +7,9 @@
 
    Uses the shared :once IPC fixture pattern (see module/indexer_test.clj) and
    the depot end-offset barrier from query/transaction_test.clj."
-  (:require [clojure.test :refer :all]
+  (:require [clojure.string :as str]
+            [clojure.test :refer :all]
+            [clojure.walk :as walk]
             [com.rpl.rama :as rama]
             [com.rpl.rama.test :as rtest]
             [rama-sail.core :refer [RdfStorageModule]]
@@ -403,3 +405,79 @@
     (testing "!= keeps bnode pairs (term inequality)"
       (let [{:keys [opt]} (assert-equivalent! (q "!="))]
         (is (= 12 (count opt)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Lookups instead of scans, and limited scans
+;;; ---------------------------------------------------------------------------
+
+(defn- find-nodes [plan pred]
+  (let [found (atom [])]
+    (walk/prewalk #(do (when (and (map? %) (pred %)) (swap! found conj %)) %) plan)
+    @found))
+
+(deftest test-filtered-property-lookup-becomes-batch-enrich
+  ;; FILTER(?age > 26) is pushed onto ?s :age ?age; the join with the three
+  ;; NYC subjects looks their ages up instead of scanning :age, then filters.
+  (let [{:keys [opt-plan]} (assert-equivalent!
+                            "SELECT ?s ?age WHERE {
+                               ?s <http://ex/city> \"NYC\" .
+                               ?s <http://ex/age> ?age FILTER(?age > 26) }")]
+    (is (seq (find-nodes opt-plan #(and (= :filter (:op %))
+                                        (= :batch-enrich (get-in % [:sub-plan :op]))
+                                        (= "<http://ex/age>" (get-in % [:sub-plan :predicate])))))
+        (pr-str opt-plan)))
+  (testing "a filter on a variable the lookup does not bind stays a join filter"
+    (assert-equivalent!
+     "SELECT ?s ?f ?age WHERE {
+        <http://ex/alice> <http://ex/knows> ?f .
+        ?s <http://ex/age> ?age FILTER(?age > 26) }"))
+  (testing "OPTIONAL with a filter inside keeps unmatched rows"
+    (assert-equivalent!
+     "SELECT ?s ?age WHERE {
+        ?s <http://ex/city> \"NYC\" .
+        OPTIONAL { ?s <http://ex/age> ?age FILTER(?age > 26) } }")))
+
+(deftest test-lookup-by-object
+  ;; ?y :knows ?f with ?f bound by alice's three friends: the subjects are
+  ;; looked up per object instead of scanning :knows.
+  (let [{:keys [opt-plan opt]} (assert-equivalent!
+                                "SELECT ?f ?y WHERE {
+                                   <http://ex/alice> <http://ex/knows> ?f .
+                                   ?y <http://ex/knows> ?f }")]
+    (is (seq (find-nodes opt-plan #(and (= :batch-enrich (:op %)) (:by-object? %)))) (pr-str opt-plan))
+    ;; who knows alice's friends: bob <- alice; carol <- alice, bob; alice <- alice, eve
+    (is (= 5 (count opt))))
+  (testing "object lookup in a named graph"
+    (assert-equivalent!
+     "SELECT ?v ?y WHERE { GRAPH <http://ex/g> { <http://ex/alice> <http://ex/inGraph> ?v . ?y <http://ex/inGraph> ?v } }"))
+  (testing "OPTIONAL lookup by object keeps rows without a match"
+    (assert-equivalent!
+     "SELECT ?c ?y WHERE {
+        <http://ex/dave> <http://ex/city> ?c .
+        OPTIONAL { ?y <http://ex/w7c> ?c } }")))
+
+(defn- assert-valid-limit!
+  "LIMIT without ORDER BY: the optimized plan's rows must be a sub-bag of the
+   unlimited raw result, with min(limit, total) rows."
+  [sparql limit]
+  (let [opt-plan (optimization/optimize-plan (sparql->raw-plan sparql))
+        opt (execute-plan* opt-plan)
+        full (frequencies (execute-plan* (sparql->raw-plan (str/replace sparql #"LIMIT \d+" ""))))]
+    (is (every? (fn [[row n]] (<= n (get full row 0))) (frequencies opt))
+        (str "rows not in the full result: " sparql "\n" (pr-str opt-plan)))
+    (is (= (min limit (reduce + (vals full))) (count opt))
+        (str "wrong row count: " sparql "\n" (pr-str opt-plan)))
+    opt-plan))
+
+(deftest test-limit-reads-limited-scans
+  (testing "a BGP with a constant graph reads only the rows it needs"
+    (assert-valid-limit! "SELECT ?s ?p ?o WHERE { GRAPH <http://ex/g> { ?s ?p ?o } } LIMIT 1" 1))
+  (testing "GRAPH ?g: default-graph quads are dropped after the read, no limited read"
+    (assert-valid-limit! "SELECT ?s ?o ?g WHERE { GRAPH ?g { ?s <http://ex/inGraph> ?o } } LIMIT 1" 1))
+  (testing "a lookup chain under LIMIT drives from a truncated scan"
+    (doseq [n [1 2 3 4 5 6]]
+      (assert-valid-limit! (str "SELECT ?s ?n ?a WHERE { ?s <http://ex/name> ?n . ?s <http://ex/age> ?a } LIMIT " n) n)))
+  (testing "a self-join under LIMIT reads a limited scan in its attempts"
+    (doseq [n [1 2 3 5]]
+      (assert-valid-limit! (str "SELECT ?a ?b ?n WHERE { ?a <http://ex/city> ?c . ?b <http://ex/city> ?c .
+                                   ?a <http://ex/name> ?n FILTER(STR(?a) < STR(?b)) } LIMIT " n) n))))

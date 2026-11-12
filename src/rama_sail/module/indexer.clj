@@ -102,6 +102,98 @@
     :> [*out2 *out3 *out4])
    (:> *k1 *out2 *out3 *out4)))
 
+;; --- Limited scans ---
+;; A LIMIT without ORDER BY needs any N matching quads, but scan-3-levels-index
+;; emits every quad under the bound keys. These read in key order and stop once
+;; they have emitted at least `limit` quads (or run out of quads), so the work
+;; grows with the limit instead of with the data.
+
+(deframaop next-index-key
+  "Emits the first key after `after` (from the start when nil) of the
+   subindexed map under (keypath k1), or of the partition's top level when k1
+   is nil. Emits nothing when there is none."
+  [*k1 *after *pstate]
+  (<<cond
+   (case> (and> (nil? *k1) (nil? *after)))
+   (local-select> [(sorted-map-range-from-start 1) MAP-KEYS] *pstate :> *next)
+   (:> *next)
+
+   (case> (nil? *k1))
+   (local-select> [(sorted-map-range-from *after {:max-amt 1 :inclusive? false}) MAP-KEYS] *pstate :> *next)
+   (:> *next)
+
+   (case> (nil? *after))
+   (local-select> [(keypath *k1) (sorted-map-range-from-start 1) MAP-KEYS] *pstate :> *next)
+   (:> *next)
+
+   (default>)
+   (local-select> [(keypath *k1) (sorted-map-range-from *after {:max-amt 1 :inclusive? false}) MAP-KEYS]
+                  *pstate :> *next)
+   (:> *next)))
+
+(deframaop scan-level-2-limited
+  "Quads under (keypath k1) of a Level1 -> Level2 -> Level3 -> Set<Level4> index,
+   in key order, until at least `limit` are emitted. One Level2 key per loop
+   iteration, reading at most the quads still needed under it."
+  [*k1 *pstate *limit]
+  (loop<- [*after nil *remaining *limit :> *k2 *entries]
+          (next-index-key *k1 *after *pstate :> *k2)
+          (local-select> [(keypath *k1 *k2) (sorted-map-range-from-start *remaining)
+                          (subselect ALL (collect-one FIRST) LAST (sorted-set-range-from-start *remaining) ALL)]
+                         *pstate {:allow-yield? true} :> *entries)
+          (:> *k2 *entries)
+          (count *entries :> *n)
+          (<<if (< *n *remaining)
+                (continue> *k2 (- *remaining *n))
+                (else>)
+                (identity nil)))
+  (ops/explode *entries :> [*k3 *k4])
+  (:> *k2 *k3 *k4))
+
+(deframaop scan-index-limited
+  "Like scan-3-levels-index, but emits at least min(limit, matches) quads and,
+   when only k1 is known, or k1 and the next keys in order, reads about that
+   many index entries instead of all matches. Patterns with a gap (a known key
+   below an unknown one) fall back to the full scan."
+  [*k1 *k2 *k3 *k4 *pstate *limit]
+  (<<cond
+   (case> (and> *k2 *k3 (nil? *k4)))
+   (local-select> [(keypath *k1 *k2 *k3) (sorted-set-range-from-start *limit) ALL] *pstate :> *out4)
+   (:> *k1 *k2 *k3 *out4)
+
+   (case> (and> *k2 (nil? *k3) (nil? *k4)))
+   (local-select> [(keypath *k1 *k2) (sorted-map-range-from-start *limit)
+                   ALL (collect-one FIRST) LAST (sorted-set-range-from-start *limit) ALL]
+                  *pstate {:allow-yield? true} :> [*out3 *out4])
+   (:> *k1 *k2 *out3 *out4)
+
+   (case> (and> (nil? *k2) (nil? *k3) (nil? *k4)))
+   (scan-level-2-limited *k1 *pstate *limit :> *out2 *out3 *out4)
+   (:> *k1 *out2 *out3 *out4)
+
+   (default>)
+   (scan-3-levels-index *k1 *k2 *k3 *k4 *pstate :> *out1 *out2 *out3 *out4)
+   (:> *out1 *out2 *out3 *out4)))
+
+(deframaop scan-all-limited
+  "Every quad of the index partition on this task, in key order, until at
+   least `limit` are emitted. One Level1 key per loop iteration."
+  [*pstate *limit]
+  (loop<- [*after nil *remaining *limit :> *k1 *entries]
+          (next-index-key nil *after *pstate :> *k1)
+          (local-select> [(keypath *k1) (sorted-map-range-from-start *remaining)
+                          (subselect ALL (collect-one FIRST) LAST (sorted-map-range-from-start *remaining)
+                                     ALL (collect-one FIRST) LAST (sorted-set-range-from-start *remaining) ALL)]
+                         *pstate {:allow-yield? true} :> *entries)
+          (:> *k1 *entries)
+          (count *entries :> *n)
+          (<<if (< *n *remaining)
+                (continue> *k1 (- *remaining *n))
+                (else>)
+                (identity nil)))
+  (ops/explode *entries :> [*k2 *k3 *k4])
+  (:> *k1 *k2 *k3 *k4))
+
 (defn declare-rdf-index-pstates
   "Declares all core RDF index and statistics PStates on microbatch topology `mb`.
    Call from within a defmodule body after creating the microbatch topology."
