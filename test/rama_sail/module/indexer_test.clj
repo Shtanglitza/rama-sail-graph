@@ -15,7 +15,8 @@
             [com.rpl.rama.path :refer [keypath view]]
             [com.rpl.rama.test :as rtest]
             [rama-sail.core :refer [RdfStorageModule]]
-            [rama-sail.module.indexer :as idx]))
+            [rama-sail.module.indexer :as idx]
+            [rama-sail.test-helpers :as th]))
 
 (def module-name (rama/get-module-name RdfStorageModule))
 
@@ -28,6 +29,18 @@
       (f))))
 
 (use-fixtures :once indexer-fixture)
+
+(defn- quiesce!
+  "Wait until the indexer has applied everything appended so far, statistics
+   included. Quads become visible per task before the microbatch that writes
+   the statistics has finished everywhere, so polling on quads alone let
+   statistics assertions (and the next test's baselines) race the indexer."
+  []
+  (th/wait-indexed! *ipc* module-name))
+
+;; Each test starts from a settled indexer: baselines read at the start of a
+;; test must not move because an earlier test's records are still in flight.
+(use-fixtures :each (fn [f] (quiesce!) (f)))
 
 (defn unique-iri [base]
   (str "<http://ex/" base "-" (System/nanoTime) ">"))
@@ -45,10 +58,11 @@
   "Poll until f returns truthy (up to ~15s), then allow a grace period for
    any straddled microbatch iterations to land. Returns the last value of f."
   [f]
+  (quiesce!)
   (loop [i 0]
     (let [v (f)]
       (cond
-        v (do (Thread/sleep 500) (f))
+        v (do (quiesce!) (f))
         (>= i 60) v
         :else (do (Thread/sleep 250) (recur (inc i)))))))
 
@@ -209,11 +223,12 @@
 (defn- wait-until
   "Poll until f returns truthy or timeout-ms passes. Returns the last value of f."
   [timeout-ms f]
+  (quiesce!)
   (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
     (loop []
       (let [v (f)]
         (if (or v (> (System/currentTimeMillis) deadline))
-          v
+          (do (quiesce!) v)
           (do (Thread/sleep 250) (recur)))))))
 
 (defn- graph-quads [g]
