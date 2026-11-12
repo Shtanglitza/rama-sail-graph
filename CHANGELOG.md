@@ -19,6 +19,23 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an optional `--auth-token` (Bearer) gate, and a configurable `--cors-origin`.
 
 ### Added
+- **Queries that grew with the data now stay flat (1M triples).** A profile showed where the seven
+  slow BSBM queries read too much:
+  - Limited index scans: a new `find-triples-limit` query topology reads the index in key order and
+    stops after about as many quads as it needs. `find-bgp` uses it for a BGP with a result limit
+    (not under `GRAPH ?g`), and self-join LIMIT attempts read only that many triples. The driver of
+    a LIMIT over lookups no longer reads the whole predicate.
+  - Filtered property lookups: a join of a few rows with `?s p ?o FILTER(...)` becomes a batched
+    lookup followed by the filter, instead of a filtered scan of the whole property (Q1, Q4, Q10).
+  - Lookups by object: `batch-enrich` can key on the object (`:by-object?`, new
+    `batch-lookup-by-object` query topology on `$$posc`), so `?y p ?x` with `?x` bound by a few
+    rows no longer scans the predicate (Q5). LIMIT attempts still chain only lookups by subject,
+    which cannot multiply rows.
+
+  BSBM on 1,005,547 triples (local single-node cluster, runs alternated between main and this
+  change on the same store), p50 before -> after: Q1 181 -> 7.5 ms, Q4 317 -> 8.1, Q5 421 -> 18.7,
+  Q10 535 -> 5.8, QJ1 441 -> 20.6, QJ3 571 -> 20.9, QJ4 127 -> 6.2; the other six unchanged; query
+  mix 2.6-2.9 s -> 0.16-0.20 s.
 - **Bulk loading, about 18x faster on 1M triples.** A profile of the indexer showed it spends a load
   committing microbatches to disk, not indexing: its worker threads were 40% idle and 44% in RocksDB
   batch writes, fsync and log writes, with about 16% in the indexing dataflow. Three changes follow:

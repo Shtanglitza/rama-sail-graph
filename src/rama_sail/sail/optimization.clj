@@ -159,7 +159,7 @@
       ;; batch-enrich has inner-join semantics and binds object-var in every
       ;; row; with :optional? it keeps unmatched rows, so only possibly bound.
       :batch-enrich (let [s (sub)
-                          o (:object-var plan)]
+                          o (if (:by-object? plan) (:subject-var plan) (:object-var plan))]
                       (cond-> (update s :maybe conj o)
                         (not (:optional? plan)) (update :always conj o)))
       :triple-ref (vars-scope [(:subject-var plan) (:predicate-var plan)
@@ -753,33 +753,63 @@
                  (not (is-variable? (:c pattern))))
         s))))
 
+(defn- strip-filters
+  "[inner exprs]: `plan` without the :filter operators wrapping it, and their
+   expressions, outermost first."
+  [plan]
+  (loop [plan plan exprs []]
+    (if (= :filter (:op plan))
+      (recur (:sub-plan plan) (conj exprs (:expr plan)))
+      [plan exprs])))
+
+(defn- wrap-filters [plan exprs]
+  (reduce (fn [p e] {:op :filter :sub-plan p :expr e}) plan (rseq (vec exprs))))
+
 (defn- batch-enrich-node
   "A batch-enrich of `sub-plan` with the property-lookup BGP `lookup`, or nil
    when `lookup` is not one or the rewrite would change results.
 
-   Decided from the sub-plan's variable scope, not from :join-vars (which the
-   DP planner and the compiler compute differently):
-   - ?var must be bound in EVERY sub-plan solution: batch-enrich looks values
-     up by ?var and drops rows where it is unbound, whereas the join would
-     pair such a row with every lookup row (SPARQL compatibility).
-   - ?result must NOT be bound by ANY sub-plan solution: the merge assoc's the
-     looked-up value, silently overwriting (instead of equality-checking) an
-     existing binding, e.g. one coming from an OPTIONAL."
-  [sub-plan lookup]
-  (when-let [lookup-var (is-property-lookup-bgp? lookup)]
-    (let [scope (plan-var-scope sub-plan)
-          object-var (get-in lookup [:pattern :o])]
-      (when (and (not (:unknown? scope))
-                 (contains? (:always scope) lookup-var)
-                 (not (may-bind? scope object-var))
-                 ;; ?var p ?var: object and lookup var coincide; keep the join
-                 (not= lookup-var object-var))
-        {:op :batch-enrich
-         :sub-plan sub-plan
-         :predicate (get-in lookup [:pattern :p])
-         :subject-var lookup-var
-         :object-var object-var
-         :context (get-in lookup [:pattern :c])}))))
+   The lookup is keyed by the BGP's subject or, failing that, by its object
+   (`:by-object?`): the key variable is bound by `sub-plan`, the other one is
+   bound by the lookup. Decided from the sub-plan's variable scope, not from
+   :join-vars (which the DP planner and the compiler compute differently):
+   - the key variable must be bound in EVERY sub-plan solution: batch-enrich
+     looks values up by it and drops rows where it is unbound, whereas the
+     join would pair such a row with every lookup row (SPARQL compatibility).
+   - the looked-up variable must NOT be bound by ANY sub-plan solution: the
+     merge assoc's it, silently overwriting (instead of equality-checking) an
+     existing binding, e.g. one coming from an OPTIONAL.
+
+   `lookup` may be wrapped in filters over its own two variables (filters
+   pushed onto the BGP): they are applied after the batch-enrich, where both
+   variables have the values the BGP row had. Not with `optional?`: a failing
+   filter must keep the row unextended, not drop it."
+  ([sub-plan lookup] (batch-enrich-node sub-plan lookup false))
+  ([sub-plan lookup optional?]
+   (let [[bgp exprs] (strip-filters lookup)
+         s-var (is-property-lookup-bgp? bgp)
+         o-var (get-in bgp [:pattern :o])
+         scope (plan-var-scope sub-plan)
+         key-ok? (fn [key-var new-var]
+                   (and (contains? (:always scope) key-var)
+                        (not (may-bind? scope new-var))))]
+     (when (and s-var
+                (not (:unknown? scope))
+                ;; ?var p ?var: object and lookup var coincide; keep the join
+                (not= s-var o-var)
+                (or (empty? exprs)
+                    (and (not optional?)
+                         (every? #(set/subset? (extract-expr-vars %) #{s-var o-var}) exprs))))
+       (when-let [key (cond (key-ok? s-var o-var) :subject
+                            (key-ok? o-var s-var) :object)]
+         (wrap-filters (cond-> {:op :batch-enrich
+                                :sub-plan sub-plan
+                                :predicate (get-in bgp [:pattern :p])
+                                :subject-var s-var
+                                :object-var o-var
+                                :context (get-in bgp [:pattern :c])}
+                         (= key :object) (assoc :by-object? true))
+                       exprs))))))
 
 (defn- transform-to-batch-enrich
   "Transform a join with property lookup into batch-enrich.
@@ -790,17 +820,18 @@
 
 (defn- lookup-no-larger?
   "True when `input` is estimated to have no more rows than the property-lookup
-   BGP `lookup` has triples. Hash-joining scans every triple of the predicate;
-   batch-enrich does one lookup per input subject, so this is when it wins."
+   BGP `lookup` (filters around it ignored: a scan reads them all) has triples.
+   Hash-joining scans every triple of the predicate; batch-enrich does one
+   lookup per input row, so this is when it wins."
   [input lookup]
-  (<= (estimate-plan-cardinality input) (estimate-plan-cardinality lookup)))
+  (<= (estimate-plan-cardinality input) (estimate-plan-cardinality (first (strip-filters lookup)))))
 
 (defn- commuted-batch-enrich
   "batch-enrich for a join whose property-lookup BGP is on the LEFT. Join
    ordering puts the larger input on the left (the right is the hash table),
    so a scan-sized BGP probed by a few rows usually lands here."
   [{:keys [left right]}]
-  (when (and (is-property-lookup-bgp? left) (lookup-no-larger? right left))
+  (when (and (is-property-lookup-bgp? (first (strip-filters left))) (lookup-no-larger? right left))
     (batch-enrich-node right left)))
 
 (defn- optional-batch-enrich
@@ -809,7 +840,7 @@
    with a condition (the condition sees both sides)."
   [base lookup]
   (when (and (is-property-lookup-bgp? lookup) (lookup-no-larger? base lookup))
-    (some-> (batch-enrich-node base lookup) (assoc :optional? true))))
+    (some-> (batch-enrich-node base lookup true) (assoc :optional? true))))
 
 (defn- absorb-optional-lookups
   "Fold the leading OPTIONALs that are plain property lookups into `base`.
@@ -1348,6 +1379,16 @@
                                                :o (:object-var plan) :c (:context plan)}})))
     nil))
 
+(defn- forward-lookup
+  "batch-enrich of `plan` with `lookup` keyed by subject, or nil. A lookup by
+   object returns every subject of the object, so a driver row can become many
+   rows: the truncated driver of a limit attempt would then still enrich far
+   more rows than the LIMIT needs."
+  [plan lookup]
+  (let [node (batch-enrich-node plan lookup)]
+    (when (and (= :batch-enrich (:op node)) (not (:by-object? node)))
+      node)))
+
 (defn- lookup-chain
   "`driver` followed by every other source as a forward property lookup, or nil
    when some source cannot be reached that way."
@@ -1356,7 +1397,7 @@
          todo (remove #(identical? % driver) sources)]
     (if (empty? todo)
       plan
-      (when-let [[lookup enriched] (first (keep #(some->> (batch-enrich-node plan %) (vector %)) todo))]
+      (when-let [[lookup enriched] (first (keep #(some->> (forward-lookup plan %) (vector %)) todo))]
         (recur enriched (remove #(identical? % lookup) todo))))))
 
 (defn- chain-inner-joins
@@ -1387,11 +1428,14 @@
     nil))
 
 (defn- limit-chain-driver
-  "`plan`, whose `chain-driver` exists, with that driver truncated to n rows."
+  "`plan`, whose `chain-driver` exists, with that driver truncated to n rows.
+   A self-join driver also reads only n triples: its pairs are then a subset of
+   all pairs, which an attempt allows (too few rows falls through)."
   [plan n]
-  (if (:sub-plan plan)
-    (update plan :sub-plan limit-chain-driver n)
-    (assoc plan :result-limit n)))
+  (cond
+    (:sub-plan plan) (update plan :sub-plan limit-chain-driver n)
+    (= :self-join (:op plan)) (assoc plan :result-limit n :scan-limit n)
+    :else (assoc plan :result-limit n)))
 
 (defn- limit-attempts
   "Attempts for producing `needed` rows from `sub-plan` without reading all of
@@ -1749,8 +1793,14 @@
       100)  ;; Default estimate
 
     :batch-enrich
-    ;; Batch-enrich has same cardinality as sub-plan (just adds a column)
-    (estimate-plan-cardinality (:sub-plan plan))
+    (if (:by-object? plan)
+      ;; Each input row gets every subject with its object: rows x subjects per object
+      (safe-multiply-cardinalities
+       (estimate-plan-cardinality (:sub-plan plan))
+       (estimate-plan-cardinality {:op :bgp :pattern {:s (:subject-var plan) :p (:predicate plan)
+                                                      :o "<urn:rama-sail:bound>" :c (:context plan)}}))
+      ;; Keyed by subject: same cardinality as sub-plan (just adds a column)
+      (estimate-plan-cardinality (:sub-plan plan)))
 
     :multi-left-join
     ;; Multi-left-join preserves at least base cardinality (optionals don't reduce rows)

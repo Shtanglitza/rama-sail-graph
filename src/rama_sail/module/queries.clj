@@ -52,6 +52,37 @@
                     (|origin)
                     (aggs/+vec-agg *quad :> *quads)))
 
+(defn find-triples-limit-query-topology
+  "find-triples for a LIMIT without ORDER BY: returns at least min(limit,
+   matches) of the matching quads (more when the last key read holds several),
+   reading in index order and stopping early instead of reading every match."
+  [topologies]
+  (<<query-topology topologies "find-triples-limit"
+                    [*s *p *o *c *limit :> *quads]
+                    (<<cond
+                     (case> (some? *s))
+                     (|hash *s)
+                     (idx/scan-index-limited *s *p *o *c $$spoc *limit :> *f-s *f-p *f-o *f-c)
+
+                     (case> (some? *p))
+                     (|hash *p)
+                     (idx/scan-index-limited *p *o *s *c $$posc *limit :> *f-p *f-o *f-s *f-c)
+
+                     (case> (some? *o))
+                     (|hash *o)
+                     (idx/scan-index-limited *o *s *p *c $$ospc *limit :> *f-o *f-s *f-p *f-c)
+
+                     (case> (some? *c))
+                     (|hash *c)
+                     (idx/scan-index-limited *c *s *p *o $$cspo *limit :> *f-c *f-s *f-p *f-o)
+
+                     (default>)
+                     (|all)
+                     (idx/scan-all-limited $$spoc *limit :> *f-s *f-p *f-o *f-c))
+                    (vector *f-s *f-p *f-o *f-c :> *quad)
+                    (|origin)
+                    (aggs/+vec-agg *quad :> *quads)))
+
 (defn find-bgp-query-topology [topologies]
   (<<query-topology topologies "find-bgp" [*pattern *result-limit :> *bindings]
                     (identity *pattern :> {:keys [*s *p *o *c *named-graphs-only]})
@@ -60,7 +91,15 @@
                     (<<if (str/starts-with? *o "?") (identity nil :> *o-const) (else>) (identity *o :> *o-const))
                     (<<if (or> (nil? *c) (str/starts-with? *c "?"))
                           (identity nil :> *c-const) (else>) (identity *c :> *c-const))
-                    (invoke-query "find-triples" *s-const *p-const *o-const *c-const :> *all-quads)
+                    ;; With a result limit, read only about that many quads. Not under
+                    ;; GRAPH ?g: default-graph quads are dropped after the read, so a
+                    ;; limited read could come up short.
+                    (<<if (and> (some? *result-limit)
+                                (not (and> *named-graphs-only (some? *c) (str/starts-with? *c "?"))))
+                          (invoke-query "find-triples-limit" *s-const *p-const *o-const *c-const *result-limit
+                                        :> *all-quads)
+                          (else>)
+                          (invoke-query "find-triples" *s-const *p-const *o-const *c-const :> *all-quads))
                     ;; SPARQL GRAPH ?g (compiler sets :named-graphs-only) ranges over
                     ;; NAMED graphs only: drop default-graph quads. A bare variable
                     ;; context without the flag still means "every graph incl. the
@@ -118,10 +157,13 @@
 
 (defn self-join-query-topology [topologies]
   (<<query-topology topologies "self-join"
-                    [*predicate *join-var *left-subject *right-subject *filter *context *result-limit :> *results]
+                    [*predicate *join-var *left-subject *right-subject *filter *context *result-limit *scan-limit
+                     :> *results]
 
+                    ;; *scan-limit (LIMIT attempts only) reads just that many triples:
+                    ;; their pairs are a subset of all pairs, possibly too few.
                     (identity {:s "?s" :p *predicate :o "?o" :c *context} :> *pattern)
-                    (invoke-query "find-bgp" *pattern nil :> *bgp-results)
+                    (invoke-query "find-bgp" *pattern *scan-limit :> *bgp-results)
 
                     (qh/build-subject-groups *bgp-results :> *groups)
 
@@ -159,6 +201,27 @@
                           (identity true :> *_pass))
                     (|origin)
                     (vector *subj *obj :> *pair)
+                    (aggs/+vec-agg *pair :> *results)))
+
+;; --- Batch Lookup by Object ---
+
+(defn batch-lookup-by-object-query-topology
+  "[object subject] pairs of the triples `?subject predicate object` for each
+   of `objects`, optionally in `context`. $$posc holds a predicate on one task
+   with subjects under each object, so this is one hop and one read per object."
+  [topologies]
+  (<<query-topology topologies "batch-lookup-by-object"
+                    [*objects *predicate *context :> *results]
+                    (|hash *predicate)
+                    (ops/explode *objects :> *obj)
+                    (local-select> [(keypath *predicate *obj) ALL (collect-one FIRST) LAST ALL]
+                                   $$posc {:allow-yield? true} :> [*subj *ctx])
+                    (<<if (some? *context)
+                          (filter> (= *ctx *context))
+                          (else>)
+                          (identity true :> *_pass))
+                    (|origin)
+                    (vector *obj *subj :> *pair)
                     (aggs/+vec-agg *pair :> *results)))
 
 ;; --- Co-located Subject Join ---
@@ -706,6 +769,7 @@
    Call from within a defmodule body."
   [topologies]
   (find-triples-query-topology topologies)
+  (find-triples-limit-query-topology topologies)
   (find-bgp-query-topology topologies)
   (join-query-topology topologies)
   (left-join-query-topology topologies)
@@ -719,6 +783,7 @@
   (filter-query-topology-parallel topologies)
   (self-join-query-topology topologies)
   (batch-lookup-query-topology topologies)
+  (batch-lookup-by-object-query-topology topologies)
   (bind-query-topology topologies)
   (order-query-topology topologies)
   (list-contexts-query-topology topologies)
@@ -808,7 +873,9 @@
                                                   *left-subject :left-subject *right-subject :right-subject
                                                   *filter :filter *context :context})
                               (get *plan :result-limit nil :> *sj-result-limit)
-                              (invoke-query "self-join" *predicate *join-var *left-subject *right-subject *filter *context *sj-result-limit :> *results)
+                              (get *plan :scan-limit nil :> *sj-scan-limit)
+                              (invoke-query "self-join" *predicate *join-var *left-subject *right-subject *filter *context
+                                            *sj-result-limit *sj-scan-limit :> *results)
 
                               (case> :colocated-subject-join)
                               (identity *plan :> {*left-pattern :left-pattern *right-pattern :right-pattern
@@ -833,10 +900,18 @@
                                                   *subject-var :subject-var *object-var :object-var
                                                   *context :context})
                               (invoke-query "execute-plan" *sub-plan :> *sub-results)
-                              (qh/batch-enrich-extract-subjects *sub-results *subject-var :> *subjects)
-                              (invoke-query "batch-lookup" *subjects *predicate *context :> *lookup-map)
                               (get *plan :optional? false :> *enrich-optional?)
-                              (qh/batch-enrich-merge-results *sub-results *lookup-map *subject-var *object-var *enrich-optional? :> *results)
+                              ;; Keyed by subject (look up objects) or, with :by-object?, by object
+                              (<<if (get *plan :by-object? false)
+                                    (qh/batch-enrich-extract-subjects *sub-results *object-var :> *objects)
+                                    (invoke-query "batch-lookup-by-object" *objects *predicate *context :> *by-object)
+                                    (qh/batch-enrich-merge-results *sub-results *by-object *object-var *subject-var
+                                                                   *enrich-optional? :> *results)
+                                    (else>)
+                                    (qh/batch-enrich-extract-subjects *sub-results *subject-var :> *subjects)
+                                    (invoke-query "batch-lookup" *subjects *predicate *context :> *lookup-map)
+                                    (qh/batch-enrich-merge-results *sub-results *lookup-map *subject-var *object-var
+                                                                   *enrich-optional? :> *results))
 
                               (case> :singleton)
                               (identity #{{}} :> *results)

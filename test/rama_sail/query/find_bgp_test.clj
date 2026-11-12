@@ -2,7 +2,8 @@
   (:require [clojure.test :refer :all]
             [com.rpl.rama :as rama]
             [com.rpl.rama.test :as rtest]
-            [rama-sail.core :as core]))
+            [rama-sail.core :as core]
+            [rama-sail.test-helpers :as th]))
 
 (deftest test-find-bgp-bindings
   (with-open [ipc (rtest/create-ipc)]
@@ -79,3 +80,34 @@
 (comment
 
   (run-tests 'rama-sail.query.find-bgp-test))
+
+(deftest test-find-triples-limit
+  ;; find-triples-limit returns at least min(limit, matches) distinct matching
+  ;; quads, reading in index order. Compared with find-triples for every
+  ;; pattern shape: loops over keys (only the first key known, or a full
+  ;; scan), single bounded reads, and shapes that fall back to the full scan.
+  (with-open [ipc (rtest/create-ipc)]
+    (rtest/launch-module! ipc core/RdfStorageModule {:tasks 4 :threads 2})
+    (let [module-name (rama/get-module-name core/RdfStorageModule)
+          depot (rama/foreign-depot ipc module-name "*triple-depot")
+          quads (vec (concat
+                      ;; 1..4 objects per subject, some in a second graph
+                      (for [i (range 50) j (range (inc (mod i 4)))]
+                        [(str "<s" i ">") "<p1>" (str "\"o" (mod (+ i j) 7) "\"") "<g1>"])
+                      (for [i (range 0 50 5)] [(str "<s" i ">") "<p1>" "\"o0\"" "<g2>"])
+                      (for [i (range 30)] [(str "<s" i ">") "<p2>" (str "<s" (mod (* i 7) 30) ">") "<g1>"])))
+          _ (rama/foreign-append! depot [:commit (mapv #(vector :add %) quads)])
+          _ (th/wait-indexed! ipc module-name)
+          ft (rama/foreign-query ipc module-name "find-triples")
+          ftl (rama/foreign-query ipc module-name "find-triples-limit")]
+      (doseq [[s p o c :as pattern] [[nil nil nil nil] ["<s3>" nil nil nil] [nil "<p1>" nil nil]
+                                     [nil "<p1>" "\"o0\"" nil] ["<s3>" "<p1>" nil nil]
+                                     ["<s3>" "<p1>" "\"o3\"" nil] [nil nil "\"o0\"" nil]
+                                     [nil nil nil "<g1>"] [nil "<p1>" nil "<g2>"] [nil "<nope>" nil nil]]
+              limit [1 2 3 5 10 40 1000]]
+        (let [all (set (rama/foreign-invoke-query ft s p o c))
+              res (rama/foreign-invoke-query ftl s p o c limit)]
+          (is (every? all res) (str "non-matching quads for " (pr-str pattern) " limit " limit))
+          (is (= (count res) (count (set res))) (str "duplicates for " (pr-str pattern) " limit " limit))
+          (is (>= (count res) (min limit (count all)))
+              (str "too few quads for " (pr-str pattern) " limit " limit ": " (count res) " of " (count all))))))))
