@@ -17,12 +17,18 @@
                  [io.prometheus/simpleclient "0.16.0"]
                  [io.prometheus/simpleclient_hotspot "0.16.0"]
                  [io.prometheus/simpleclient_common "0.16.0"]
-                 ;; ring-jetty-adapter for SPARQL endpoint
-                 ;; 1.10.0 uses Jetty 9.4.x matching Rama's bundled version
-                 [ring/ring-jetty-adapter "1.10.0"]
-                 ;; RDF4J result serializers for SPARQL Protocol HTTP endpoint
+                 ;; ring-jetty-adapter for SPARQL endpoint. Keep Ring at the version Rama
+                 ;; bundles (Rama 1.10.0: Ring 1.15.5 on Jetty 12): an older adapter puts a
+                 ;; Jetty 9.4 jetty-server next to Rama's Jetty 12 jetty-http/io/util.
+                 ;; jetty-server itself comes from Rama (provided), so the whole Jetty
+                 ;; stack is the one Rama ships.
+                 [ring/ring-jetty-adapter "1.15.5" :exclusions [org.eclipse.jetty/jetty-server]]
+                 ;; RDF4J result serializers for SPARQL Protocol HTTP endpoint.
+                 ;; jackson-core comes from Rama (provided): RDF4J's older one would shadow
+                 ;; it and break Rama's jackson-databind.
                  [org.eclipse.rdf4j/rdf4j-queryresultio-sparqljson "5.2.2"
-                  :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
+                  :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple
+                               com.fasterxml.jackson.core/jackson-core]]
                  [org.eclipse.rdf4j/rdf4j-queryresultio-sparqlxml "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
                  [org.eclipse.rdf4j/rdf4j-queryresultio-text "5.2.2"
@@ -33,7 +39,7 @@
                  [org.eclipse.rdf4j/rdf4j-rio-rdfxml "5.2.2"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
                  ;; Ring utilities for request parsing
-                 [ring/ring-core "1.10.0"]]
+                 [ring/ring-core "1.15.5"]]
   :plugins [[lein-codox "0.10.8"]]
   :codox {:output-path "target/doc"
           :source-uri "https://github.com/Shtanglitza/rama-sail-graph/blob/main/{filepath}#L{line}"
@@ -43,6 +49,9 @@
                        #"^rama-sail\.server\."
                        #"^rama-sail\.metrics"
                        #"^rama-sail\.module\."]}
+  ;; commons-io: RDF4J and Ring ask for older versions (2.18, 2.21) than Rama 1.10
+  ;; bundles; nearer dependencies would otherwise win over Rama's.
+  :managed-dependencies [[commons-io "2.22.0"]]
   :global-vars {*warn-on-reflection* true}
   :repositories
   [["releases" {:id  "maven-releases"
@@ -94,8 +103,8 @@
                                        ;; Reference store for differential (oracle) tests
                                        [org.eclipse.rdf4j/rdf4j-sail-memory "5.2.2"]
                                        [org.junit.platform/junit-platform-console-standalone "1.10.0"]]}
-             :provided {:dependencies [[com.rpl/rama "1.9.0"]
-                                       [org.clojure/clojure "1.12.4"]]}
+             :provided {:dependencies [[com.rpl/rama "1.10.0"]
+                                       [org.clojure/clojure "1.12.6"]]}
              :scale    {:jvm-opts ["-Xss8m" "-Xms12g" "-Xmx12g"]}
              :sparql-uberjar {:aot [rama-sail.server.sparql]
                               :main rama-sail.server.sparql
