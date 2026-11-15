@@ -87,8 +87,10 @@
                    indexer's max-commit-ops)
      :max-queued - commit records allowed to wait in the indexer's queue
                    before appending pauses (default 16)
-     :tx-time    - creation stamp for every quad (default: now). A later
-                   CLEAR of a graph removes quads stamped at or before it."
+     :tx-time    - no longer has an effect: the indexer stamps the quads
+                   of a commit record itself, in commit order (see
+                   rama-sail.module.indexer/stamp-commit-ops), so a later
+                   CLEAR of a graph removes every quad loaded before it."
   [cluster module-name & {:keys [chunk-size max-queued tx-time]
                           :or {chunk-size default-chunk-size
                                max-queued default-max-queued}}]

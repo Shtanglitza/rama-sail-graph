@@ -142,6 +142,16 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- **A graph clear and an add of different commits now take effect in commit order.** A clear removes
+  the quads stamped at or before it, and the stamps were the committing clients' wall clocks. With
+  two writers whose clocks disagreed, a quad added by the one running ahead survived a `CLEAR` /
+  `DROP GRAPH` committed after it, and a quad added by the one running behind could be removed by a
+  clear committed before it. The indexer now stamps a commit's operations itself when it queues the
+  commit, from a clock stored with the queue (new `$$commit-clock` PState) that increases from one
+  commit to the next even if the machine's clock does not; the tx-times in a `:commit` record are
+  replaced. `rama-sail.bulk`'s `:tx-time` option therefore no longer has an effect. Module-side
+  change: update the module. Single-operation depot records keep their writer's stamp and are still
+  not ordered across partitions.
 - **A malformed depot record no longer takes the indexer down.** The depot accepts any object, and a
   wrong-shaped `*triple-depot` record (missing terms, a non-string term, a non-integer tx-time) threw
   in the indexer, which crashed the worker and was retried forever. The indexer now drops such

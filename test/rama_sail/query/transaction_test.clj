@@ -781,13 +781,15 @@
             (.add conn (.createIRI VF (str "http://ex/bulk-s-" i)) p
                   (.createLiteral VF (long i)) (into-array Resource [ctx])))
           (.commit conn)
-          (let [committed-at (System/currentTimeMillis)]
-            (wait-mb!)
+          (wait-mb!)
+          (let [indexed-at (System/currentTimeMillis)]
             (is (= n (count-statements conn nil p nil [ctx])))
 
             ;; Deterministic check (the clear below only catches the bug when depot
             ;; appends outpace 1/ms): every quad of the commit carries ONE stamp,
-            ;; and none is dated after the commit returned.
+            ;; and none is dated in the future. The indexer stamps a commit's quads
+            ;; when it queues the commit, so the reference is the time it was
+            ;; indexed, not the time commit() returned.
             (let [tx-times (rama/foreign-pstate *ipc* module-name "$$quad-tx-time")
                   stamp (fn [i] (rama/foreign-select-one
                                  [(keypath (str "<http://ex/bulk-s-" i ">") (ser/val->str p)
@@ -799,7 +801,7 @@
               (is (some? first-stamp))
               (is (= first-stamp last-stamp)
                   "All ops of a clear-free commit share the commit stamp (was tx-time + op-index)")
-              (is (<= last-stamp committed-at)
+              (is (<= last-stamp indexed-at)
                   "No quad may be stamped in the future")))
 
           (.begin conn)

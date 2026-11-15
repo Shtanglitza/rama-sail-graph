@@ -375,6 +375,97 @@
       (is (= 5 (rama/foreign-select-one (keypath p :count) (pstate "$$predicate-stats")))
           "statistics match: every add and delete was applied exactly once, in order"))))
 
+;;; ---------------------------------------------------------------------------
+;;; D4: order between commits comes from the commit log, not writers' clocks
+;;; ---------------------------------------------------------------------------
+;;; A graph clear removes the quads stamped at or before it. The stamps used to
+;;; be the committing clients' wall clocks, so two writers whose clocks
+;;; disagreed got the wrong outcome although the commit log held their commits
+;;; in the right order. The tx-times in these records play the writers' clocks.
+
+(def ^:private day-ms 86400000)
+
+(deftest test-stamp-commit-ops
+  (let [q ["<s>" "<p>" "\"o\"" "<g>"]
+        clear [:clear-context [nil nil nil "<g>"]]
+        stamps (fn [ops clock now] (mapv #(nth % 2) (:ops (idx/stamp-commit-ops ops clock now))))]
+    (testing "the writer's tx-times are replaced; ops and quads are kept"
+      (is (= {:ops [[:add q 5000] [:del q 5000]] :clock 5000}
+             (idx/stamp-commit-ops [[:add q 99999999] [:del q]] 0 5000))))
+    (testing "the first stamp is the wall clock, or the last stamp + 1 if the clock is not past it"
+      (is (= [5000] (stamps [[:add q 1]] 4999 5000)))
+      (is (= [5001] (stamps [[:add q 1]] 5000 5000)) "same millisecond as the commit before")
+      (is (= [7001] (stamps [[:add q 1]] 7000 5000)) "wall clock stepped back"))
+    (testing "the stamp advances at each step from a clear to a quad op"
+      (is (= [5000 5000 5001 5001] (stamps [clear clear [:add q 1] [:add q 1]] 0 5000)))
+      (is (= [5000 5000 5001 5001 5002]
+             (stamps [[:add q 9] (conj clear 8) [:add q 7] (conj clear 6) [:del q 5]] 0 5000))
+          "an add before a clear shares its stamp, so the clear removes it"))
+    (testing "the clock is the last stamp used, so the next commit stamps later than every op"
+      (let [{:keys [clock]} (idx/stamp-commit-ops [clear [:add q 1]] 0 5000)]
+        (is (= 5001 clock))
+        (is (= [5002] (stamps [clear] clock 5000)))))))
+
+(defn- quad-stamp [[s p o c]]
+  (rama/foreign-select-one (keypath s p o c) (pstate "$$quad-tx-time")))
+
+(deftest test-commit-stamps-keep-increasing-when-the-indexer-clock-does-not
+  ;; The indexer's own clock can stand still or step back (clock adjustment, a
+  ;; new leader on another machine); commit order must not depend on it.
+  (let [g (unique-iri "clock-g")
+        p (unique-iri "clock-p")
+        q (fn [i] [(str "<http://ex/clock-s" i ">") p "\"v\"" g])
+        started (System/currentTimeMillis)
+        stamps (atom [])
+        stamp! (fn [i]
+                 (is (wait-until 30000 #(some? (quad-stamp (q i)))))
+                 (swap! stamps conj (quad-stamp (q i))))]
+    (rama/foreign-append! (depot) [:commit [[:add (q 1) 1000]]])
+    (stamp! 1)
+    (is (<= started (first @stamps))
+        "stamped by the indexer's clock, not with the writer's tx-time")
+    (with-redefs [idx/wall-clock-ms (constantly 1000)]
+      (rama/foreign-append! (depot) [:commit [[:add (q 2) 1000]]])
+      (stamp! 2)
+      (rama/foreign-append! (depot) [:commit [[:clear-context [nil nil nil g] 1000] [:add (q 3) 1000]]])
+      (stamp! 3)
+      (is (wait-until 30000 #(and (idle?) (= #{(q 3)} (graph-quads g))))
+          "the clear removes the earlier commits' quads and spares its own commit's add"))
+    (is (apply < @stamps) "each commit is stamped later than the one before")))
+
+(deftest test-clear-removes-quads-of-an-earlier-commit-stamped-ahead
+  (let [g (unique-iri "ahead-g")
+        p (unique-iri "ahead-p")
+        quads (vec (for [i (range 5)] [(str "<http://ex/ahead-s" i ">") p "\"v\"" g]))
+        now (System/currentTimeMillis)]
+    ;; this writer's clock runs a day ahead
+    (rama/foreign-append! (depot) [:commit (mapv (fn [q] [:add q (+ now day-ms)]) quads)])
+    (is (wait-until 30000 #(= (set quads) (graph-quads g))))
+    (rama/foreign-append! (depot) [:commit [[:clear-context [nil nil nil g] now]]])
+    (is (wait-until 15000 #(and (idle?) (empty? (graph-quads g))))
+        "a clear removes every quad committed before it, whatever the writers' clocks said")
+    (is (zero? (or (rama/foreign-select-one (keypath p :count) (pstate "$$predicate-stats")) 0)))))
+
+(deftest test-add-committed-after-a-clear-survives-whatever-its-stamp
+  ;; The clear runs in slices (7 quads per microbatch), so it is still pending
+  ;; when the later commit's add is applied, and the add's subject sorts after
+  ;; every subject of the graph: the clear reaches it last.
+  (with-redefs [idx/clear-quads-per-microbatch 7
+                idx/clear-subjects-per-page 3]
+    (let [g (unique-iri "behind-g")
+          p (unique-iri "behind-p")
+          old (vec (for [i (range 40)] [(format "<http://ex/behind-s%03d>" i) p "\"v\"" g]))
+          late ["<http://ex/behind-s999>" p "\"added after the clear\"" g]
+          now (System/currentTimeMillis)]
+      (rama/foreign-append! (depot) [:commit (mapv (fn [q] [:add q now]) old)])
+      (is (wait-until 30000 #(= 40 (count (graph-quads g)))))
+      ;; the clearing writer's clock runs a day ahead of the adding writer's
+      (rama/foreign-append! (depot) [:commit [[:clear-context [nil nil nil g] (+ now day-ms)]]])
+      (rama/foreign-append! (depot) [:commit [[:add late now]]])
+      (is (wait-until 60000 #(and (idle?) (= #{late} (graph-quads g))))
+          "a quad committed after the clear is not removed by it")
+      (is (= 1 (rama/foreign-select-one (keypath p :count) (pstate "$$predicate-stats")))))))
+
 (deftest test-malformed-commit-is-dropped-whole
   (let [g (unique-iri "bad-commit-g")
         good [(unique-iri "bad-commit-s") (unique-iri "bad-commit-p") "\"ok\"" g]]

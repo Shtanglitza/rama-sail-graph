@@ -226,6 +226,9 @@
   ;; Commits waiting to be applied, in arrival order: seq -> {:ops [quad-op ...], :pos next op}.
   ;; All on the task of the commit-log depot partition; empty when idle.
   (declare-pstate mb $$commit-queue {Long (fixed-keys-schema {:ops Object :pos Long})})
+  ;; Last stamp given to a queued commit's ops (see stamp-commit-ops). Used on
+  ;; the commit-log task only; never goes back.
+  (declare-pstate mb $$commit-clock Long {:initial-value 0})
   ;; Runtime settings from [:config ...] records, the same on every task: option -> value
   (declare-pstate mb $$indexer-config {clojure.lang.Keyword Long})
   ;; Graph clears in progress: c -> {:tx clear tx-time, :cursor last subject cleared}.
@@ -345,6 +348,46 @@
   "[s p o c tx-time] of a quad op; an op without a tx-time gets the current time."
   [[_op [s p o c] tx-time]]
   [s p o c (or tx-time (System/currentTimeMillis))])
+
+;; --- Commit clock ---
+;; A graph clear deletes the quads stamped at or before it (delete-quad), so
+;; the stamps decide whether a clear and an add of different commits take
+;; effect in commit order. The queue knows that order; the writers' clocks do
+;; not: with their tx-times as stamps, a quad added by a writer whose clock
+;; ran ahead survived a clear committed after it, and a quad added by a writer
+;; whose clock ran behind was removed by a clear committed before it. So a
+;; commit's ops are stamped here, when the commit is queued.
+
+(defn wall-clock-ms [] (System/currentTimeMillis))
+
+(defn stamp-commit-ops
+  "Stamps the ops of one :commit record from the commit clock, replacing the
+   tx-times its writer gave them. `clock` is the last stamp given out and `now`
+   the indexer's wall clock in milliseconds. Returns {:ops stamped ops, :clock
+   last stamp used}.
+
+   The first stamp is max(clock + 1, now): later than every stamp of every
+   commit queued before, also when the wall clock stands still or steps back,
+   and in milliseconds like the stamps of quads written before commits were
+   stamped here and of single-op records. Within the commit the stamp
+   advances at each step from a clear to a quad op, so an op after a clear is
+   stamped later than the clear and survives it, and an add before a clear is
+   removed by it: ops take effect in the order they are listed."
+  [ops clock now]
+  (let [base (max (inc clock) now)
+        [stamped epoch] (reduce (fn [[out epoch prev-clear?] [op quad]]
+                                  (let [clear? (= op :clear-context)
+                                        epoch (if (and prev-clear? (not clear?)) (inc epoch) epoch)]
+                                    [(conj! out [op quad (+ base epoch)]) epoch clear?]))
+                                [(transient []) 0 false]
+                                ops)]
+    {:ops (persistent! stamped) :clock (+ base epoch)}))
+
+(defn stamp-commit
+  "stamp-commit-ops at the indexer's current time; `clock` is nil on a
+   partition that has not stamped a commit yet."
+  [ops clock]
+  (stamp-commit-ops ops (or clock 0) (wall-clock-ms)))
 
 ;; --- Bounded graph clears ---
 
@@ -668,7 +711,13 @@
                     (local-select> [(sorted-map-range-to-end 1) (subselect MAP-KEYS)]
                                    $$commit-queue :> *last-keys)
                     (next-commit-seq *last-keys :> *seq)
-                    (second *msg :> *commit-ops)
+                    ;; Stamp the ops in queue order (see stamp-commit-ops). The
+                    ;; clock is read and written on this task with no partitioner
+                    ;; in between, so two commits in one microbatch get
+                    ;; increasing stamps.
+                    (local-select> STAY $$commit-clock :> *clock)
+                    (stamp-commit (second *msg) *clock :> {*commit-ops :ops *next-clock :clock})
+                    (local-transform> (termval *next-clock) $$commit-clock)
                     (local-transform> [(keypath *seq) (termval {:ops *commit-ops :pos 0})] $$commit-queue)
 
                (default>)
