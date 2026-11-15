@@ -246,7 +246,13 @@
    With compute-commit-ops' output shape ([clears..., quad-ops...]) this yields at
    most two stamps, tx-time and tx-time+1, regardless of commit size. (Stamping
    `tx-time + op-index` future-dated an N-op commit by N ms, so a CLEAR/DROP
-   issued shortly after a bulk load skipped most of its quads.)"
+   issued shortly after a bulk load skipped most of its quads.)
+
+   These stamps take effect only on a module without commit records, where each
+   op is its own depot record. A module with commit records replaces them when
+   it queues the commit (rama-sail.module.indexer/stamp-commit-ops: same epoch
+   rule, from the commit log's own clock), so the order of two commits never
+   depends on the committing clients' clocks."
   [ops tx-time]
   (first
    (reduce (fn [[records epoch prev-clear?] [op-type quad]]
