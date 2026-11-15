@@ -77,6 +77,11 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are shrunk to a minimal query. `RANDOM_QUERY_SEED` / `RANDOM_QUERY_COUNT` override the run.
 
 ### Changed
+- README reference results re-measured at 6K, 59K and 1M triples after the limited scans and
+  lookups: query mix 96 ms, 106 ms and 153 ms (previously 225 ms at 59K and 2.4 s at 1M). The
+  earlier before/after comparison at 1M is kept as a separate subsection.
+- README Known Limitations: `ORDER BY ... LIMIT` and `DISTINCT ... LIMIT` over a large
+  intermediate result still compute every row.
 - **RamaSail advertises the isolation levels it provides.** It inherited RDF4J's `AbstractSail`
   defaults, under which every transaction nominally ran as `SERIALIZABLE`; RDF4J's
   `SailIsolationLevelTest`, now part of the compliance tests, fails that level against this store.

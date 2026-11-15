@@ -477,8 +477,8 @@ These benchmark results were recorded on this development machine:
 - OS: macOS 27.0
 - Runtime/config: Rama 1.9.0, single-node cluster, 6 GB client heap, 4 tasks, 2 threads, 1 worker
 - Benchmark settings: 50 iterations, 5 warmup
-- Method: each dataset is loaded into a fresh deployment and the loader waits until indexing has finished. The first run is discarded as warm-up, and each table is the run with the median query mix time out of 3 further runs
-- Loading: 59,328 triples took about 65 seconds from the first append to fully indexed (about 900 triples/sec)
+- Method: each dataset is loaded into a fresh deployment with `rama-sail.bulk` (`:commit-ops-per-microbatch 60000`) and the loader waits until indexing has finished. The first run is discarded as warm-up, and each table is the run with the median query mix time out of 3 further runs
+- Loading: 59,328 triples in 9.4 seconds (about 6,300 triples/sec); the 1M load is measured separately below
 
 Q8 and Q10 return 0 rows on these generated datasets and Q1 almost always does, so their timings measure empty queries.
 
@@ -486,81 +486,87 @@ Q8 and Q10 return 0 rows on these generated datasets and Q1 almost always does, 
 
 | Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
 |-------|----------|----------|----------|-----------|-------------|
-| Q1 | 4.43 | 52.84 | 104.44 | 9.74 | 0.0 |
-| Q2 | 6.01 | 33.16 | 108.38 | 9.99 | 2.9 |
-| Q3 | 2.88 | 7.32 | 45.31 | 4.41 | 1.3 |
-| Q4 | 4.83 | 6.48 | 15.09 | 5.20 | 1.3 |
-| Q5 | 8.27 | 22.41 | 108.32 | 11.56 | 3.2 |
-| Q7 | 2.60 | 4.09 | 9.44 | 2.89 | 7.6 |
-| Q8 | 2.00 | 3.33 | 35.65 | 2.80 | 0.0 |
-| Q10 | 5.26 | 61.85 | 192.29 | 12.47 | 0.0 |
-| Q11 | 0.96 | 1.68 | 101.43 | 3.24 | 5.0 |
-| QJ1 | 12.70 | 27.41 | 69.48 | 15.42 | 100.0 |
-| QJ2 | 3.00 | 114.19 | 118.27 | 15.90 | 11.9 |
-| QJ3 | 13.60 | 41.52 | 118.77 | 18.24 | 100.0 |
-| QJ4 | 4.12 | 5.92 | 22.93 | 4.79 | 100.0 |
+| Q1 | 2.74 | 5.10 | 83.78 | 4.74 | 0.1 |
+| Q2 | 5.99 | 7.15 | 19.62 | 6.42 | 3.1 |
+| Q3 | 3.25 | 4.71 | 104.26 | 5.52 | 1.2 |
+| Q4 | 2.50 | 2.93 | 3.16 | 2.53 | 1.1 |
+| Q5 | 6.15 | 6.77 | 105.95 | 8.25 | 3.3 |
+| Q7 | 2.38 | 3.40 | 103.86 | 4.59 | 6.6 |
+| Q8 | 1.76 | 5.96 | 84.39 | 4.22 | 0.0 |
+| Q10 | 2.13 | 45.98 | 102.68 | 7.09 | 0.0 |
+| Q11 | 0.88 | 1.29 | 101.34 | 3.68 | 5.0 |
+| QJ1 | 13.53 | 29.78 | 35.05 | 16.07 | 100.0 |
+| QJ2 | 2.58 | 3.19 | 102.55 | 5.27 | 12.0 |
+| QJ3 | 13.60 | 45.10 | 225.05 | 21.55 | 100.0 |
+| QJ4 | 4.58 | 6.13 | 73.64 | 6.55 | 100.0 |
+
+Query mix: 96 ms.
 
 #### 59K Triples (1,000 products)
 
 | Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
 |-------|----------|----------|----------|-----------|-------------|
-| Q1 | 14.57 | 49.42 | 118.18 | 19.54 | 0.0 |
-| Q2 | 7.26 | 10.82 | 112.69 | 9.95 | 2.9 |
-| Q3 | 4.28 | 6.34 | 63.18 | 5.69 | 5.4 |
-| Q4 | 18.21 | 52.17 | 118.67 | 22.12 | 1.3 |
-| Q5 | 28.24 | 67.81 | 179.50 | 36.04 | 4.7 |
-| Q7 | 2.83 | 3.20 | 4.12 | 2.91 | 6.2 |
-| Q8 | 2.27 | 8.26 | 102.44 | 6.49 | 0.0 |
-| Q10 | 26.79 | 56.76 | 134.35 | 31.60 | 0.0 |
-| Q11 | 1.31 | 73.69 | 102.94 | 6.88 | 5.0 |
-| QJ1 | 29.82 | 91.79 | 137.14 | 38.32 | 100.0 |
-| QJ2 | 4.10 | 4.99 | 104.80 | 8.06 | 40.1 |
-| QJ3 | 35.83 | 95.36 | 121.85 | 43.59 | 100.0 |
-| QJ4 | 9.32 | 103.44 | 109.20 | 16.59 | 100.0 |
+| Q1 | 3.55 | 33.66 | 108.46 | 8.59 | 0.0 |
+| Q2 | 6.44 | 8.68 | 101.45 | 8.73 | 3.0 |
+| Q3 | 4.02 | 5.25 | 104.60 | 7.15 | 4.9 |
+| Q4 | 3.37 | 21.66 | 62.90 | 5.62 | 1.3 |
+| Q5 | 8.67 | 45.37 | 110.77 | 14.26 | 4.6 |
+| Q7 | 2.69 | 3.59 | 26.92 | 3.22 | 7.0 |
+| Q8 | 1.94 | 12.03 | 102.11 | 4.99 | 0.0 |
+| Q10 | 2.28 | 3.26 | 36.46 | 3.05 | 0.0 |
+| Q11 | 0.91 | 1.06 | 1.26 | 0.91 | 5.0 |
+| QJ1 | 17.93 | 46.68 | 62.03 | 21.09 | 100.0 |
+| QJ2 | 3.74 | 3.98 | 4.04 | 3.74 | 40.0 |
+| QJ3 | 14.87 | 18.66 | 57.00 | 16.82 | 100.0 |
+| QJ4 | 5.04 | 8.86 | 106.84 | 8.19 | 100.0 |
 
-#### Scaling: p50 Comparison (6K → 59K)
-
-| Query | 6K p50 | 59K p50 | Slowdown |
-|-------|--------|---------|----------|
-| Q1 | 4.4 | 14.6 | 3.3x |
-| Q2 | 6.0 | 7.3 | 1.2x |
-| Q3 | 2.9 | 4.3 | 1.5x |
-| Q4 | 4.8 | 18.2 | 3.8x |
-| Q5 | 8.3 | 28.2 | 3.4x |
-| Q7 | 2.6 | 2.8 | 1.1x |
-| Q8 | 2.0 | 2.3 | 1.1x |
-| Q10 | 5.3 | 26.8 | 5.1x |
-| Q11 | 1.0 | 1.3 | 1.4x |
-| QJ1 | 12.7 | 29.8 | 2.3x |
-| QJ2 | 3.0 | 4.1 | 1.4x |
-| QJ3 | 13.6 | 35.8 | 2.6x |
-| QJ4 | 4.1 | 9.3 | 2.3x |
-
-For a 10x data increase, Q2, Q3, Q7, Q8, Q11 and QJ2 stay within 1.5x, QJ1, QJ3 and QJ4 grow 2-3x, and Q1, Q4, Q5 and Q10 grow 3-5x.
+Query mix: 106 ms.
 
 #### 1M Triples (17,000 products)
 
-Same laptop and single-node cluster (4 tasks, 2 threads), dataset generated with `:num-products 17000`. Median p50 of three runs after a per-triple load:
+Dataset generated with `:num-products 17000`.
 
-| Query | 59K p50 | 1M p50 | Slowdown (17x data) |
-|-------|---------|--------|---------------------|
-| Q1 | 14.6 | 144.7 | 9.9x |
-| Q2 | 7.3 | 6.6 | 0.9x |
-| Q3 | 4.3 | 6.2 | 1.4x |
-| Q4 | 18.2 | 266.4 | 14.6x |
-| Q5 | 28.2 | 385.8 | 13.7x |
-| Q7 | 2.8 | 5.5 | 2.0x |
-| Q8 | 2.3 | 2.0 | 0.9x |
-| Q10 | 26.8 | 519.3 | 19.4x |
-| Q11 | 1.3 | 1.0 | 0.8x |
-| QJ1 | 29.8 | 374.9 | 12.6x |
-| QJ2 | 4.1 | 8.2 | 2.0x |
-| QJ3 | 35.8 | 564.6 | 15.8x |
-| QJ4 | 9.3 | 111.0 | 11.9x |
+| Query | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | Avg Results |
+|-------|----------|----------|----------|-----------|-------------|
+| Q1 | 6.05 | 75.52 | 107.34 | 12.85 | 0.0 |
+| Q2 | 7.41 | 12.73 | 86.70 | 9.32 | 3.0 |
+| Q3 | 6.26 | 85.27 | 107.52 | 14.75 | 10.0 |
+| Q4 | 5.53 | 57.15 | 77.16 | 9.79 | 0.7 |
+| Q5 | 17.91 | 47.65 | 119.41 | 23.45 | 5.0 |
+| Q7 | 5.28 | 8.64 | 26.65 | 6.04 | 6.0 |
+| Q8 | 1.94 | 2.43 | 34.19 | 2.62 | 0.0 |
+| Q10 | 4.62 | 22.44 | 80.42 | 8.01 | 0.0 |
+| Q11 | 0.93 | 1.38 | 77.93 | 3.63 | 5.0 |
+| QJ1 | 19.13 | 38.35 | 59.61 | 21.40 | 100.0 |
+| QJ2 | 8.48 | 14.60 | 96.53 | 11.07 | 50.0 |
+| QJ3 | 19.35 | 45.33 | 65.18 | 22.24 | 100.0 |
+| QJ4 | 6.00 | 10.15 | 68.86 | 8.12 | 100.0 |
 
-Query mix: about 2.4 s (225 ms at 59K). Lookups by subject or by a selective property stay flat (Q2, Q3, Q7, Q8, Q11, QJ2). The other seven grew with the data because a whole property was read where a few lookups or a short scan would do.
+Query mix: 153 ms.
 
-**After limited scans and lookups instead of scans** (same 1M store, module updated in place, runs alternated main, branch, branch, main; median p50 in ms):
+#### Scaling: p50 Comparison (6K → 59K → 1M)
+
+| Query | 6K p50 | 59K p50 | 1M p50 | 6K → 1M |
+|-------|--------|---------|--------|---------|
+| Q1 | 2.7 | 3.5 | 6.0 | 2.2x |
+| Q2 | 6.0 | 6.4 | 7.4 | 1.2x |
+| Q3 | 3.2 | 4.0 | 6.3 | 1.9x |
+| Q4 | 2.5 | 3.4 | 5.5 | 2.2x |
+| Q5 | 6.2 | 8.7 | 17.9 | 2.9x |
+| Q7 | 2.4 | 2.7 | 5.3 | 2.2x |
+| Q8 | 1.8 | 1.9 | 1.9 | 1.1x |
+| Q10 | 2.1 | 2.3 | 4.6 | 2.2x |
+| Q11 | 0.9 | 0.9 | 0.9 | 1.1x |
+| QJ1 | 13.5 | 17.9 | 19.1 | 1.4x |
+| QJ2 | 2.6 | 3.7 | 8.5 | 3.3x |
+| QJ3 | 13.6 | 14.9 | 19.4 | 1.4x |
+| QJ4 | 4.6 | 5.0 | 6.0 | 1.3x |
+
+For 167 times more data the query mix grows from 96 ms to 153 ms, and no query's p50 grows more than 3.3x. `ORDER BY ... LIMIT` and `DISTINCT ... LIMIT` over a large intermediate result still compute every row; none of these 13 queries is slow for that reason at this size.
+
+#### Before Limited Scans and Lookups Instead of Scans
+
+Earlier versions read a whole property where a few lookups or a short scan would do, so seven of the queries grew with the data: the query mix was 225 ms at 59K triples and 2.4 s at 1M. Measured on one loaded 1M store with the module updated in place, runs alternated before, after, after, before (median p50 in ms, two runs per variant):
 
 | Query | Before | After | Speedup |
 |-------|--------|-------|---------|
@@ -578,7 +584,7 @@ Query mix: about 2.4 s (225 ms at 59K). Lookups by subject or by a selective pro
 | QJ3 | 571.4 | 20.9 | 27x |
 | QJ4 | 127.2 | 6.2 | 21x |
 
-Query mix: 2.6-2.9 s before, 0.16-0.20 s after, which is below the 225 ms mix measured at 59K triples before these changes. Two runs per variant; Q1, Q8 and Q10 return no rows on this dataset. `ORDER BY ... LIMIT` and `DISTINCT ... LIMIT` over a large intermediate result still compute every row.
+Query mix: 2.6-2.9 s before, 0.16-0.20 s after.
 
 **Loading 1,005,547 triples:**
 
@@ -608,6 +614,7 @@ The following optimizations are applied automatically during query planning:
 - **Query fallback**: Some unsupported SPARQL operators fall back to RDF4J's local evaluation strategy, which may not scale for large datasets; `SERVICE` is explicitly unsupported
 - **RDF 1.2 partial**: Triple terms work via RDF-star (`<< s p o >>`), but RDF 1.2 `<<( s p o )>>` syntax, `~ :reifier` syntax, `{| |}` annotations, and `rdf:reifies` semantics are not yet supported. 5/41 W3C SPARQL 1.2 conformance tests pass; 36 are quarantined
 - **Triple term decomposition is client-side**: Extracting subject/predicate/object from triple terms uses string parsing on the SAIL client, not distributed Rama topologies. Constant triple-term lookups are O(1) distributed, but variable decomposition and component filtering are post-fetch
+- **`ORDER BY ... LIMIT` and `DISTINCT ... LIMIT`**: Over a large intermediate result these compute every row before the limit applies; there is no distributed top-N yet
 - **Query timeout**: Cancellation is best-effort; Rama cluster queries may continue after client timeout
 - **SPARQL endpoint**: Read-only by default; SPARQL UPDATE must be enabled explicitly and can require a Bearer token. There is no TLS, rate limiting or request size limit, and results are buffered in memory, so put it behind a reverse proxy outside development
 
