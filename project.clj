@@ -61,6 +61,7 @@
   :test-selectors {:unit (fn [m] (contains? #{"rama-sail.sail.optimizer-test"
                                               "rama-sail.sail.adapter-test"
                                               "rama-sail.sail.triple-refs-test"
+                                              "rama-sail.sail.serialization-golden-test"
                                               "rama-sail.query.helpers-test"
                                               "rama-sail.query.expr-test"
                                               "rama-sail.query.term-order-test"

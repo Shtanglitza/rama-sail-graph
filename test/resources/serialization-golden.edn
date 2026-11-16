@@ -1,0 +1,52 @@
+;; val->str on RDF4J 5.2.2 (rama-sail main, Nov 16, 2026). Do not regenerate after an upgrade.
+[["iri" "<http://ex/a>"]
+ ["iri with unicode" "<http://ex/café>"]
+ ["bnode" "_:b1"]
+ ["plain literal" "\"hello\""]
+ ["xsd:string literal" "\"hello\""]
+ ["escapes" "\"tab\there \\\"q\\\" back\\\\slash\\nnew é 😀\""]
+ ["lang lower" "\"chat\"@fr"]
+ ["lang mixed case" "\"colour\"@en-GB"]
+ ["lang upper" "\"x\"@EN-US"]
+ ["integer" "\"42\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+ ["decimal" "\"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal>"]
+ ["double" "\"1000.0\"^^<http://www.w3.org/2001/XMLSchema#double>"]
+ ["boolean" "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"]
+ ["date" "\"2026-11-16\"^^<http://www.w3.org/2001/XMLSchema#date>"]
+ ["custom datatype" "\"abc\"^^<http://ex/dt>"]
+ ["triple term" "<< <http://ex/a> <http://ex/p> \"v\"@en >>"]
+ ["triple term with bnode" "<< _:b1 <http://ex/p> <http://ex/a> >>"]
+ ["nested in object"
+  "<< <http://ex/a> <http://ex/p> << <http://ex/a> <http://ex/p> _:b1 >> >>"]
+ ["turtle"
+  ["\"1\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+   "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+   "\"1.0\"^^<http://www.w3.org/2001/XMLSchema#double>"
+   "\"2026-11-16\"^^<http://www.w3.org/2001/XMLSchema#date>"
+   "\"LANG\"@DE"
+   "\"lang\"@en-GB"
+   "\"long \\\"quoted\\\"\""
+   "\"multi\\nline\""
+   "\"plain\""
+   "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+   "<http://ex/café>"
+   "_:x"]]
+ ["sparql"
+  ["\"1\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+   "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+   "\"1.0\"^^<http://www.w3.org/2001/XMLSchema#double>"
+   "\"2026-11-16\"^^<http://www.w3.org/2001/XMLSchema#date>"
+   "\"LANG\"@DE"
+   "\"lang\"@en-GB"
+   "\"plain\""
+   "\"tab\tq\\\"\""
+   "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+   "<http://ex/p>"
+   "<http://ex/q>"
+   "<http://ex/r>"
+   "<http://ex/t>"
+   "<http://ex/u>"
+   "<http://ex/v>"
+   "<http://ex/w>"
+   "<http://ex/x>"
+   "<http://ex/y>"]]]
