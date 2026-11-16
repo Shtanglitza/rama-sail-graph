@@ -19,6 +19,15 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an optional `--auth-token` (Bearer) gate, and a configurable `--cors-origin`.
 
 ### Added
+- **`rama-sail.migrate`: rewrite subject-position triple terms before the RDF4J 6 upgrade.** RDF 1.2
+  allows a triple term only as an object. `migrate!` moves every `<< s p o >> :x :y g` to a reifier
+  (`R rdf:reifies << s p o >> g`, `R :x :y g`; one deterministic blank node per distinct triple
+  term, nested subject-position terms innermost first) through `:commit` records, waits until the
+  indexer has applied it and checks that nothing is left; `dry-run` reports what it would change.
+  Reads through a new read-only `triple-term-quads` query topology (paged key ranges of `$$spoc` and
+  `$$ospc`). Run it on this RDF4J 5 version, after a module update and with other writers stopped,
+  in the same maintenance window as the RDF4J 6 upgrade: the RDF4J 5 server no longer answers
+  `<< s p o >> :x ?y` on migrated data. The README lists the steps.
 - **Queries that grew with the data now stay flat (1M triples).** A profile showed where the seven
   slow BSBM queries read too much:
   - Limited index scans: a new `find-triples-limit` query topology reads the index in key order and

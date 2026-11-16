@@ -254,6 +254,14 @@
             ;; Unexpected character — skip
             :else (recur (inc pos) parts)))))))
 
+(defn triple-term-parts
+  "The subject, predicate and object strings of a canonical triple term
+   `<< s p o >>`, or nil when `s` is not one."
+  [^String s]
+  (when (and s (.startsWith s "<< ") (.endsWith s " >>"))
+    (let [parts (parse-triple-term-parts (subs s 3 (- (count s) 3)))]
+      (when (= 3 (count parts)) parts))))
+
 (defn str->val
   "Parse an N-Triples formatted string into an RDF4J Value.
    Throws IllegalArgumentException for malformed input."

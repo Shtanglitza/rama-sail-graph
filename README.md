@@ -223,6 +223,26 @@ WHERE { GRAPH ?g { ?s ?p ?o } }
 
 Triple terms are stored as first-class values in all four quad indexes, using `<< <s> <p> <o> >>` canonical serialization. Nested triple terms are supported to arbitrary depth.
 
+**Before upgrading to RDF4J 6 (RDF 1.2).** RDF 1.2 allows a triple term only as an object; statements about a triple go through a reifier (`_:r rdf:reifies <<( s p o )>>` and `_:r :source :hr`), and RDF 1.2 SPARQL reads `<< s p o >> :source ?x` that way. A store that has triple terms in subject position must be rewritten while it still runs an RDF4J 5 version. Each `<< s p o >> :x :y g` becomes `R rdf:reifies << s p o >> g` plus `R :x :y g`, with one blank-node reifier per distinct triple term (`_:reif-` + a hash of the term), so all statements about one triple stay on one node and running it again changes nothing. A triple term in the subject position of another triple term is reified the same way, innermost first; `:nested` counts those quads, whose rewrite changes what the outer term denotes.
+
+Plan the migration and the upgrade as one maintenance window. Once the data is migrated, the RDF4J 5 server no longer answers RDF-star queries such as `<< :a :knows :b >> :source ?s` (they now read `?r rdf:reifies << :a :knows :b >> ; :source ?s`); RDF4J 6 answers the original query again, because RDF 1.2 SPARQL reads it through the reifier. In order:
+
+1. Update the running module to this release (`rama deploy --action update --jar <this release's jar> --module rama-sail.core/RdfStorageModule`). It adds the read-only `triple-term-quads` query the migration uses; without it the migration stops with an error saying so. The data stays in place.
+2. Stop every writer: the SPARQL server and any loaders. The migration reads a page, then writes its rewrite.
+3. From a Clojure REPL with this release on the classpath, connect to the cluster and run a dry run, then the migration:
+
+   ```clojure
+   (require '[com.rpl.rama :as rama] 'rama-sail.core '[rama-sail.migrate :as migrate])
+   (def cluster (rama/open-cluster-manager {"conductor.host" "conductor-host" "conductor.port" 1973}))
+   (migrate/dry-run cluster "rama-sail.core/RdfStorageModule")   ;; {:quads n :reifiers n :nested n :samples [...]}
+   (migrate/migrate! cluster "rama-sail.core/RdfStorageModule")  ;; rewrites, waits, checks: (:quads (:remaining result)) is 0
+   ```
+
+   Review `:samples`, and `:nested` if it is not 0, before running `migrate!`. If `:remaining` is not 0, a writer was still running: stop it and run `migrate!` again.
+4. Deploy the RDF4J 6 release and restart the writers.
+
+On a single-node local cluster, a store with 150K quads, 100K of them with a triple term as subject, took 6 s for the dry run and 78 s for the migration.
+
 ## Architecture
 
 ### Storage Layer (`core.clj`, `module/`)
