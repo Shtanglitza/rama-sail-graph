@@ -399,6 +399,64 @@
                     (|origin)
                     (aggs/+set-agg *ctx :> *contexts)))
 
+;; --- TRIPLE-TERM QUADS (for rama-sail.migrate) ---
+
+(def triple-term-key-prefix
+  "Canonical triple terms start with this; they sort together in an index's keys."
+  "<< ")
+
+(def max-triple-term-page-keys 1000)
+
+(defn spoc-quads "[[p o c] ...] under subject s -> quads." [s poc] (mapv (fn [[p o c]] [s p o c]) poc))
+(defn ospc-quads "[[s p c] ...] under object o -> quads." [o spc] (mapv (fn [[s p c]] [s p o c]) spc))
+
+(defn triple-term-page
+  "The `max-keys` (capped) smallest keys of the per-task rows [key quads], in key order."
+  [rows max-keys]
+  (vec (take (min max-keys max-triple-term-page-keys) (sort-by first rows))))
+
+(defn triple-term-quads-query-topology
+  "One page of the quads whose subject (`:subject`, from $$spoc) or object
+   (`:object`, from $$ospc) is a triple term, for keys after `after` (from the
+   first triple-term key when nil). Returns up to `max-keys` keys in key order
+   as [[key [[s p o c] ...]] ...]; an empty page means there are no more. Read
+   only: rama-sail.migrate pages through it to find what RDF4J 6 cannot read."
+  [topologies]
+  (<<query-topology topologies "triple-term-quads" [*position *after *max-keys :> *page]
+                    (min *max-keys max-triple-term-page-keys :> *n)
+                    (|all)
+                    (<<if (nil? *after)
+                          (identity triple-term-key-prefix :> *start)
+                          (identity true :> *inclusive?)
+                          (else>)
+                          (identity *after :> *start)
+                          (identity false :> *inclusive?))
+                    (<<if (= *position :subject)
+                          (local-select> [(sorted-map-range-from *start {:max-amt *n :inclusive? *inclusive?})
+                                          (subselect MAP-KEYS)]
+                                         $$spoc :> *candidates)
+                          (else>)
+                          (local-select> [(sorted-map-range-from *start {:max-amt *n :inclusive? *inclusive?})
+                                          (subselect MAP-KEYS)]
+                                         $$ospc :> *candidates))
+                    (ops/explode *candidates :> *k)
+                    (filter> (str/starts-with? *k triple-term-key-prefix))
+                    (<<if (= *position :subject)
+                          ;; $$spoc: s -> p -> o -> #{c}
+                          (local-select> [(keypath *k)
+                                          (subselect ALL (collect-one FIRST) LAST ALL (collect-one FIRST) LAST ALL)]
+                                         $$spoc {:allow-yield? true} :> *poc)
+                          (spoc-quads *k *poc :> *quads)
+                          (else>)
+                          ;; $$ospc: o -> s -> p -> #{c}
+                          (local-select> [(keypath *k)
+                                          (subselect ALL (collect-one FIRST) LAST ALL (collect-one FIRST) LAST ALL)]
+                                         $$ospc {:allow-yield? true} :> *spc)
+                          (ospc-quads *k *spc :> *quads))
+                    (|origin)
+                    (aggs/+vec-agg [*k *quads] :> *rows)
+                    (triple-term-page *rows *max-keys :> *page)))
+
 ;; --- PENDING GRAPH CLEARS ---
 
 (defn pending-clear-count-query-topology
@@ -787,6 +845,7 @@
   (bind-query-topology topologies)
   (order-query-topology topologies)
   (list-contexts-query-topology topologies)
+  (triple-term-quads-query-topology topologies)
   (pending-clear-count-query-topology topologies)
   (pending-commit-count-query-topology topologies)
   (count-statements-query-topology topologies)

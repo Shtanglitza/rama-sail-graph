@@ -84,7 +84,8 @@
                                                      "rama-sail.sail.property-path-test"
                                                      "rama-sail.sail.rdf-star-test"
                                                      "rama-sail.server.sparql-test"
-                                                     "rama-sail.bulk-test"}
+                                                     "rama-sail.bulk-test"
+                                                     "rama-sail.migrate-test"}
                                                    (str (:ns m))))
                    :w3c (fn [m] (contains? #{"rama-sail.sail.w3c.sparql11-property-path-test"
                                              "rama-sail.sail.w3c.sparql12-test"}

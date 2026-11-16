@@ -223,6 +223,16 @@ WHERE { GRAPH ?g { ?s ?p ?o } }
 
 Triple terms are stored as first-class values in all four quad indexes, using `<< <s> <p> <o> >>` canonical serialization. Nested triple terms are supported to arbitrary depth.
 
+**Before upgrading to RDF4J 6 (RDF 1.2).** RDF 1.2 allows a triple term only as an object; statements about a triple go through a reifier (`_:r rdf:reifies <<( s p o )>>` and `_:r :source :hr`), and RDF 1.2 SPARQL reads `<< s p o >> :source ?x` that way. A store that has triple terms in subject position must be rewritten while it still runs this RDF4J 5 version. Stop other writers, then:
+
+```clojure
+(require '[rama-sail.migrate :as migrate])
+(migrate/dry-run cluster "rama-sail.core/RdfStorageModule")   ;; {:quads n :reifiers n :nested n :samples [...]}
+(migrate/migrate! cluster "rama-sail.core/RdfStorageModule")  ;; rewrites, waits, checks: (:quads (:remaining result)) is 0
+```
+
+Each `<< s p o >> :x :y g` becomes `R rdf:reifies << s p o >> g` plus `R :x :y g`, with one blank-node reifier per distinct triple term (`_:reif-` + a hash of the term), so all statements about one triple stay on one node and running it again changes nothing. A triple term in the subject position of another triple term is reified the same way, innermost first; `:nested` counts those quads, whose rewrite changes what the outer term denotes.
+
 ## Architecture
 
 ### Storage Layer (`core.clj`, `module/`)
