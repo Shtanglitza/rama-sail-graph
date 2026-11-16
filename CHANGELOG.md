@@ -77,6 +77,13 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are shrunk to a minimal query. `RANDOM_QUERY_SEED` / `RANDOM_QUERY_COUNT` override the run.
 
 ### Changed
+- **Rama 1.10.0 (from 1.9.0), Clojure 1.12.6.** Rama 1.10 fixes yielding selects over two range
+  navigators, which the limited index scans (`find-triples-limit`) use, and stalled or failed
+  backups. It also bundles Ring 1.15 on Jetty 12 and Jackson 2.22, which collided with versions this
+  project pinned or pulled in through RDF4J: Ring is now 1.15.5 with Rama's own Jetty server, and
+  RDF4J's older `jackson-core` and `commons-io` no longer shadow Rama's (the old `jackson-core`
+  broke AOT compilation). Rama 1.10.0 is now the minimum: deploy the module only to 1.10 clusters,
+  and run `lein clean` after pulling this change.
 - README reference results re-measured at 6K, 59K and 1M triples after the limited scans and
   lookups: query mix 96 ms, 106 ms and 153 ms (previously 225 ms at 59K and 2.4 s at 1M). The
   earlier before/after comparison at 1M is kept as a separate subsection.

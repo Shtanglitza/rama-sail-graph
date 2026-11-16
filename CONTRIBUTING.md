@@ -6,7 +6,7 @@ Thank you for your interest in contributing! This document provides guidelines a
 
 - Java 17+
 - [Leiningen](https://leiningen.org/)
-- [Rama 1.6.0](https://redplanetlabs.com/docs) — required for integration tests. Rama includes a free embedded license for clusters up to two Supervisor nodes.
+- [Rama 1.10.0](https://redplanetlabs.com/docs) — required for integration tests. Rama includes a free embedded license for clusters up to two Supervisor nodes.
 
 ## Development Workflow
 
