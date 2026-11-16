@@ -1,15 +1,13 @@
 (ns ^:no-doc rama-sail.sail.serialization
-  (:require [clojure.string :as str])
+  (:require [clojure.string :as str]
+            [rama-sail.terms :as terms])
   (:import (java.util Locale)
            (org.eclipse.rdf4j.model.vocabulary XSD)
            [org.eclipse.rdf4j.model Value Resource IRI Literal BNode Triple ValueFactory]
            [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.query.impl MapBindingSet SimpleBinding]))
 
-;; Internal marker for default graph context. Uses a non-IRI format that cannot
-;; be created through normal RDF4J APIs, preventing user data collision.
-;; The "::" prefix is invalid in IRIs, making this a safe internal-only value.
-(def DEFAULT-CONTEXT-VAL "::rama-internal::default-graph")
+(def DEFAULT-CONTEXT-VAL terms/DEFAULT-CONTEXT-VAL)
 
 (def ^ValueFactory VF (SimpleValueFactory/getInstance))
 

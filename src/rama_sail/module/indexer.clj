@@ -6,8 +6,7 @@
         [com.rpl.rama.path])
   (:require [clojure.tools.logging :as log]
             [com.rpl.rama.ops :as ops]
-            [rama-sail.query.helpers :as qh]
-            [rama-sail.sail.serialization :as ser]))
+            [rama-sail.query.helpers :as qh]))
 
 (def ^{:doc "RDF type predicate IRI"} RDF-TYPE-PREDICATE qh/RDF-TYPE-PREDICATE)
 
