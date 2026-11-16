@@ -7,7 +7,7 @@
   (:import [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.model.vocabulary XSD]
            [org.eclipse.rdf4j.model Literal Triple]
-           [org.eclipse.rdf4j.query.algebra ArbitraryLengthPath EmptySet Join LeftJoin Projection ProjectionElem ProjectionElemList SingletonSet Slice StatementPattern TripleRef Var ZeroLengthPath]))
+           [org.eclipse.rdf4j.query.algebra ArbitraryLengthPath EmptySet Join LeftJoin Projection ProjectionElem ProjectionElemList SingletonSet Slice StatementPattern Var ZeroLengthPath]))
 
 (def ^:private ^org.eclipse.rdf4j.model.ValueFactory VF (SimpleValueFactory/getInstance))
 
@@ -783,49 +783,6 @@
       (is (string? serialized))
       (is (.startsWith ^String serialized "<< "))
       (is (.endsWith ^String serialized " >>")))))
-
-;;; ---------------------------------------------------------------------------
-;;; TripleRef Compilation Tests
-;;; ---------------------------------------------------------------------------
-
-(deftest test-triple-ref-compilation
-  (testing "TripleRef compiles to triple-ref plan"
-    (let [s-var (Var. "s")
-          p-var (Var. "p")
-          o-var (Var. "o")
-          expr-var (Var. "__tt1")
-          tr (TripleRef. s-var p-var o-var expr-var)
-          plan (tuple-expr->plan tr)]
-      (is (= :triple-ref (:op plan)))
-      (is (= "?s" (:subject-var plan)))
-      (is (= "?p" (:predicate-var plan)))
-      (is (= "?o" (:object-var plan)))
-      (is (= "?__tt1" (:expr-var plan)))))
-
-  (testing "Join(TripleRef, StatementPattern) rewrites to bind decomposition"
-    ;; Simulates: << ?s ?p ?o >> :confidence ?val
-    (let [s-var (Var. "s")
-          p-var (Var. "p")
-          o-var (Var. "o")
-          expr-var (Var. "__tt1")
-          tr (TripleRef. s-var p-var o-var expr-var)
-          ;; StatementPattern: ?__tt1 :confidence ?val
-          sp-s (Var. "__tt1")
-          sp-p (Var. "_const_confidence" (.createIRI VF "http://ex/confidence") true true)
-          sp-o (Var. "val")
-          sp (StatementPattern. sp-s sp-p sp-o)
-          join (Join. tr sp)
-          plan (tuple-expr->plan join)]
-      ;; Should be rewritten from Join(TripleRef, SP) to Bind(SP, decompose)
-      (is (= :bind (:op plan)))
-      ;; Sub-plan should be the StatementPattern
-      (is (= :bgp (:op (:sub-plan plan))))
-      ;; Bindings should decompose ?__tt1 into ?s, ?p, ?o
-      (is (= 3 (count (:bindings plan))))
-      (let [binding-vars (set (map :var (:bindings plan)))]
-        (is (contains? binding-vars "?s"))
-        (is (contains? binding-vars "?p"))
-        (is (contains? binding-vars "?o"))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Triple Term Expression Evaluation Tests

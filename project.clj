@@ -60,6 +60,7 @@
   ;; release gate (release.yml). Add a new test namespace to one of these sets.
   :test-selectors {:unit (fn [m] (contains? #{"rama-sail.sail.optimizer-test"
                                               "rama-sail.sail.adapter-test"
+                                              "rama-sail.sail.triple-refs-test"
                                               "rama-sail.query.helpers-test"
                                               "rama-sail.query.expr-test"
                                               "rama-sail.query.term-order-test"
@@ -83,6 +84,7 @@
                                                      "rama-sail.sail.compliance-test"
                                                      "rama-sail.sail.property-path-test"
                                                      "rama-sail.sail.rdf-star-test"
+                                                     "rama-sail.sail.triple-term-join-test"
                                                      "rama-sail.server.sparql-test"
                                                      "rama-sail.bulk-test"
                                                      "rama-sail.migrate-test"}
