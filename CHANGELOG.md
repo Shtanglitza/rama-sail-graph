@@ -25,7 +25,9 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term, nested subject-position terms innermost first) through `:commit` records, waits until the
   indexer has applied it and checks that nothing is left; `dry-run` reports what it would change.
   Reads through a new read-only `triple-term-quads` query topology (paged key ranges of `$$spoc` and
-  `$$ospc`). Run it on this RDF4J 5 version, with other writers stopped.
+  `$$ospc`). Run it on this RDF4J 5 version, after a module update and with other writers stopped,
+  in the same maintenance window as the RDF4J 6 upgrade: the RDF4J 5 server no longer answers
+  `<< s p o >> :x ?y` on migrated data. The README lists the steps.
 - **Queries that grew with the data now stay flat (1M triples).** A profile showed where the seven
   slow BSBM queries read too much:
   - Limited index scans: a new `find-triples-limit` query topology reads the index in key order and
