@@ -162,8 +162,6 @@
                           o (if (:by-object? plan) (:subject-var plan) (:object-var plan))]
                       (cond-> (update s :maybe conj o)
                         (not (:optional? plan)) (update :always conj o)))
-      :triple-ref (vars-scope [(:subject-var plan) (:predicate-var plan)
-                               (:object-var plan) (:expr-var plan)])
       (:zero-length-path :arbitrary-length-path) (vars-scope [(:subject plan) (:object plan)])
       (:singleton :empty) empty-scope
       ;; Unmodelled operator: claim nothing, poison :maybe
@@ -1805,11 +1803,6 @@
     :multi-left-join
     ;; Multi-left-join preserves at least base cardinality (optionals don't reduce rows)
     (estimate-plan-cardinality (:base plan))
-
-    :triple-ref
-    ;; TripleRef is always joined with a StatementPattern; on its own it's unbounded.
-    ;; Use a high estimate to ensure the StatementPattern side drives the join.
-    (or (:total-triples *global-stats*) 100000)
 
     :singleton
     1  ;; Exactly one empty row

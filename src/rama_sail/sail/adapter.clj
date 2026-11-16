@@ -7,7 +7,8 @@
             [rama-sail.metrics :as metrics]
             [rama-sail.sail.compilation :as comp :refer [tuple-expr->plan apply-initial-bindings]]
             [rama-sail.sail.optimization :as opt :refer [*predicate-stats* *global-stats* optimize-plan]]
-            [rama-sail.sail.serialization :as ser :refer [val->str str->val DEFAULT-CONTEXT-VAL VF]])
+            [rama-sail.sail.serialization :as ser :refer [val->str str->val DEFAULT-CONTEXT-VAL VF]]
+            [rama-sail.sail.triple-refs :as triple-refs])
   (:import (java.util Iterator)
            (org.eclipse.rdf4j.common.transaction IsolationLevels)
            (org.eclipse.rdf4j.query QueryInterruptedException)
@@ -21,7 +22,7 @@
            [org.eclipse.rdf4j.query.algebra TupleExpr]
            [org.eclipse.rdf4j.model Triple]
            [org.eclipse.rdf4j.sail SailException]
-           [org.eclipse.rdf4j.query BindingSet Dataset]
+           [org.eclipse.rdf4j.query BindingSet Dataset QueryEvaluationException]
            [org.eclipse.rdf4j.common.iteration CloseableIteration CloseableIteratorIteration]))
 
 ;; Default query timeout: 60 seconds
@@ -467,7 +468,13 @@
       (evaluateInternal [^TupleExpr tuple-expr ^Dataset dataset ^BindingSet bindings include-inferred]
         ;; Helper to use RDF4J fallback strategy (goes through getStatementsInternal)
         (letfn [(use-fallback-strategy []
-                  (let [connection-ref this
+                  (let [tuple-expr (triple-refs/pair-triple-refs tuple-expr)
+                        _ (when (triple-refs/unpaired? tuple-expr)
+                            ;; RDF4J would evaluate a leftover TripleRef as
+                            ;; reification (rdf:Statement quads): silently empty
+                            (throw (QueryEvaluationException.
+                                    "RamaSail cannot evaluate a triple-term pattern whose triple term no other pattern binds")))
+                        connection-ref this
                         triple-source (reify TripleSource
                                         (getStatements [_ s p o contexts]
                                           (.getStatements ^AbstractSailConnection connection-ref s p o include-inferred contexts))
@@ -509,7 +516,7 @@
                                         ;; One plan-var-scope memo for compile + optimize
                                         ;; (both consult the cost model per join)
                                         (opt/with-scope-cache
-                                          (let [plan (tuple-expr->plan tuple-expr)
+                                          (let [plan (tuple-expr->plan (triple-refs/pair-triple-refs tuple-expr))
                                                 ;; If initial bindings provided, substitute constants in plan
                                                 plan-with-bindings (if (.isEmpty bindings)
                                                                      plan

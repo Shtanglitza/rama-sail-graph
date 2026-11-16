@@ -158,6 +158,21 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- **Triple-term patterns joined with other patterns returned wrong results.** RDF4J places the
+  part of `<< s p o >>` that builds or takes apart the triple term before the pattern that uses the
+  term, and joins it with whatever precedes it in the group. The compiler paired it with that
+  neighbour. So `?a :knows :bob . :carol :claims << ?a :knows :bob >>` returned nothing (the
+  reversed order worked); with a constant term the constraint was dropped, returning rows for terms
+  nobody claims; nested terms with variables returned nothing; `:carol :claims << ?s ?p ?o >>` also
+  returned an empty row for a non-triple object. Every RDF-star query on the RDF4J fallback
+  returned nothing: inside a transaction with uncommitted writes, with FROM / FROM NAMED, or with an
+  unsupported operator, because RDF4J 5 evaluates triple-term patterns as `rdf:Statement`
+  reification there. A new `rama-sail.sail.triple-refs` rewrites these patterns on a copy of the
+  query before either path: a constant term becomes a constant of the pattern that uses it (an index
+  lookup, as before); any other term is attached to the group member that always binds it, as
+  `isTriple` / `sameTerm` filters and binds of its parts (RDF4J's `rdf:subject` etc. functions, now
+  also compiled natively). A term no pattern binds raises an error instead of returning nothing.
+  Client-side change only.
 - **A graph clear and an add of different commits now take effect in commit order.** A clear removes
   the quads stamped at or before it, and the stamps were the committing clients' wall clocks. With
   two writers whose clocks disagreed, a quad added by the one running ahead survived a `CLEAR` /
