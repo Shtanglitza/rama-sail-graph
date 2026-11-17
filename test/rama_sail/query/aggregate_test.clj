@@ -237,15 +237,28 @@
 
 (def ^:private ^org.eclipse.rdf4j.model.ValueFactory VF (SimpleValueFactory/getInstance))
 
+;; One in-process cluster for the namespace (test/CLAUDE.md); each test uses its own
+;; predicates, so their data does not mix.
+(def ^:dynamic *ipc* nil)
+(def ^:dynamic *repo* nil)
+
+(defn- repo-fixture [f]
+  (with-open [ipc (rtest/create-ipc)]
+    (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+    (let [repo (doto (SailRepository. (rsail/create-rama-sail ipc (rama/get-module-name RdfStorageModule)))
+                 (.init))]
+      (try
+        (binding [*ipc* ipc *repo* repo] (f))
+        (finally (.shutDown repo))))))
+
+(use-fixtures :once repo-fixture)
+
 (deftest test-e2e-count-no-group-by
   (testing "E2E: COUNT without GROUP BY via SPARQL"
-    (with-open [ipc (rtest/create-ipc)]
-      (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+    (let [ipc *ipc*]
 
       (let [module-name (rama/get-module-name RdfStorageModule)
-            sail (rsail/create-rama-sail ipc module-name)
-            repo (SailRepository. sail)]
-        (.init repo)
+            repo *repo*]
 
         (let [^SailRepositoryConnection conn (.getConnection repo)
               person (.createIRI VF "http://ex/Person")
@@ -272,18 +285,14 @@
             (let [cnt-val (.intValue ^Literal (.getValue ^BindingSet (first results) "cnt"))]
               (is (= 3 cnt-val) "Should count 3 people")))
 
-          (.close conn))
-        (.shutDown repo)))))
+          (.close conn))))))
 
 (deftest test-e2e-group-by-count
   (testing "E2E: GROUP BY with COUNT via SPARQL"
-    (with-open [ipc (rtest/create-ipc)]
-      (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+    (let [ipc *ipc*]
 
       (let [module-name (rama/get-module-name RdfStorageModule)
-            sail (rsail/create-rama-sail ipc module-name)
-            repo (SailRepository. sail)]
-        (.init repo)
+            repo *repo*]
 
         (let [^SailRepositoryConnection conn (.getConnection repo)
               works-at (.createIRI VF "http://ex/worksAt")
@@ -320,18 +329,14 @@
               (is (= 2 (get counts "http://ex/Acme")) "Acme should have 2 employees")
               (is (= 2 (get counts "http://ex/Globex")) "Globex should have 2 employees")))
 
-          (.close conn))
-        (.shutDown repo)))))
+          (.close conn))))))
 
 (deftest test-e2e-sum-aggregate
   (testing "E2E: SUM aggregate via SPARQL"
-    (with-open [ipc (rtest/create-ipc)]
-      (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+    (let [ipc *ipc*]
 
       (let [module-name (rama/get-module-name RdfStorageModule)
-            sail (rsail/create-rama-sail ipc module-name)
-            repo (SailRepository. sail)]
-        (.init repo)
+            repo *repo*]
 
         (let [^SailRepositoryConnection conn (.getConnection repo)
               amount (.createIRI VF "http://ex/amount")
@@ -358,18 +363,14 @@
             (let [total (.intValue ^Literal (.getValue ^BindingSet (first results) "total"))]
               (is (= 400 total) "Sum should be 100 + 250 + 50 = 400")))
 
-          (.close conn))
-        (.shutDown repo)))))
+          (.close conn))))))
 
 (deftest test-e2e-avg-aggregate
   (testing "E2E: AVG aggregate via SPARQL"
-    (with-open [ipc (rtest/create-ipc)]
-      (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+    (let [ipc *ipc*]
 
       (let [module-name (rama/get-module-name RdfStorageModule)
-            sail (rsail/create-rama-sail ipc module-name)
-            repo (SailRepository. sail)]
-        (.init repo)
+            repo *repo*]
 
         (let [^SailRepositoryConnection conn (.getConnection repo)
               score (.createIRI VF "http://ex/score")
@@ -398,21 +399,17 @@
             (let [avg (.doubleValue ^Literal (.getValue ^BindingSet (first results) "avg"))]
               (is (== 85.0 avg) "Average should be (80+90+70+100)/4 = 85")))
 
-          (.close conn))
-        (.shutDown repo)))))
+          (.close conn))))))
 
 (deftest test-e2e-min-max-aggregates
   (testing "E2E: MIN and MAX aggregates via SPARQL"
-    (with-open [ipc (rtest/create-ipc)]
-      (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+    (let [ipc *ipc*]
 
       (let [module-name (rama/get-module-name RdfStorageModule)
-            sail (rsail/create-rama-sail ipc module-name)
-            repo (SailRepository. sail)]
-        (.init repo)
+            repo *repo*]
 
         (let [^SailRepositoryConnection conn (.getConnection repo)
-              price (.createIRI VF "http://ex/price")
+              price (.createIRI VF "http://ex/listPrice")
               int-type (.createIRI VF "http://www.w3.org/2001/XMLSchema#integer")
               item1 (.createIRI VF "http://ex/item1")
               item2 (.createIRI VF "http://ex/item2")
@@ -428,7 +425,7 @@
           (th/wait-indexed! ipc module-name)
 
           ;; MIN and MAX prices
-          (let [sparql "SELECT (MIN(?p) AS ?minPrice) (MAX(?p) AS ?maxPrice) WHERE { ?item <http://ex/price> ?p }"
+          (let [sparql "SELECT (MIN(?p) AS ?minPrice) (MAX(?p) AS ?maxPrice) WHERE { ?item <http://ex/listPrice> ?p }"
                 query (.prepareTupleQuery conn sparql)
                 results (with-open [iter (.evaluate query)]
                           (vec (iterator-seq iter)))]
@@ -438,18 +435,14 @@
               (is (= 25 min-price) "Minimum price should be 25")
               (is (= 100 max-price) "Maximum price should be 100")))
 
-          (.close conn))
-        (.shutDown repo)))))
+          (.close conn))))))
 
 (deftest test-e2e-group-by-multiple-aggregates
   (testing "E2E: GROUP BY with multiple aggregates via SPARQL"
-    (with-open [ipc (rtest/create-ipc)]
-      (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+    (let [ipc *ipc*]
 
       (let [module-name (rama/get-module-name RdfStorageModule)
-            sail (rsail/create-rama-sail ipc module-name)
-            repo (SailRepository. sail)]
-        (.init repo)
+            repo *repo*]
 
         (let [^SailRepositoryConnection conn (.getConnection repo)
               category (.createIRI VF "http://ex/category")
@@ -507,5 +500,4 @@
               (is (= 100 (get-in by-cat ["Clothing" :sum])))
               (is (== 50.0 (get-in by-cat ["Clothing" :avg])))))
 
-          (.close conn))
-        (.shutDown repo)))))
+          (.close conn))))))

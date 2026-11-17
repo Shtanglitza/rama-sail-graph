@@ -1,3 +1,33 @@
+(def integration-namespaces
+  "The :integration selector's test namespaces, in two halves that CI runs as parallel jobs
+   (:integration-module, :integration-sail). Split by layer; on GitHub's runners (Nov 16, 2026)
+   the halves took about 250 s and 240 s of a 490 s run. Keep them balanced when adding one."
+  {:module #{"rama-sail.module.indexer-test"
+             "rama-sail.query.aggregate-test"
+             "rama-sail.query.core-test"
+             "rama-sail.query.find-bgp-test"
+             "rama-sail.query.find-triples-test"
+             "rama-sail.query.left-join-test"
+             "rama-sail.query.transaction-test"
+             "rama-sail.query.union-test"
+             "rama-sail.bulk-test"
+             "rama-sail.migrate-test"}
+   :sail #{"rama-sail.sail.e2e-test"
+           "rama-sail.sail.compliance-test"
+           "rama-sail.sail.memorystore-parity-test"
+           "rama-sail.sail.optimizer-equivalence-test"
+           "rama-sail.sail.property-path-test"
+           "rama-sail.sail.random-query-parity-test"
+           "rama-sail.sail.reified-triples-test"
+           "rama-sail.sail.triple-term-join-test"
+           "rama-sail.server.sparql-test"}})
+
+(defn- namespace-selector
+  "A test selector form: true for a test var in one of the namespaces `names`.
+   (defproject evaluates ~ at a map value, not inside a quoted fn form.)"
+  [names]
+  (list 'fn '[m] (list 'contains? names '(str (:ns m)))))
+
 (defproject rama-sail-graph "0.2.0-SNAPSHOT"
   :description "Rama module that integrates with RDF4J SAIL API for RDF quad storage and SPARQL query evaluation"
   :url "https://github.com/Shtanglitza/rama-sail-graph"
@@ -59,7 +89,8 @@
   [["releases" {:id  "maven-releases"
                 :url "https://nexus.redplanetlabs.com/repository/maven-public-releases"}]]
   ;; :unit, :integration and :w3c are the CI gate (.github/workflows/ci.yml) and the
-  ;; release gate (release.yml). Add a new test namespace to one of these sets.
+  ;; release gate (release.yml). Add a new test namespace to one of these sets, or to a
+  ;; half of `integration-namespaces` above.
   :test-selectors {:unit (fn [m] (contains? #{"rama-sail.sail.optimizer-test"
                                               "rama-sail.sail.adapter-test"
                                               "rama-sail.sail.triple-refs-test"
@@ -72,26 +103,11 @@
                                               "rama-sail.metrics-test"
                                               "rama-sail.ci-gate-test"}
                                             (str (:ns m))))
-                   :integration (fn [m] (contains? #{"rama-sail.sail.e2e-test"
-                                                     "rama-sail.query.transaction-test"
-                                                     "rama-sail.query.find-triples-test"
-                                                     "rama-sail.query.find-bgp-test"
-                                                     "rama-sail.module.indexer-test"
-                                                     "rama-sail.query.core-test"
-                                                     "rama-sail.query.aggregate-test"
-                                                     "rama-sail.query.left-join-test"
-                                                     "rama-sail.query.union-test"
-                                                     "rama-sail.sail.optimizer-equivalence-test"
-                                                     "rama-sail.sail.memorystore-parity-test"
-                                                     "rama-sail.sail.random-query-parity-test"
-                                                     "rama-sail.sail.compliance-test"
-                                                     "rama-sail.sail.property-path-test"
-                                                     "rama-sail.sail.reified-triples-test"
-                                                     "rama-sail.sail.triple-term-join-test"
-                                                     "rama-sail.server.sparql-test"
-                                                     "rama-sail.bulk-test"
-                                                     "rama-sail.migrate-test"}
-                                                   (str (:ns m))))
+                   ;; :integration is both halves of `integration-namespaces`; CI runs the
+                   ;; halves as parallel jobs.
+                   :integration ~(namespace-selector (reduce into #{} (vals integration-namespaces)))
+                   :integration-module ~(namespace-selector (:module integration-namespaces))
+                   :integration-sail ~(namespace-selector (:sail integration-namespaces))
                    :w3c (fn [m] (contains? #{"rama-sail.sail.w3c.sparql11-property-path-test"
                                              "rama-sail.sail.w3c.sparql12-test"
                                              "rama-sail.sail.w3c.rdf12-test"}
