@@ -67,15 +67,19 @@ _:b2 <http://ex/w7c> \"X\" .
 "))
 
 (defn- build-model
-  "Parse `data` and add two statements in the named graph <http://ex/g>.
-   (No N-Quads parser on the classpath, so named-graph quads are built here.)"
+  "Parse `data` and add the named-graph statements: two in <http://ex/g>, and
+   :a :p1 :b / :c / :d in <http://ex/ng1> / <ng2> / <ng3> (the W3C pp35 shape).
+   (Named-graph quads are built here rather than parsed from N-Quads.)"
   []
   (let [model (Rio/parse (StringReader. data) "" RDFFormat/NTRIPLES (make-array Resource 0))
         vf (SimpleValueFactory/getInstance)
-        g (.createIRI vf "http://ex/g")
-        p (.createIRI vf "http://ex/inGraph")]
-    (doseq [[s o] [["http://ex/alice" "gv1"] ["http://ex/bob" "gv2"]]]
-      (.add model (.createIRI vf s) p (.createLiteral vf ^String o) (into-array Resource [g])))
+        iri #(.createIRI vf (str "http://ex/" %))
+        g (iri "g")
+        p (iri "inGraph")]
+    (doseq [[s o] [["alice" "gv1"] ["bob" "gv2"]]]
+      (.add model (iri s) p (.createLiteral vf ^String o) (into-array Resource [g])))
+    (doseq [[o ng] [["b" "ng1"] ["c" "ng2"] ["d" "ng3"]]]
+      (.add model (iri "a") (iri "p1") (iri o) (into-array Resource [(iri ng)])))
     model))
 
 (def ^:private module-name (rama/get-module-name RdfStorageModule))
@@ -166,8 +170,18 @@ _:b2 <http://ex/w7c> \"X\" .
     (parity! (str P "SELECT DISTINCT ?c { ?s :city ?c } ORDER BY DESC(?c) LIMIT 1") true)
     (parity! (str P "SELECT DISTINCT ?s ?age { ?s :age ?age } ORDER BY ?age LIMIT 2") true))
   (testing "GRAPH ?g ranges over named graphs only (W3)"
-    (is (= 2 (count (parity! (str P "SELECT ?g ?s { GRAPH ?g { ?s ?p ?o } }")))))
+    (is (= 5 (count (parity! (str P "SELECT ?g ?s { GRAPH ?g { ?s ?p ?o } }")))))
     (parity! (str P "SELECT ?g ?s { GRAPH ?g { ?s ?p ?o } } LIMIT 5"))))
+
+(deftest test-zero-length-path-in-filtered-graph
+  ;; W3C pp35. A path inside GRAPH falls back to RDF4J's evaluation. Without
+  ;; RDF4J's optimizer the filter is not folded into a constant graph, ?g stays
+  ;; unbound inside the path, and RDF4J's ZeroLengthPathIteration (it dedupes
+  ;; nodes across graphs) lost :a :p1* :a in ng1 (b, b instead of a, b, b).
+  (is (= (frequencies [{"s" "http://ex/a" "t" "http://ex/a"}
+                       {"s" "http://ex/a" "t" "http://ex/b"}
+                       {"s" "http://ex/b" "t" "http://ex/b"}])
+         (frequencies (parity! (str P "SELECT ?s ?t { GRAPH ?g { ?s :p1* ?t } FILTER(?g = :ng1) }"))))))
 
 (deftest test-expression-parity
   ;; W4-W6: the shared term comparator (expr/terms-equal, compare-terms,

@@ -15,7 +15,7 @@
            (org.eclipse.rdf4j.query QueryInterruptedException)
            (org.eclipse.rdf4j.query.algebra.evaluation EvaluationStrategy TripleSource)
            (org.eclipse.rdf4j.query.algebra.evaluation.federation FederatedServiceResolver)
-           (org.eclipse.rdf4j.query.algebra.evaluation.impl DefaultEvaluationStrategyFactory)
+           (org.eclipse.rdf4j.query.algebra.evaluation.impl DefaultEvaluationStrategyFactory EvaluationStatistics)
            (org.eclipse.rdf4j.collection.factory.impl DefaultCollectionFactory)
            [org.eclipse.rdf4j.sail.helpers AbstractSail AbstractSailConnection]
            [org.eclipse.rdf4j.model Value Resource Statement IRI ValueFactory Namespace]
@@ -478,7 +478,14 @@
                         ^DefaultEvaluationStrategyFactory factory
                         (doto (DefaultEvaluationStrategyFactory. service-resolver)
                           (.setCollectionFactory (reify Supplier (get [_] (DefaultCollectionFactory.)))))
-                        ^EvaluationStrategy strategy (.createEvaluationStrategy factory dataset triple-source nil)]
+                        ^EvaluationStrategy strategy (.createEvaluationStrategy factory dataset triple-source nil)
+                        ;; Run RDF4J's optimizer pipeline first, as its own SAILs
+                        ;; do. Besides join order and filter pushdown it folds
+                        ;; FILTER(?g = <iri>) into a constant graph; unoptimized,
+                        ;; GRAPH ?g { ?s :p* ?t } stays unbound inside the path and
+                        ;; RDF4J's ZeroLengthPathIteration (it deduplicates nodes
+                        ;; across graphs) drops zero-length matches (W3C pp35).
+                        tuple-expr (.optimize strategy tuple-expr (EvaluationStatistics.) bindings)]
                     (-> strategy
                         (.precompile tuple-expr)
                         (.evaluate bindings))))]

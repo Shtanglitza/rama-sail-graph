@@ -370,8 +370,8 @@ The project includes a vendored copy of the W3C [property-path](https://github.c
 
 | Result | Count | Details |
 |--------|-------|---------|
-| **Pass** | 31 | Sequence, alternative, inverse, transitive (`+`/`*`), zero-or-one (`?`), cycles, diamonds, negated property sets, operator precedence, paths inside `GRAPH` |
-| **Expected failures** | 2 | `pp35` (a zero-length match lost in `GRAPH ?g { ?s :p1* ?t }`), `pp37` (nested star `(*)*`) |
+| **Pass** | 32 | Sequence, alternative, inverse, transitive (`+`/`*`), zero-or-one (`?`), cycles, diamonds, negated property sets, operator precedence, paths inside `GRAPH` |
+| **Expected failure** | 1 | `pp37` (nested star `(*)*`) |
 
 ### Observability
 

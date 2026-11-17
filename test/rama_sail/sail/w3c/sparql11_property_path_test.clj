@@ -11,6 +11,4 @@
 
 (deftest sparql11-property-path
   (runner/run-suite runner/*repo* "w3c/sparql11/property-path/"
-                    {"pp35" (str "GRAPH ?g { ?s :p1* ?t } loses the zero-length match :a :p1* :a in"
-                                 " RDF4J's fallback evaluation over RamaSail (MemoryStore finds it)")
-                     "pp37" "nested star paths: ((:P)*)* needs recursive ALP handling"}))
+                    {"pp37" "nested star paths: ((:P)*)* needs recursive ALP handling"}))
