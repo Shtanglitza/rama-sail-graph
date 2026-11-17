@@ -228,7 +228,8 @@
     (set
      (for [[group-key agg-states] group-map]
        (let [;; Start with group variable bindings
-             base (zipmap group-vars group-key)
+             ;; an unbound key value leaves its variable unbound, not nil
+             base (into {} (remove (comp nil? val)) (zipmap group-vars group-key))
              ;; Add computed aggregates
              agg-bindings (into {}
                                 (for [{:keys [name]} aggregates

@@ -217,6 +217,10 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `REGEX` flags follow XPath `fn:matches`: `q` matches the pattern literally, `i` folds case over
     Unicode (`"ÉCOLE"` matches `"école"`), and any flag other than `s m i x q` is an error (was
     ignored).
+  - `SUBJECT()` / `PREDICATE()` / `OBJECT()` and triple-term `=` read a nested triple term whose
+    literal contains `>>` or `<<` correctly (the term ended at the first `>>`).
+  - A GROUP BY key that is unbound leaves its variable unbound inside the module, instead of
+    binding it to nil (the SAIL already hid the nil).
   Module-side change (aggregation runs in the module): redeploy the module.
 - The benchmark regression test (`rama-sail.bench.regression-test`, not in CI) ran its latency
   checks on an empty store: it appended three-term `[:add [s p o]]` records, which the indexer has

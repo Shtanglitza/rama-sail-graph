@@ -312,6 +312,15 @@
               (let [end (loop [i (+ pos 2) depth 1]
                           (cond
                             (>= i (dec len)) (inc len)
+                            ;; a literal may contain << or >>: skip it whole
+                            (= (.charAt inner i) \")
+                            (recur (loop [j (inc i)]
+                                     (cond
+                                       (>= j len) len
+                                       (= (.charAt inner j) \\) (recur (+ j 2))
+                                       (= (.charAt inner j) \") (inc j)
+                                       :else (recur (inc j))))
+                                   depth)
                             (and (= (.charAt inner i) \<) (< (inc i) len) (= (.charAt inner (inc i)) \<))
                             (recur (+ i 2) (inc depth))
                             (and (= (.charAt inner i) \>) (< (inc i) len) (= (.charAt inner (inc i)) \>))
@@ -581,7 +590,9 @@
 (defn compare-terms
   "The ordering operators (< <= > >=): negative/zero/positive, or ::error when
    the operands are not order-comparable. Strict SPARQL: IRIs, blank nodes,
-   triple terms, opaque literals and mixed value classes are a type error."
+   triple terms, opaque literals and mixed value classes are a type error.
+   NaN sorts after every number, as in Jena and RDF4J (decided Nov 17, 2026;
+   XPath op:numeric-less-than would make every ordering with NaN false)."
   [l r]
   (compare-classified (term-value l) (term-value r)))
 

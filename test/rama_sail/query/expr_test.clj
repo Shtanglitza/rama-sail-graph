@@ -189,6 +189,10 @@
     (is (zero? (e/compare-terms (str "\"-0.0\"" xsd-dbl) (str "\"0.0\"" xsd-dbl)))))
   (testing "NaN = NaN is false (RDF4J says true; IEEE and op:numeric-equal say false)"
     (is (false? (e/terms-equal (str "\"NaN\"" xsd-dbl) (str "\"NaN\"" xsd-dbl)))))
+  (testing "NaN sorts after every number in < and >, as in Jena and RDF4J (decided Nov 17, 2026)"
+    (let [nan (c (str "\"NaN\"" xsd-dbl)) one (c (str "\"1\"" xsd-int))]
+      (is (true? (e/eval-expr (cmp* :gt nan one) {})))
+      (is (true? (e/eval-expr (cmp* :lt one nan) {})))))
   (testing "unequal doubles keep their order"
     (is (neg? (e/compare-terms (str "\"-1.0\"" xsd-dbl) (str "\"0.0\"" xsd-dbl))))
     (is (pos? (e/compare-terms (str "\"1.5\"" xsd-dbl) (str "\"1\"" xsd-int))))))
@@ -221,6 +225,20 @@
                                 (cmp* :eq (v "?missing") (c "\"a\""))
                                 (c "\"fallback\"")]}
                         {})))))
+
+;;; ---------------------------------------------------------------------------
+;;; Triple-term parts
+;;; ---------------------------------------------------------------------------
+
+(deftest test-nested-triple-term-with-angle-brackets-in-a-literal
+  (testing "a literal containing >> or << inside a nested triple term does not end it early"
+    (let [inner "<< <http://ex/b> <http://ex/q> \"x >> y << z\" >>"
+          outer (str "<< " inner " <http://ex/p> <http://ex/o> >>")
+          part (fn [t] (e/eval-expr {:type t :arg (c outer)} {}))]
+      (is (= inner (part :triple-subject)))
+      (is (= "<http://ex/p>" (part :triple-predicate)))
+      (is (= "<http://ex/o>" (part :triple-object)))
+      (is (= "\"x >> y << z\"" (e/eval-expr {:type :triple-object :arg (c inner)} {}))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Regex safety
@@ -330,6 +348,17 @@
     (is (nil? (run-agg :avg false (v "?x") [{"?x" (str "\"1\"" xsd-int)} {"?x" "\"a\""}]))))
   (testing "AVG of no values is 0"
     (is (= (str "\"0\"" xsd-int) (run-agg :avg false (v "?x") [{}])))))
+
+(deftest test-group-by-unbound-key
+  (testing "a group whose key is unbound leaves the key variable unbound, not nil"
+    (let [rows (agg/finalize-group-results
+                {[nil] {"?n" [:count 2]} ["<http://ex/a>"] {"?n" [:count 1]}}
+                ["?k"]
+                [{:name "?n" :agg {:fn :count :arg (v "?x") :distinct false}}])
+          unbound (first (filter #(= (str "\"2\"" xsd-int) (get % "?n")) rows))]
+      (is (= 2 (count rows)))
+      (is (= {"?n" (str "\"2\"" xsd-int)} unbound))
+      (is (not (contains? unbound "?k"))))))
 
 (deftest test-min-max-datatype-aware
   (testing "MIN/MAX order numerically by datatype"
