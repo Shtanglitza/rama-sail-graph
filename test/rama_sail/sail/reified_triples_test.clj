@@ -1,4 +1,4 @@
-(ns rama-sail.sail.rdf-star-test
+(ns rama-sail.sail.reified-triples-test
   "Integration tests for RDF 1.2 triple terms and reified triples, added
    through the RDF4J API: a reifier `r rdf:reifies <<( s p o )>>` carries the
    annotations, and SPARQL `<< s p o >>` finds them (provenance and confidence
@@ -36,7 +36,7 @@
                             :when v]
                         [name (.stringValue v)])))))))
 
-(deftest test-rdf-star-store-and-query-annotations
+(deftest test-store-and-query-annotations
   (with-open [ipc (rtest/create-ipc)]
     (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
     (let [module-name (rama/get-module-name RdfStorageModule)
@@ -86,7 +86,7 @@
 
         (.close conn)))))
 
-(deftest test-rdf-star-provenance-query
+(deftest test-provenance-query
   (with-open [ipc (rtest/create-ipc)]
     (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
     (let [module-name (rama/get-module-name RdfStorageModule)
@@ -134,7 +134,7 @@
 
         (.close conn)))))
 
-(deftest test-rdf-star-confidence-filter
+(deftest test-confidence-filter
   (with-open [ipc (rtest/create-ipc)]
     (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
     (let [module-name (rama/get-module-name RdfStorageModule)
@@ -178,4 +178,4 @@
         (.close conn)))))
 
 (comment
-  (run-tests 'rama-sail.sail.rdf-star-test))
+  (run-tests 'rama-sail.sail.reified-triples-test))

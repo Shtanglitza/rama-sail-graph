@@ -86,14 +86,11 @@ lein test
 # Run RDF4J SAIL compliance tests only
 lein test :only rama-sail.sail.compliance-test
 
-# Run RDF-star / triple term integration tests
-lein test :only rama-sail.sail.rdf-star-test
+# Run triple term / reified triple integration tests
+lein test :only rama-sail.sail.reified-triples-test
 
 # Run the W3C conformance suites (SPARQL 1.2, RDF 1.2 formats, SPARQL 1.1 property paths)
 lein test :w3c
-
-# Run W3C SPARQL 1.1 property path conformance suite
-lein test :only rama-sail.sail.w3c.sparql11-property-path-test
 ```
 
 ### SPARQL HTTP Endpoint
@@ -227,13 +224,16 @@ SELECT ?r ?t WHERE {
 
 Triple terms are stored as values in all four quad indexes, using the canonical string `<< <s> <p> <o> >>`, and may nest (in object position). A constant triple term is an index lookup; `<< s p o >>` with a selective annotation such as `:source :hr` starts from that annotation and looks up `rdf:reifies` per reifier.
 
-**Before upgrading to RDF4J 6 (RDF 1.2).** RDF 1.2 allows a triple term only as an object; statements about a triple go through a reifier (`_:r rdf:reifies <<( s p o )>>` and `_:r :source :hr`), and RDF 1.2 SPARQL reads `<< s p o >> :source ?x` that way. A store that has triple terms in subject position must be rewritten while it still runs an RDF4J 5 version. Each `<< s p o >> :x :y g` becomes `R rdf:reifies << s p o >> g` plus `R :x :y g`, with one blank-node reifier per distinct triple term (`_:reif-` + a hash of the term), so all statements about one triple stay on one node and running it again changes nothing. A triple term in the subject position of another triple term is reified the same way, innermost first; `:nested` counts those quads, whose rewrite changes what the outer term denotes.
+**Before upgrading to RDF4J 6 (RDF 1.2).** Only a store written by an RDF4J 5 version that holds triple terms in subject position (`<< s p o >> :source :hr`) needs this; RDF 1.2 allows a triple term only as an object. Rewrite such data with `rama-sail.migrate` while the store still runs the RDF4J 5 release: each `<< s p o >> :x :y g` becomes `R rdf:reifies << s p o >> g` plus `R :x :y g`, with one blank-node reifier per distinct triple term (the namespace docstring has the details). RDF4J 6 answers the original queries through the reifier.
+
+<details>
+<summary>Migration procedure</summary>
 
 Plan the migration and the upgrade as one maintenance window. Once the data is migrated, the RDF4J 5 server no longer answers RDF-star queries such as `<< :a :knows :b >> :source ?s` (they now read `?r rdf:reifies << :a :knows :b >> ; :source ?s`); RDF4J 6 answers the original query again, because RDF 1.2 SPARQL reads it through the reifier. In order:
 
-1. Update the running module to this release (`rama deploy --action update --jar <this release's jar> --module rama-sail.core/RdfStorageModule`). It adds the read-only `triple-term-quads` query the migration uses; without it the migration stops with an error saying so. The data stays in place.
+1. Update the running module to the last RDF4J 5 release, the first with `rama-sail.migrate` (`rama deploy --action update --jar <that release's jar> --module rama-sail.core/RdfStorageModule`). It adds the read-only `triple-term-quads` query the migration uses; without it the migration stops with an error saying so. The data stays in place.
 2. Stop every writer: the SPARQL server and any loaders. The migration reads a page, then writes its rewrite.
-3. From a Clojure REPL with this release on the classpath, connect to the cluster and run a dry run, then the migration:
+3. From a Clojure REPL with that release on the classpath, connect to the cluster and run a dry run, then the migration:
 
    ```clojure
    (require '[com.rpl.rama :as rama] 'rama-sail.core '[rama-sail.migrate :as migrate])
@@ -242,10 +242,12 @@ Plan the migration and the upgrade as one maintenance window. Once the data is m
    (migrate/migrate! cluster "rama-sail.core/RdfStorageModule")  ;; rewrites, waits, checks: (:quads (:remaining result)) is 0
    ```
 
-   Review `:samples`, and `:nested` if it is not 0, before running `migrate!`. If `:remaining` is not 0, a writer was still running: stop it and run `migrate!` again.
+   Review `:samples`, and `:nested` if it is not 0, before running `migrate!`: `:nested` counts quads with a triple term inside the subject of another triple term, whose rewrite changes what the outer term denotes. If `:remaining` is not 0, a writer was still running: stop it and run `migrate!` again.
 4. Deploy the RDF4J 6 release and restart the writers.
 
 On a single-node local cluster, a store with 150K quads, 100K of them with a triple term as subject, took 6 s for the dry run and 78 s for the migration.
+
+</details>
 
 ## Architecture
 

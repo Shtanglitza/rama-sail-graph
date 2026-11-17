@@ -86,7 +86,7 @@
                                                      "rama-sail.sail.random-query-parity-test"
                                                      "rama-sail.sail.compliance-test"
                                                      "rama-sail.sail.property-path-test"
-                                                     "rama-sail.sail.rdf-star-test"
+                                                     "rama-sail.sail.reified-triples-test"
                                                      "rama-sail.sail.triple-term-join-test"
                                                      "rama-sail.server.sparql-test"
                                                      "rama-sail.bulk-test"

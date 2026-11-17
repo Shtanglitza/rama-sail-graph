@@ -13,30 +13,15 @@
    - RamaSail stores numeric literals in canonical form, so a graph with
      1.0 or 1e0 does not read back with the same lexical form."
   (:require [clojure.test :refer [deftest use-fixtures]]
-            [com.rpl.rama :as rama]
-            [com.rpl.rama.test :as rtest]
-            [rama-sail.core :refer [RdfStorageModule]]
-            [rama-sail.sail.adapter :as rsail]
-            [rama-sail.sail.w3c.runner :as runner])
-  (:import (org.eclipse.rdf4j.repository.sail SailRepository)))
+            [rama-sail.sail.w3c.runner :as runner]))
 
-(def ^:dynamic *repo* nil)
-
-(use-fixtures :once
-  (fn [f]
-    (with-open [ipc (rtest/create-ipc)]
-      (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
-      (let [repo (doto (SailRepository. (rsail/create-rama-sail ipc (rama/get-module-name RdfStorageModule)
-                                                                {:sync-commits true}))
-                   (.init))]
-        (try (binding [*repo* repo] (f))
-             (finally (.shutDown repo)))))))
+(use-fixtures :once runner/repo-fixture)
 
 (def ^:private parser-accepts "RDF4J's parser accepts this invalid input")
 (def ^:private canonical-numbers "numeric literals are stored in canonical form: 1.0 reads back as \"1\"^^xsd:decimal")
 
 (defn- run [suite expected-failures]
-  (runner/run-suite *repo* (str "w3c/rdf12/" suite "/") expected-failures))
+  (runner/run-suite runner/*repo* (str "w3c/rdf12/" suite "/") expected-failures))
 
 (deftest turtle-syntax
   (run "rdf-turtle/syntax"

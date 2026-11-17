@@ -79,7 +79,7 @@
    "\"nested\"@en"                          ;; looks like a lang-tagged N-Triples literal
    "\"nested\"^^<http://ex/dt>"             ;; looks like a typed N-Triples literal
    "_:looks-like-a-bnode"
-   "<< <s> <p> <o> >>"                      ;; looks like an RDF-star triple term
+   "<< <s> <p> <o> >>"                      ;; looks like a triple term
    "  surrounding whitespace  "
    ;; A label containing the NUL character U+0000 now round-trips: unescape-str
    ;; scans in a single pass instead of using U+0000 as an internal placeholder,
@@ -133,7 +133,7 @@
   (.createBNode VF ^String (pick rnd bnode-ids)))
 
 (defn- gen-simple-value
-  "A value that may appear inside an RDF-star triple term."
+  "A value that may appear inside a triple term."
   ^Value [^Random rnd]
   (case (.nextInt rnd 5)
     0 (gen-iri rnd)
@@ -143,7 +143,7 @@
     4 (gen-bnode rnd)))
 
 (defn- gen-triple-term
-  "RDF-star triple value. Subject is a Resource (IRI/BNode), predicate an IRI,
+  "A triple term. Subject is a Resource (IRI/BNode), predicate an IRI,
    object any simple value — including nested triple terms and literals whose
    labels contain '<<' or '>>', which now round-trip after parse-triple-term-parts
    was fixed to skip string literals when scanning for the closing '>>'."

@@ -203,9 +203,10 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - **A sequence inside `*` or `+` could return wrong results.** For
   `:a (:p1/:p2/:p3)* ?x` the compiler ordered the step's patterns by estimated cardinality, and the
-  module reads a step's start from its first pattern and its end from its last. When the statistics
-  made `:p3` look cheaper, the path walked from `:p3`'s subject to `:p1`'s object (`[:a :b]`
-  instead of `[:a :c]` on the W3C `pp02` data), so the answer changed with the store's statistics.
+  module reads a step's start from its first pattern and its end from its last. A reordered step
+  walked from `:p3`'s subject to `:p1`'s object. This did not need skewed statistics: on a chain
+  with equal counts for the three predicates the query returned only its start node (1 row instead
+  of 101), and on the W3C `pp02` data `[:a :b]` instead of `[:a :c]`, depending on the statistics.
   A path's step is now compiled in path order. Client-side change.
 - **Queries falling back to RDF4J's evaluation failed when they needed a collection factory**
   (a property path inside `GRAPH`, ...) with a `NullPointerException`: RDF4J's strategy factory

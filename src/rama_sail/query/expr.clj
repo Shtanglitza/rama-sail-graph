@@ -64,7 +64,7 @@
      :dir is ltr or rtl for an RDF 1.2 literal tagged ar--rtl, without it in :lang)
    - {:kind :iri :value iri-string}
    - {:kind :bnode :id s}
-   - {:kind :triple}                        (RDF-star triple term)
+   - {:kind :triple}                        (triple term)
    - {:kind :other :value s}                (bare token, not valid N-Triples —
      tolerated for the internal plan API, e.g. {:type :const :val \"20\"})
 
@@ -283,7 +283,7 @@
   (num-binop :plus a b))
 
 ;;; ---------------------------------------------------------------------------
-;;; Triple term decomposition (RDF-star)
+;;; Triple term decomposition
 ;;; ---------------------------------------------------------------------------
 
 (defn- extract-triple-term-part
@@ -1019,7 +1019,7 @@
                     (error? e) (recur (rest members) true)
                     :else (recur (rest members) saw-error)))))))))
 
-    ;; --- RDF-star Triple Term Functions ---
+    ;; --- Triple term functions ---
 
     :is-triple
     (let [v (eval-expr (:arg expr) bindings)]

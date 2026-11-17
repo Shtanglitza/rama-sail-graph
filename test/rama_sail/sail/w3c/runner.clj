@@ -31,6 +31,10 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [is testing]]
+            [com.rpl.rama :as rama]
+            [com.rpl.rama.test :as rtest]
+            [rama-sail.core :refer [RdfStorageModule]]
+            [rama-sail.sail.adapter :as rsail]
             [rama-sail.sail.w3c.manifest-parser :as manifest]
             [rama-sail.sail.w3c.result-compare :as rc])
   (:import (java.lang AutoCloseable)
@@ -39,8 +43,26 @@
            (org.eclipse.rdf4j.model.util Models)
            (org.eclipse.rdf4j.query QueryLanguage)
            (org.eclipse.rdf4j.repository RepositoryConnection)
+           (org.eclipse.rdf4j.repository.sail SailRepository)
            (org.eclipse.rdf4j.rio RDFFormat Rio)
            (org.eclipse.rdf4j.rio.helpers StatementCollector)))
+
+(def ^:dynamic *repo*
+  "The suite's repository, bound by `repo-fixture`."
+  nil)
+
+(defn repo-fixture
+  "A :once fixture: an in-process cluster running the module, and a
+   SailRepository on it with sync commits (each commit waits for the indexer),
+   bound to `*repo*`."
+  [f]
+  (with-open [ipc (rtest/create-ipc)]
+    (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
+    (let [repo (doto (SailRepository. (rsail/create-rama-sail ipc (rama/get-module-name RdfStorageModule)
+                                                              {:sync-commits true}))
+                 (.init))]
+      (try (binding [*repo* repo] (f))
+           (finally (.shutDown repo))))))
 
 (def ^:private no-ctx (into-array Resource []))
 

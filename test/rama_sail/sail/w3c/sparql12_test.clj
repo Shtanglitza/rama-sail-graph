@@ -12,30 +12,15 @@
      together.
    - RamaSail matches language tags case-sensitively in graph patterns."
   (:require [clojure.test :refer [deftest use-fixtures]]
-            [com.rpl.rama :as rama]
-            [com.rpl.rama.test :as rtest]
-            [rama-sail.core :refer [RdfStorageModule]]
-            [rama-sail.sail.adapter :as rsail]
-            [rama-sail.sail.w3c.runner :as runner])
-  (:import (org.eclipse.rdf4j.repository.sail SailRepository)))
+            [rama-sail.sail.w3c.runner :as runner]))
 
-(def ^:dynamic *repo* nil)
-
-(use-fixtures :once
-  (fn [f]
-    (with-open [ipc (rtest/create-ipc)]
-      (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
-      (let [repo (doto (SailRepository. (rsail/create-rama-sail ipc (rama/get-module-name RdfStorageModule)
-                                                                {:sync-commits true}))
-                   (.init))]
-        (try (binding [*repo* repo] (f))
-             (finally (.shutDown repo)))))))
+(use-fixtures :once runner/repo-fixture)
 
 (def ^:private parser-accepts "RDF4J's SPARQL parser accepts this invalid escape")
 (def ^:private parser-rejects "RDF4J's SPARQL parser rejects the codepoint escape in this query")
 
 (defn- run [suite expected-failures]
-  (runner/run-suite *repo* (str "w3c/sparql12/" suite "/") expected-failures))
+  (runner/run-suite runner/*repo* (str "w3c/sparql12/" suite "/") expected-failures))
 
 (deftest eval-triple-terms (run "eval-triple-terms" {}))
 
