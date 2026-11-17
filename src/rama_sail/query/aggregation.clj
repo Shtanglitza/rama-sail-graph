@@ -2,49 +2,50 @@
   (:use [com.rpl.rama])
   (:require [clojure.set]
             [rama-sail.query.expr :refer [eval-expr term-numeric-value add-numbers
-                                          order-key value->term-string]]))
+                                          order-key value->term-string number->literal]]))
 
 ;; --- GROUP BY / Aggregates ---
 
 ;; XSD type URIs for aggregate result formatting
 (def ^:private xsd-integer "http://www.w3.org/2001/XMLSchema#integer")
-(def ^:private xsd-decimal "http://www.w3.org/2001/XMLSchema#decimal")
-(def ^:private xsd-double "http://www.w3.org/2001/XMLSchema#double")
 
 (defn- format-typed-literal
   "Format a value as an RDF typed literal string."
   [value dtype]
   (str "\"" value "\"^^<" dtype ">"))
 
-(defn- integral-number? [v]
-  (or (instance? Long v) (instance? Integer v)
-      (instance? BigInteger v) (instance? clojure.lang.BigInt v)))
-
 (defn- format-numeric-result
-  "Format a numeric result by its type. Exact integer sums stay integers of
-   any magnitude (no silent long overflow), decimals serialize canonically,
-   and non-finite doubles use xsd:double lexical forms instead of throwing."
+  "Format a SUM/AVG result by its type (`expr/number->literal`): integers of any
+   magnitude stay xsd:integer, BigDecimal is xsd:decimal, a double is xsd:double
+   (NaN/INF included)."
   [value]
+  (if (number? value) (number->literal value) (str value)))
+
+;; SUM and AVG are errors (no binding) when a bound value is not numeric: they
+;; add with op:numeric-add. Unbound values are skipped, as COUNT does.
+(def ^:private agg-error ::error)
+
+(defn- add-to-sum
+  "SUM state after one value: the running sum, or agg-error from then on."
+  [state raw-value]
   (cond
-    (integral-number? value)
-    (format-typed-literal value xsd-integer)
+    (= agg-error state) state
+    (nil? raw-value) state
+    :else (if-let [n (when (string? raw-value) (term-numeric-value raw-value))]
+            (add-numbers state n)
+            agg-error)))
 
-    (instance? BigDecimal value)
-    (format-typed-literal (.toPlainString (.stripTrailingZeros ^BigDecimal value))
-                          xsd-decimal)
-
-    (number? value)
-    (let [d (double value)]
+(defn- add-to-avg
+  "AVG state after one value: [sum count], or agg-error from then on."
+  [state raw-value]
+  (if (= agg-error state)
+    state
+    (let [[sum cnt] state
+          sum' (add-to-sum sum raw-value)]
       (cond
-        (Double/isNaN d) (format-typed-literal "NaN" xsd-double)
-        (Double/isInfinite d) (format-typed-literal (if (pos? d) "INF" "-INF") xsd-double)
-        ;; whole in-range doubles keep the historical integer formatting
-        (and (== d (Math/floor d))
-             (<= (double Long/MIN_VALUE) d (double Long/MAX_VALUE)))
-        (format-typed-literal (long d) xsd-integer)
-        :else (format-typed-literal d xsd-decimal)))
-
-    :else (str value)))
+        (= agg-error sum') agg-error
+        (nil? raw-value) state
+        :else [sum' (inc cnt)]))))
 
 (defn- keyed-term
   "MIN/MAX state for one value: [order-key term]. The key is computed once per
@@ -79,12 +80,12 @@
            :format (fn [v] (format-typed-literal v xsd-integer))}
 
    :sum {:init (constantly 0)
-         :update (fn [state raw-value]
-                   (if-let [num-val (when (string? raw-value) (term-numeric-value raw-value))]
-                     (add-numbers state num-val)
-                     state))
-         :merge (fn [s1 s2] (add-numbers (or s1 0) (or s2 0)))
-         :compute identity
+         :update add-to-sum
+         :merge (fn [s1 s2]
+                  (if (or (= agg-error s1) (= agg-error s2))
+                    agg-error
+                    (add-numbers (or s1 0) (or s2 0))))
+         :compute (fn [state] (when-not (= agg-error state) state))
          :format format-numeric-result}
 
    ;; SPARQL MIN/MAX use the ORDER BY order (unbound skipped; blank nodes <
@@ -104,28 +105,25 @@
          :format format-rdf-term-result}
 
    :avg {:init (constantly [0 0])
-         :update (fn [state raw-value]
-                   (if-let [num-val (when (string? raw-value) (term-numeric-value raw-value))]
-                     [(add-numbers (first state) num-val) (inc (second state))]
-                     state))
+         :update add-to-avg
          :merge (fn [s1 s2]
-                  (let [[sum1 cnt1] (or s1 [0 0])
-                        [sum2 cnt2] (or s2 [0 0])]
-                    [(add-numbers sum1 sum2) (+ cnt1 cnt2)]))
+                  (if (or (= agg-error s1) (= agg-error s2))
+                    agg-error
+                    (let [[sum1 cnt1] (or s1 [0 0])
+                          [sum2 cnt2] (or s2 [0 0])]
+                      [(add-numbers sum1 sum2) (+ cnt1 cnt2)])))
          :compute (fn [state]
-                    (let [[sum cnt] (or state [0 0])]
-                      (when (pos? cnt)
-                        ;; AVG of exact inputs is exact decimal (SPARQL: AVG of
-                        ;; integers is xsd:decimal); any double input → double
-                        (if (instance? Double sum)
-                          (/ ^double sum cnt)
-                          (.divide (bigdec sum) (bigdec cnt)
-                                   java.math.MathContext/DECIMAL64)))))
-         :format (fn [v]
-                   (if (instance? BigDecimal v)
-                     (format-typed-literal (.toPlainString (.stripTrailingZeros ^BigDecimal v))
-                                           xsd-decimal)
-                     (format-typed-literal v xsd-decimal)))}})
+                    (when-not (= agg-error state)
+                      (let [[sum cnt] (or state [0 0])]
+                        (cond
+                          ;; SPARQL: AVG of no values is "0"^^xsd:integer
+                          (zero? cnt) 0
+                          ;; any double input -> xsd:double
+                          (instance? Double sum) (/ ^double sum cnt)
+                          ;; AVG of exact inputs is exact decimal (also for integers)
+                          :else (.divide (bigdec sum) (bigdec cnt)
+                                         java.math.MathContext/DECIMAL64)))))
+         :format format-numeric-result}})
 
 (defn init-agg-state
   "Initialize state for an aggregate function.
@@ -214,7 +212,7 @@
 (defn finalize-group-results
   "Convert accumulated group states to final result bindings.
    SPARQL requires that aggregates without GROUP BY over empty input produce
-   one row with identity values (COUNT=0, SUM=0, AVG/MIN/MAX=unbound)."
+   one row with identity values (COUNT=0, SUM=0, AVG=0, MIN/MAX=unbound)."
   [group-map group-vars aggregates]
   (if (and (empty? group-map) (empty? group-vars))
     ;; No group-vars and no input rows: produce one row with identity aggregate values
@@ -230,7 +228,8 @@
     (set
      (for [[group-key agg-states] group-map]
        (let [;; Start with group variable bindings
-             base (zipmap group-vars group-key)
+             ;; an unbound key value leaves its variable unbound, not nil
+             base (into {} (remove (comp nil? val)) (zipmap group-vars group-key))
              ;; Add computed aggregates
              agg-bindings (into {}
                                 (for [{:keys [name]} aggregates

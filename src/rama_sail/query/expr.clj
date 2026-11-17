@@ -207,20 +207,25 @@
 (defn compare-numbers
   "Compare two numbers with SPARQL promotion: if either is a double the
    comparison is in double space; otherwise exact (BigDecimal) comparison,
-   so large integers and decimals never lose precision."
+   so large integers and decimals never lose precision. -0.0 and 0.0 are
+   equal (op:numeric-equal); NaN sorts after every number (Double/compare),
+   and callers handle NaN equality."
   [a b]
   (cond
     ;; fast path: the common integer case needs no BigDecimal allocation
     (and (instance? Long a) (instance? Long b)) (Long/compare (long a) (long b))
-    (or (instance? Double a) (instance? Double b)) (Double/compare (double a) (double b))
+    (or (instance? Double a) (instance? Double b))
+    (let [x (double a) y (double b)]
+      (if (== x y) 0 (Double/compare x y)))
     :else (.compareTo (bigdec a) (bigdec b))))
 
 (defn- integral? [n]
   (or (instance? Long n) (instance? BigInteger n) (instance? Integer n)
       (instance? clojure.lang.BigInt n)))
 
-(defn- num-result-literal
-  "Serialize an arithmetic result as a typed N-Triples literal."
+(defn number->literal
+  "Serialize a number as a typed N-Triples literal by its Java type: integral ->
+   xsd:integer, BigDecimal -> xsd:decimal, anything else -> xsd:double."
   [n]
   (cond
     (integral? n)
@@ -307,6 +312,15 @@
               (let [end (loop [i (+ pos 2) depth 1]
                           (cond
                             (>= i (dec len)) (inc len)
+                            ;; a literal may contain << or >>: skip it whole
+                            (= (.charAt inner i) \")
+                            (recur (loop [j (inc i)]
+                                     (cond
+                                       (>= j len) len
+                                       (= (.charAt inner j) \\) (recur (+ j 2))
+                                       (= (.charAt inner j) \") (inc j)
+                                       :else (recur (inc j))))
+                                   depth)
                             (and (= (.charAt inner i) \<) (< (inc i) len) (= (.charAt inner (inc i)) \<))
                             (recur (+ i 2) (inc depth))
                             (and (= (.charAt inner i) \>) (< (inc i) len) (= (.charAt inner (inc i)) \>))
@@ -576,7 +590,9 @@
 (defn compare-terms
   "The ordering operators (< <= > >=): negative/zero/positive, or ::error when
    the operands are not order-comparable. Strict SPARQL: IRIs, blank nodes,
-   triple terms, opaque literals and mixed value classes are a type error."
+   triple terms, opaque literals and mixed value classes are a type error.
+   NaN sorts after every number, as in Jena and RDF4J (decided Nov 17, 2026;
+   XPath op:numeric-less-than would make every ordering with NaN false)."
   [l r]
   (compare-classified (term-value l) (term-value r)))
 
@@ -861,7 +877,7 @@
         (let [result (num-binop (:op expr) l r)]
           (if (error? result)
             ::error
-            (num-result-literal result)))))
+            (number->literal result)))))
 
     :str
     (let [v (eval-expr (:arg expr) bindings)]
@@ -978,17 +994,21 @@
               flag-str (when flags-val (simple-string-text flags-val))]
           (if (or (nil? text) (nil? pattern) (and flags-val (nil? flag-str)))
             ::error
-            (let [flags-int (if flag-str
-                              (reduce (fn [acc ch]
+            ;; Flags as XPath fn:matches: s m i x q; any other character is an
+            ;; error. i folds case over Unicode, q matches the pattern literally.
+            (let [flags-int (reduce (fn [acc ch]
+                                      (if (error? acc)
+                                        acc
                                         (case ch
-                                          \i (bit-or acc java.util.regex.Pattern/CASE_INSENSITIVE)
+                                          \i (bit-or acc java.util.regex.Pattern/CASE_INSENSITIVE
+                                                      java.util.regex.Pattern/UNICODE_CASE)
                                           \m (bit-or acc java.util.regex.Pattern/MULTILINE)
                                           \s (bit-or acc java.util.regex.Pattern/DOTALL)
                                           \x (bit-or acc java.util.regex.Pattern/COMMENTS)
-                                          acc))
-                                      0 flag-str)
-                              0)
-                  compiled (compiled-regex pattern flags-int)]
+                                          \q (bit-or acc java.util.regex.Pattern/LITERAL)
+                                          ::error)))
+                                    0 (or flag-str ""))
+                  compiled (if (error? flags-int) ::error (compiled-regex pattern flags-int))]
               (if (error? compiled)
                 ::error
                 (.find (.matcher ^java.util.regex.Pattern compiled ^String text))))))))
@@ -1069,7 +1089,9 @@
    Rules per SPARQL 17.2.2:
    - boolean → itself; xsd:boolean literal → its value (invalid lexical →
      type error, as in SPARQL 1.2; SPARQL 1.1 made it false)
-   - numeric literal → false for 0/NaN (invalid lexical → false)
+   - numeric literal → false for 0/-0.0/NaN; an invalid lexical form is a type
+     error, as SPARQL 1.2 says for every datatype (SPARQL 1.1 made it false,
+     and RDF4J still does)
    - simple/xsd:string literal → false for empty string
    - unbound, error, IRI, bnode, other → type error"
   [v]

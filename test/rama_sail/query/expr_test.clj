@@ -174,7 +174,28 @@
     (is (e/error? (e/sparql-ebv (str "\"z\"" xsd-bool)))))
   (testing "IRI and unbound are type errors"
     (is (e/error? (e/sparql-ebv "<http://ex/a>")))
-    (is (e/error? (e/sparql-ebv nil)))))
+    (is (e/error? (e/sparql-ebv nil))))
+  (testing "-0.0 is numerically zero: false"
+    (is (false? (e/sparql-ebv (str "\"-0.0\"" xsd-dbl)))))
+  (testing "an invalid numeric lexical form is a type error (SPARQL 1.2; 1.1 and RDF4J say false)"
+    (is (e/error? (e/sparql-ebv (str "\"abc\"" xsd-int))))
+    ;; so !?x drops the row too
+    (is (false? (e/evaluate-filter-cond {:type :logic :op :not :arg (c (str "\"abc\"" xsd-int))} {})))))
+
+(deftest test-numeric-equality-zero-and-nan
+  (testing "-0.0 = 0.0 and -0.0 = 0 (op:numeric-equal)"
+    (is (true? (e/terms-equal (str "\"-0.0\"" xsd-dbl) (str "\"0.0\"" xsd-dbl))))
+    (is (true? (e/terms-equal (str "\"-0.0\"" xsd-dbl) (str "\"0\"" xsd-int))))
+    (is (zero? (e/compare-terms (str "\"-0.0\"" xsd-dbl) (str "\"0.0\"" xsd-dbl)))))
+  (testing "NaN = NaN is false (RDF4J says true; IEEE and op:numeric-equal say false)"
+    (is (false? (e/terms-equal (str "\"NaN\"" xsd-dbl) (str "\"NaN\"" xsd-dbl)))))
+  (testing "NaN sorts after every number in < and >, as in Jena and RDF4J (decided Nov 17, 2026)"
+    (let [nan (c (str "\"NaN\"" xsd-dbl)) one (c (str "\"1\"" xsd-int))]
+      (is (true? (e/eval-expr (cmp* :gt nan one) {})))
+      (is (true? (e/eval-expr (cmp* :lt one nan) {})))))
+  (testing "unequal doubles keep their order"
+    (is (neg? (e/compare-terms (str "\"-1.0\"" xsd-dbl) (str "\"0.0\"" xsd-dbl))))
+    (is (pos? (e/compare-terms (str "\"1.5\"" xsd-dbl) (str "\"1\"" xsd-int))))))
 
 (deftest test-three-valued-logic
   (testing "negation over a type error stays an error → filter excludes"
@@ -206,6 +227,20 @@
                         {})))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Triple-term parts
+;;; ---------------------------------------------------------------------------
+
+(deftest test-nested-triple-term-with-angle-brackets-in-a-literal
+  (testing "a literal containing >> or << inside a nested triple term does not end it early"
+    (let [inner "<< <http://ex/b> <http://ex/q> \"x >> y << z\" >>"
+          outer (str "<< " inner " <http://ex/p> <http://ex/o> >>")
+          part (fn [t] (e/eval-expr {:type t :arg (c outer)} {}))]
+      (is (= inner (part :triple-subject)))
+      (is (= "<http://ex/p>" (part :triple-predicate)))
+      (is (= "<http://ex/o>" (part :triple-object)))
+      (is (= "\"x >> y << z\"" (e/eval-expr {:type :triple-object :arg (c inner)} {}))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Regex safety
 ;;; ---------------------------------------------------------------------------
 
@@ -219,7 +254,22 @@
     (is (true? (e/eval-expr {:type :regex :arg (c "\"Hello\"")
                              :pattern (c "\"^h\"") :flags (c "\"i\"")} {})))
     (is (false? (e/eval-expr {:type :regex :arg (c "\"Hello\"")
-                              :pattern (c "\"^h\"")} {})))))
+                              :pattern (c "\"^h\"")} {}))))
+  (let [re (fn [text pattern flags]
+             (e/eval-expr (cond-> {:type :regex :arg (c (str "\"" text "\"")) :pattern (c (str "\"" pattern "\""))}
+                            flags (assoc :flags (c (str "\"" flags "\""))))
+                          {}))]
+    (testing "i folds case over Unicode"
+      (is (true? (re "ÉCOLE" "école" "i"))))
+    (testing "q matches the pattern literally, also with i"
+      (is (true? (re "a.b" "." "q")))
+      (is (false? (re "axb" "." "q")))
+      (is (true? (re "A.B" "a.b" "qi"))))
+    (testing "an empty flag string is no flags"
+      (is (false? (re "Hello" "^h" ""))))
+    (testing "an unknown flag is an error (XPath fn:matches)"
+      (is (e/error? (re "abc" "a" "z")))
+      (is (e/error? (re "abc" "a" "iz"))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; sameTerm / IN
@@ -286,6 +336,29 @@
            (run-agg :avg false (v "?x")
                     [{"?x" (str "\"1\"" xsd-int)}
                      {"?x" (str "\"2\"" xsd-int)}])))))
+
+(deftest test-sum-avg-typing-and-errors
+  (testing "SUM/AVG of doubles stay xsd:double"
+    (is (= (str "\"4.0\"" xsd-dbl)
+           (run-agg :sum false (v "?x") [{"?x" (str "\"1.5\"" xsd-dbl)} {"?x" (str "\"2.5\"" xsd-dbl)}])))
+    (is (= (str "\"2.0\"" xsd-dbl)
+           (run-agg :avg false (v "?x") [{"?x" (str "\"1.5\"" xsd-dbl)} {"?x" (str "\"2.5\"" xsd-dbl)}]))))
+  (testing "a non-numeric value makes SUM/AVG an error: unbound"
+    (is (nil? (run-agg :sum false (v "?x") [{"?x" (str "\"1\"" xsd-int)} {"?x" "\"a\""}])))
+    (is (nil? (run-agg :avg false (v "?x") [{"?x" (str "\"1\"" xsd-int)} {"?x" "\"a\""}]))))
+  (testing "AVG of no values is 0"
+    (is (= (str "\"0\"" xsd-int) (run-agg :avg false (v "?x") [{}])))))
+
+(deftest test-group-by-unbound-key
+  (testing "a group whose key is unbound leaves the key variable unbound, not nil"
+    (let [rows (agg/finalize-group-results
+                {[nil] {"?n" [:count 2]} ["<http://ex/a>"] {"?n" [:count 1]}}
+                ["?k"]
+                [{:name "?n" :agg {:fn :count :arg (v "?x") :distinct false}}])
+          unbound (first (filter #(= (str "\"2\"" xsd-int) (get % "?n")) rows))]
+      (is (= 2 (count rows)))
+      (is (= {"?n" (str "\"2\"" xsd-int)} unbound))
+      (is (not (contains? unbound "?k"))))))
 
 (deftest test-min-max-datatype-aware
   (testing "MIN/MAX order numerically by datatype"
