@@ -208,6 +208,15 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with equal counts for the three predicates the query returned only its start node (1 row instead
   of 101), and on the W3C `pp02` data `[:a :b]` instead of `[:a :c]`, depending on the statistics.
   A path's step is now compiled in path order. Client-side change.
+- **A zero-length property-path match could be lost in RDF4J's fallback evaluation.** The fallback
+  skipped RDF4J's optimizer pipeline, which RDF4J's own SAILs run. In W3C `pp35`
+  (`GRAPH ?g { ?s :p1* ?t } FILTER(?g = <ng-01.ttl>)`) the filter was never folded into a constant
+  graph, the path ran with `?g` unbound, and RDF4J's `ZeroLengthPathIteration`, which deduplicates
+  nodes across graphs, dropped `:a :p1* :a`. The fallback now optimizes the query first; `pp35`
+  passes. Join order and filter pushdown come with it: joins that fall back (a FROM dataset, reads
+  inside an open transaction) ran about 20x faster in a 2,000-subject benchmark (569 -> 28 ms).
+  With `?g` left unbound, RDF4J's deduplication still returns a zero-length match for only one
+  graph, as RDF4J's MemoryStore does. Client-side change.
 - **Queries falling back to RDF4J's evaluation failed when they needed a collection factory**
   (a property path inside `GRAPH`, ...) with a `NullPointerException`: RDF4J's strategy factory
   passes on a collection factory only when the SAIL sets one, and RamaSail did not.
