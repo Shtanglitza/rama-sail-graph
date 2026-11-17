@@ -64,6 +64,16 @@ _:b2 <http://ex/w7c> \"X\" .
 <http://ex/alice> <http://ex/nick> \"Al\" .
 <http://ex/alice> <http://ex/nick> \"Ali\" .
 <http://ex/bob> <http://ex/nick> \"Bobby\" .
+<http://ex/d1> <http://ex/dbl> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#double> .
+<http://ex/d2> <http://ex/dbl> \"2.5\"^^<http://www.w3.org/2001/XMLSchema#double> .
+<http://ex/m1> <http://ex/mixv> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://ex/m2> <http://ex/mixv> \"a\" .
+<http://ex/z1> <http://ex/zero> \"-0.0\"^^<http://www.w3.org/2001/XMLSchema#double> .
+<http://ex/z2> <http://ex/zero> \"0.0\"^^<http://www.w3.org/2001/XMLSchema#double> .
+<http://ex/z3> <http://ex/zero> \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://ex/t1> <http://ex/txt> \"a.b\" .
+<http://ex/t2> <http://ex/txt> \"axb\" .
+<http://ex/t3> <http://ex/txt> \"\u00c9COLE\" .
 "))
 
 (defn- build-model
@@ -208,6 +218,28 @@ _:b2 <http://ex/w7c> \"X\" .
   (testing "literals of different datatypes are unequal (= / !=)"
     (parity! (str P "SELECT ?s { ?s :age ?a FILTER(?a != \"x\"@en) }"))
     (parity! (str P "SELECT ?s { ?s :label ?l FILTER(?l != \"caf\u00e9\"@fr) }"))))
+
+(deftest test-aggregate-and-comparison-semantics-parity
+  ;; SPARQL 1.2 / XPath semantics where RDF4J follows the spec (Nov 17, 2026).
+  ;; Not here: EBV of an invalid number and NaN = NaN, where RDF4J does not (expr-test).
+  (testing "SUM / AVG / COUNT over no values: 0, 0, 0"
+    (is (= [{"s" "\"0\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+             "a" "\"0\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+             "c" "\"0\"^^<http://www.w3.org/2001/XMLSchema#integer>"}]
+           (parity! (str P "SELECT (SUM(?x) AS ?s) (AVG(?x) AS ?a) (COUNT(?x) AS ?c) { ?q :nothing ?x }")))))
+  (testing "SUM / AVG of doubles stay xsd:double"
+    (is (= [{"s" "\"4.0\"^^<http://www.w3.org/2001/XMLSchema#double>"
+             "a" "\"2.0\"^^<http://www.w3.org/2001/XMLSchema#double>"}]
+           (parity! (str P "SELECT (SUM(?x) AS ?s) (AVG(?x) AS ?a) { ?q :dbl ?x }")))))
+  (testing "a non-numeric value makes SUM / AVG an error: one row, no bindings"
+    (is (= [{}] (parity! (str P "SELECT (SUM(?x) AS ?s) (AVG(?x) AS ?a) { ?q :mixv ?x }")))))
+  (testing "-0.0 = 0.0 = 0"
+    (is (= 6 (count (parity! (str P "SELECT ?a ?b { ?a :zero ?x . ?b :zero ?y FILTER(?x = ?y && ?a != ?b) }")))))
+    (parity! (str P "SELECT ?a { ?a :zero ?x FILTER(?x = 0) }")))
+  (testing "REGEX flags: q literal, unknown flag an error, i over Unicode"
+    (is (= 1 (count (parity! (str P "SELECT ?s { ?s :txt ?t FILTER(REGEX(?t, \".\", \"q\")) }")))))
+    (is (empty? (parity! (str P "SELECT ?s { ?s :txt ?t FILTER(REGEX(?t, \"a\", \"z\")) }"))))
+    (is (= 1 (count (parity! (str P "SELECT ?s { ?s :txt ?t FILTER(REGEX(?t, \"\u00e9cole\", \"i\")) }")))))))
 
 (deftest test-property-lookup-rewrites-parity
   (testing "OPTIONAL lookups: missing and multi-valued properties"

@@ -206,6 +206,18 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- **Aggregates and comparisons that disagreed with SPARQL 1.2 / XPath.** Checked against RDF4J's
+  MemoryStore, and against the spec where RDF4J deviates:
+  - `AVG` of no values returns `"0"^^xsd:integer` (was unbound).
+  - `SUM` / `AVG` of `xsd:double` values return `xsd:double` (a whole sum was `xsd:integer`, an
+    average `xsd:decimal`).
+  - A bound non-numeric value makes `SUM` / `AVG` an error, so the variable stays unbound (it was
+    skipped: `1` and `"a"` summed to 1). Unbound values are still skipped.
+  - `-0.0 = 0.0` and `-0.0 = 0` are true, and the effective boolean value of `-0.0` is false.
+  - `REGEX` flags follow XPath `fn:matches`: `q` matches the pattern literally, `i` folds case over
+    Unicode (`"ÉCOLE"` matches `"école"`), and any flag other than `s m i x q` is an error (was
+    ignored).
+  Module-side change (aggregation runs in the module): redeploy the module.
 - The benchmark regression test (`rama-sail.bench.regression-test`, not in CI) ran its latency
   checks on an empty store: it appended three-term `[:add [s p o]]` records, which the indexer has
   rejected since quad records were validated. It now loads its data through the SAIL on one shared

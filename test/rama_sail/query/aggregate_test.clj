@@ -116,6 +116,9 @@
   (testing "Merge AVG states"
     (is (= [30.0 3] (merge-agg-states :avg [10.0 1] [20.0 2])))))
 
+(defn- run-state [agg-fn values]
+  (reduce #(update-agg-state agg-fn %1 %2) (init-agg-state agg-fn) values))
+
 (deftest test-compute-final-agg
   (testing "Compute final COUNT"
     (is (= 5 (compute-final-agg :count 5))))
@@ -125,7 +128,23 @@
 
   (testing "Compute final AVG"
     (is (= 25.0 (compute-final-agg :avg [100.0 4])))
-    (is (nil? (compute-final-agg :avg [0.0 0])))))
+    ;; SPARQL: AVG of no values is 0
+    (is (= 0 (compute-final-agg :avg [0 0]))))
+
+  (testing "A non-numeric value makes SUM and AVG an error: no result"
+    (let [run (fn [agg-fn values]
+                (compute-final-agg agg-fn (reduce #(update-agg-state agg-fn %1 %2)
+                                                  (init-agg-state agg-fn) values)))
+          one "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+      (is (nil? (run :sum [one "\"a\""])))
+      (is (nil? (run :avg [one "\"a\""])))
+      (is (nil? (run :sum [one "<http://ex/iri>"])))
+      ;; unbound values are skipped, not errors
+      (is (= 1 (run :sum [one nil])))
+      (is (= 1M (run :avg [one nil])))
+      ;; the error survives a combiner merge in either order
+      (is (nil? (compute-final-agg :sum (merge-agg-states :sum 5 (run-state :sum ["\"a\""])))))
+      (is (nil? (compute-final-agg :avg (merge-agg-states :avg (run-state :avg ["\"a\""]) [5 1])))))))
 
 (deftest test-format-agg-result
   (testing "Format COUNT result"
@@ -134,15 +153,25 @@
 
   (testing "Format SUM result (integer)"
     (is (= "\"100\"^^<http://www.w3.org/2001/XMLSchema#integer>"
-           (format-agg-result :sum 100.0))))
+           (format-agg-result :sum 100))))
 
   (testing "Format SUM result (decimal)"
     (is (= "\"100.5\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
-           (format-agg-result :sum 100.5))))
+           (format-agg-result :sum 100.5M))))
 
-  (testing "Format AVG result"
-    (is (= "\"25.0\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+  (testing "A SUM or AVG of doubles stays xsd:double, also when whole"
+    (is (= "\"100.0\"^^<http://www.w3.org/2001/XMLSchema#double>"
+           (format-agg-result :sum 100.0)))
+    (is (= "\"25.0\"^^<http://www.w3.org/2001/XMLSchema#double>"
            (format-agg-result :avg 25.0))))
+
+  (testing "Format AVG result (decimal)"
+    (is (= "\"25\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+           (format-agg-result :avg 25.0M))))
+
+  (testing "Format AVG of no values"
+    (is (= "\"0\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+           (format-agg-result :avg 0))))
 
   (testing "Format nil result"
     (is (nil? (format-agg-result :avg nil)))))
@@ -207,9 +236,9 @@
 
           ;; Simulated combined group map after aggregation
           combined-groups {["<http://ex/a>"] {"?cnt" [:count 3]
-                                              "?total" [:sum 60.0]}
+                                              "?total" [:sum 60]}
                            ["<http://ex/b>"] {"?cnt" [:count 2]
-                                              "?total" [:sum 30.0]}}
+                                              "?total" [:sum 30]}}
 
           results (finalize-group-results combined-groups group-vars aggregates)]
 
