@@ -96,6 +96,11 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are shrunk to a minimal query. `RANDOM_QUERY_SEED` / `RANDOM_QUERY_COUNT` override the run.
 
 ### Changed
+- CI runs the integration tests as two parallel jobs, the module and query layer and the SAIL and
+  server layer (`lein test :integration-module` / `:integration-sail`; `:integration` still runs
+  both). The namespaces are listed once, in `integration-namespaces` in `project.clj`, and
+  `ci-gate-test` checks that the halves don't overlap. `aggregate-test` shares one in-process
+  cluster instead of starting one per test.
 - **Breaking: RDF4J 6.1.0 (from 5.2.2), RDF 1.2 and SPARQL 1.2; Java 25.** RDF4J 6 replaces RDF-star
   with RDF 1.2: a triple term (`<<( s p o )>>`, RDF4J `TripleTerm`) is a value allowed only as an
   object, and SPARQL `<< s p o >> :source ?x` reads the triple's reifiers
@@ -201,6 +206,10 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- The benchmark regression test (`rama-sail.bench.regression-test`, not in CI) ran its latency
+  checks on an empty store: it appended three-term `[:add [s p o]]` records, which the indexer has
+  rejected since quad records were validated. It now loads its data through the SAIL on one shared
+  in-process cluster and checks each query's row count.
 - **A sequence inside `*` or `+` could return wrong results.** For
   `:a (:p1/:p2/:p3)* ?x` the compiler ordered the step's patterns by estimated cardinality, and the
   module reads a step's start from its first pattern and its end from its last. A reordered step

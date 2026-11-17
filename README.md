@@ -77,7 +77,8 @@ lein check
 # Run unit tests (no Rama cluster needed)
 lein test :unit
 
-# Run the integration tests CI runs (in-process Rama cluster)
+# Run the integration tests CI runs (in-process Rama cluster); CI runs the two halves,
+# :integration-module and :integration-sail, as parallel jobs
 lein test :integration
 
 # Run full test suite (~2-5min, starts in-process Rama cluster)
