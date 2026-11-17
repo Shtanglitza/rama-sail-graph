@@ -19,8 +19,8 @@
             [rama-sail.module.indexer :as idx]
             [rama-sail.sail.serialization :as ser])
   (:import (org.eclipse.rdf4j.model Statement)
-           (org.eclipse.rdf4j.rio RDFFormat Rio)
-           (org.eclipse.rdf4j.rio.helpers AbstractRDFHandler)))
+           (org.eclipse.rdf4j.rio RDFFormat RDFParser Rio)
+           (org.eclipse.rdf4j.rio.helpers AbstractRDFHandler BasicParserSettings)))
 
 (def default-chunk-size
   "Quads per :commit record."
@@ -177,6 +177,14 @@
       ;; N-Triples is a subset of Turtle; the Turtle parser is always on the classpath
       RDFFormat/TURTLE))
 
+(defn create-parser
+  "A Rio parser for `fmt` that keeps language tags as written. RDF4J 6
+   lowercases them by default; RDF4J 5 kept them, as the SPARQL parser still
+   does, so stored data, SPARQL constants and later loads agree."
+  ^RDFParser [^RDFFormat fmt]
+  (doto (Rio/createParser fmt)
+    (-> .getParserConfig (.set BasicParserSettings/NORMALIZE_LANGUAGE_TAGS false))))
+
 (defn load-file!
   "Bulk-load an RDF file (N-Triples, Turtle, TriG, RDF/XML, ...), streaming:
    the file is never held in memory. Triples without a graph go to `:context`
@@ -185,7 +193,7 @@
    string). Returns the load-quads! stats."
   [cluster module-name file & {:keys [format context] :or {context core/DEFAULT-CONTEXT-VAL} :as opts}]
   (let [fmt (rdf-format file format)
-        parser (Rio/createParser fmt)]
+        parser (create-parser fmt)]
     (log/info "Bulk loading" (str file) "as" (.getName fmt))
     (run-load! cluster module-name opts
                (fn [ldr]

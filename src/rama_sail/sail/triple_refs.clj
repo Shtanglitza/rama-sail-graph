@@ -23,7 +23,7 @@
            (org.eclipse.rdf4j.model.impl SimpleValueFactory)
            (org.eclipse.rdf4j.model.vocabulary RDF)
            (org.eclipse.rdf4j.query.algebra And Bound Extension ExtensionElem Filter FunctionCall If Join
-                                            QueryModelNode QueryRoot SameTerm TripleRef TupleExpr
+                                            ProjectionElem QueryModelNode QueryRoot SameTerm TripleRef TupleExpr
                                             ValueConstant ValueExpr Var)
            (org.eclipse.rdf4j.query.algebra.helpers AbstractQueryModelVisitor)))
 
@@ -68,27 +68,36 @@
   [^TripleRef tr]
   (let [[s p o] (map #(when (.hasValue ^Var %) (.getValue ^Var %)) (parts tr))]
     (when (and (instance? Resource s) (instance? IRI p) (some? o))
-      (.createTriple ^SimpleValueFactory VF ^Resource s ^IRI p ^Value o))))
+      (.createTripleTerm ^SimpleValueFactory VF ^Resource s ^IRI p ^Value o))))
 
 (defn- remove-node [nodes node] (vec (remove #(identical? node %) nodes)))
 
 (defn- fold-constants
   "Replaces each all-constant term's variable with the term itself in the
    other members, and drops the term, until no all-constant term is left (an
-   inner term becoming constant makes its outer term constant)."
-  [members]
-  (if-let [[tr t] (first (for [m members :when (triple-ref? m)
-                               :let [t (constant-triple m)] :when t]
-                           [m t]))]
-    (let [ext (.getName (.getExprVar ^TripleRef tr))
-          others (remove-node members tr)]
-      (doseq [m others
-              ^Var v (collect m #(and (instance? Var %) (= ext (.getName ^Var %))))]
-        ;; a `_const_` name, as RDF4J names constants: compute-join-vars
-        ;; must not take a constant used by two patterns for a join key
-        (.replaceWith v (Var. (str "_const_" ext) t true true)))
-      (recur others))
-    members))
+   inner term becoming constant makes its outer term constant). Returns
+   [members folded], folded being [variable-name term] pairs."
+  ([members] (fold-constants members []))
+  ([members folded]
+   (if-let [[tr t] (first (for [m members :when (triple-ref? m)
+                                :let [t (constant-triple m)] :when t]
+                            [m t]))]
+     (let [ext (.getName (.getExprVar ^TripleRef tr))
+           others (remove-node members tr)]
+       (doseq [m others
+               ^Var v (collect m #(and (instance? Var %) (= ext (.getName ^Var %))))]
+         ;; a `_const_` name, as RDF4J names constants: compute-join-vars
+         ;; must not take a constant used by two patterns for a join key
+         (.replaceWith v (Var. (str "_const_" ext) t true true)))
+       (recur others (conj folded [ext t])))
+     [members folded])))
+
+(defn- referenced?
+  "True when `tree` still uses the variable `name`: a Var, or a projection
+   (a CONSTRUCT template names the term's variable)."
+  [tree name]
+  (boolean (seq (collect tree #(or (and (instance? Var %) (= name (.getName ^Var %)))
+                                   (and (instance? ProjectionElem %) (= name (.getName ^ProjectionElem %))))))))
 
 (defn- call [uri ^Var ext]
   (FunctionCall. ^String uri ^"[Lorg.eclipse.rdf4j.query.algebra.ValueExpr;"
@@ -149,10 +158,11 @@
       extended)))
 
 (defn- rewrite-group!
-  [^Join root]
+  "Rewrites the join group at `root`; `holder` is the whole query."
+  [holder ^Join root]
   (let [members (leaves root)]
     (when (some triple-ref? members)
-      (let [members (fold-constants members)
+      (let [[members folded] (fold-constants members)
             [units pending]
             (loop [units (vec (remove triple-ref? members))
                    pending (filterv triple-ref? members)]
@@ -162,7 +172,14 @@
                                        [tr i]))]
                 (recur (assoc units i (pair (nth units i) tr)) (remove-node pending tr))
                 [units pending]))]
-        (.replaceWith root ^TupleExpr (reduce #(Join. %1 %2) (into units pending)))))))
+        (let [group ^TupleExpr (reduce #(Join. %1 %2) (into units pending))]
+          (.replaceWith root group)
+          ;; A folded term's variable is no longer bound; bind it again where
+          ;; the rest of the query still uses it.
+          (when-let [elems (seq (for [[ext t] folded :when (referenced? holder ext)]
+                                  (ExtensionElem. (ValueConstant. t) ^String ext)))]
+            (.replaceWith group (Extension. (.clone group) ^"[Lorg.eclipse.rdf4j.query.algebra.ExtensionElem;"
+                                            (into-array ExtensionElem elems)))))))))
 
 (defn pair-triple-refs
   "`tuple-expr` with its triple-term patterns rewritten (see the namespace
@@ -173,7 +190,7 @@
     (let [copy ^TupleExpr (.clone tuple-expr)
           holder (if (instance? QueryRoot copy) copy (QueryRoot. copy))]
       (doseq [j (collect holder group-root?)]
-        (rewrite-group! j))
+        (rewrite-group! holder j))
       (if (identical? holder copy)
         copy
         (doto (.getArg ^QueryRoot holder) (.setParentNode nil))))))

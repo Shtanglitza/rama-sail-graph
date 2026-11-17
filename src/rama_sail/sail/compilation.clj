@@ -8,7 +8,8 @@
             Order OrderElem
             Group GroupElem Count Sum Avg Min Max
             If Regex In ListMemberOperator IsURI IsBNode IsLiteral IsNumeric Lang LangMatches Datatype SameTerm
-            TripleRef ValueExprTripleRef StatementPattern$Scope]
+            TripleRef ValueExprTripleRef StatementPattern$Scope
+            IsTriple TripleComponent TripleComponent$Role]
            [org.eclipse.rdf4j.query BindingSet]))
 
 ;;; -----------------------------------------------------------------------------
@@ -440,7 +441,19 @@
      :arg (value-expr->plan (first args))
      :set (mapv value-expr->plan (rest args))}))
 
-;;; --- RDF-star Triple Term Support ---
+;;; --- Triple terms ---
+
+(defmethod value-expr->plan IsTriple [^IsTriple expr]
+  ;; isTRIPLE(x)
+  {:type :is-triple :arg (value-expr->plan (.getArg expr))})
+
+(defmethod value-expr->plan TripleComponent [^TripleComponent expr]
+  ;; SUBJECT(t), PREDICATE(t), OBJECT(t)
+  {:type (condp = (.getRole expr)
+           TripleComponent$Role/SUBJECT :triple-subject
+           TripleComponent$Role/PREDICATE :triple-predicate
+           TripleComponent$Role/OBJECT :triple-object)
+   :arg (value-expr->plan (.getTripleRefVar expr))})
 
 (defmethod value-expr->plan ValueExprTripleRef [^ValueExprTripleRef expr]
   ;; TRIPLE(?s, ?p, ?o) constructor — builds a triple term from components

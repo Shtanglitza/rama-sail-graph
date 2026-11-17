@@ -66,6 +66,9 @@
     (is (= "\"\"" (e/eval-expr {:type :lang :arg (c "\"a@b\"")} {}))))
   (testing "LANG of tagged literal"
     (is (= "\"en\"" (e/eval-expr {:type :lang :arg (c "\"hi\"@en")} {}))))
+  (testing "LANG of an RDF 1.2 literal with a base direction is the bare tag"
+    (is (= "\"en\"" (e/eval-expr {:type :lang :arg (c "\"hi\"@en--ltr")} {})))
+    (is (= "\"ar\"" (e/eval-expr {:type :lang :arg (c "\"x\"@ar--rtl")} {}))))
   (testing "LANG of an IRI is an error"
     (is (e/error? (e/eval-expr {:type :lang :arg (c "<http://ex/a>")} {})))))
 
@@ -77,7 +80,14 @@
     (is (= "<http://www.w3.org/2001/XMLSchema#integer>"
            (e/eval-expr {:type :datatype :arg (c (str "\"5\"" xsd-int))} {})))
     (is (= "<http://www.w3.org/1999/02/22-rdf-syntax-ns#langString>"
-           (e/eval-expr {:type :datatype :arg (c "\"hi\"@en")} {})))))
+           (e/eval-expr {:type :datatype :arg (c "\"hi\"@en")} {}))))
+  (testing "DATATYPE of a literal with a base direction is rdf:dirLangString"
+    (is (= "<http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString>"
+           (e/eval-expr {:type :datatype :arg (c "\"hi\"@en--rtl")} {}))))
+  (testing "the direction takes part in equality"
+    (is (false? (e/terms-equal "\"hi\"@en--ltr" "\"hi\"@en")))
+    (is (false? (e/terms-equal "\"hi\"@en--ltr" "\"hi\"@en--rtl")))
+    (is (true? (e/terms-equal "\"hi\"@en--ltr" "\"hi\"@EN--ltr")))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Numeric tower
@@ -158,7 +168,10 @@
   (testing "boolean lexical forms including \"1\""
     (is (true? (e/sparql-ebv (str "\"true\"" xsd-bool))))
     (is (true? (e/sparql-ebv (str "\"1\"" xsd-bool))))
-    (is (false? (e/sparql-ebv (str "\"false\"" xsd-bool)))))
+    (is (false? (e/sparql-ebv (str "\"false\"" xsd-bool))))
+    (is (false? (e/sparql-ebv (str "\"0\"" xsd-bool)))))
+  (testing "an invalid boolean is a type error (SPARQL 1.2; 1.1 made it false)"
+    (is (e/error? (e/sparql-ebv (str "\"z\"" xsd-bool)))))
   (testing "IRI and unbound are type errors"
     (is (e/error? (e/sparql-ebv "<http://ex/a>")))
     (is (e/error? (e/sparql-ebv nil)))))

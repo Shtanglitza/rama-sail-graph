@@ -59,8 +59,9 @@
   "Parse an N-Triples term string into a map, or nil for nil input.
 
    Returns one of:
-   - {:kind :literal :lexical s :lang tag-or-nil :datatype iri-or-nil}
-     (:lang and :datatype are mutually exclusive; both nil = simple literal)
+   - {:kind :literal :lexical s :lang tag-or-nil :dir dir-or-nil :datatype iri-or-nil}
+     (:lang and :datatype are mutually exclusive; both nil = simple literal.
+     :dir is ltr or rtl for an RDF 1.2 literal tagged ar--rtl, without it in :lang)
    - {:kind :iri :value iri-string}
    - {:kind :bnode :id s}
    - {:kind :triple}                        (RDF-star triple term)
@@ -92,7 +93,12 @@
               {:kind :literal :lexical lexical :lang nil :datatype nil}
 
               (str/starts-with? suffix "@")
-              {:kind :literal :lexical lexical :lang (subs suffix 1) :datatype nil}
+              (let [tag (subs suffix 1)
+                    dir-at (.lastIndexOf ^String tag "--")]
+                (if (neg? dir-at)
+                  {:kind :literal :lexical lexical :lang tag :datatype nil}
+                  {:kind :literal :lexical lexical :lang (subs tag 0 dir-at)
+                   :dir (subs tag (+ dir-at 2)) :datatype nil}))
 
               (str/starts-with? suffix "^^<")
               {:kind :literal :lexical lexical :lang nil
@@ -113,6 +119,7 @@
 (def ^:private xsd-decimal (str xsd "decimal"))
 (def ^:private xsd-double (str xsd "double"))
 (def ^:private rdf-lang-string "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString")
+(def ^:private rdf-dir-lang-string "http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString")
 
 (def ^:private integer-datatypes
   (into #{} (map #(str xsd %))
@@ -502,9 +509,9 @@
                    {:class :numeric :v n}
                    {:class :string :lex (unescape-lexical (:value term)) :xsd? false})
           :literal
-          (let [{:keys [lexical lang datatype]} term]
+          (let [{:keys [lexical lang dir datatype]} term]
             (cond
-              lang {:class :lang :lex (unescape-lexical lexical) :lang lang}
+              lang {:class :lang :lex (unescape-lexical lexical) :lang lang :dir dir}
               (or (nil? datatype) (= xsd-string datatype))
               {:class :string :lex (unescape-lexical lexical) :xsd? (some? datatype)}
               :else
@@ -526,7 +533,9 @@
 
 (defn- nan? [x] (and (instance? Double x) (Double/isNaN ^double x)))
 
-(defn- lang= [a b] (.equalsIgnoreCase ^String (:lang a) ^String (:lang b)))
+(defn- lang= [a b]
+  (and (.equalsIgnoreCase ^String (:lang a) ^String (:lang b))
+       (= (:dir a) (:dir b))))
 
 (defn- compare-temporal
   "XSD partial order: negative/zero/positive, or ::error when indeterminate
@@ -580,12 +589,27 @@
 
 (def ^:private literal-classes #{:numeric :boolean :temporal :string :lang :opaque})
 
+(declare terms-equal)
+
+(defn- triple-terms-equal
+  "SPARQL 1.2: two triple terms are = when their subjects, predicates and
+   objects are (so <<( :a :b 123 )>> = <<( :a :b 123.0 )>>); false when one
+   pair is not, else ::error when one pair cannot be compared."
+  [l r]
+  (let [results (for [i [0 1 2]]
+                  (terms-equal (extract-triple-term-part l i) (extract-triple-term-part r i)))]
+    (cond
+      (some false? results) false
+      (some error? results) ::error
+      :else true)))
+
 (defn- equal-classified
   "terms-equal over already classified values (l and r are the terms)."
   [l r a b]
   (cond
     (or (nil? a) (nil? b)) ::error
     (= l r) (not (and (= :numeric (:class a)) (nan? (:v a))))
+    (= :triple (:class a) (:class b)) (triple-terms-equal l r)
     (not (and (literal-classes (:class a)) (literal-classes (:class b)))) false
     (or (= :lang (:class a)) (= :lang (:class b)))
     (and (= :lang (:class a) (:class b)) (lang= a b) (= (:lex a) (:lex b)))
@@ -701,7 +725,8 @@
       (case (:class t)
         :bnode [1 0 0 0 (:s t) ""]
         :iri [2 0 0 0 (:s t) ""]
-        :triple [4 0 0 0 (:s t) ""]
+        ;; SPARQL 1.2: by subject, then predicate, then object, each as ORDER BY
+        :triple [4 0 0 0 (mapv #(order-key (extract-triple-term-part v %)) [0 1 2]) ""]
         ;; NaN after every number (as compare-numbers); equal values of
         ;; different datatypes tie-break on the serialized term
         :numeric (let [n (:v t)]
@@ -709,7 +734,8 @@
         :temporal [3 1 0 (:datatype t) (temporal-sort-value (:cal t)) (str v)]
         :boolean [3 2 0 xsd-boolean (if (:v t) "1" "0") ""]
         :string [3 2 0 xsd-string (:lex t) ""]
-        :lang [3 2 0 rdf-lang-string (lower-root (:lang t)) (:lex t)]
+        :lang [3 2 0 (if (:dir t) rdf-dir-lang-string rdf-lang-string)
+               (cond-> (lower-root (:lang t)) (:dir t) (str "--" (:dir t))) (:lex t)]
         :opaque (if (or (contains? integer-datatypes (:datatype t))
                         (contains? float-datatypes (:datatype t))
                         (= xsd-decimal (:datatype t)))
@@ -763,9 +789,16 @@
       (if (or (nil? l) (error? l) (nil? r) (error? r))
         ::error
         (cond
+          (and (triple-term? l) (triple-term? r))
+          ;; SPARQL 1.2: = compares triple terms part by part
+          (case op
+            :eq (triple-terms-equal l r)
+            :ne (let [e (triple-terms-equal l r)] (if (error? e) ::error (not e)))
+            ::error)
+
           (or (identity-only-term? l) (identity-only-term? r))
-          ;; an IRI / blank node / triple term: = is term identity and the
-          ;; ordering operators are a type error — no classification needed
+          ;; an IRI / blank node / triple term against anything else: = is
+          ;; term identity and the ordering operators are a type error
           (case op
             :eq (= l r)
             :ne (not= l r)
@@ -906,6 +939,7 @@
           (if (literal-of-kind? term)
             (cond
               (:datatype term) (str "<" (:datatype term) ">")
+              (:dir term) (str "<" rdf-dir-lang-string ">")
               (:lang term) (str "<" rdf-lang-string ">")
               :else (str "<" xsd-string ">"))
             ::error))))
@@ -1015,7 +1049,11 @@
     (let [s (eval-expr (:subject expr) bindings)
           p (eval-expr (:predicate expr) bindings)
           o (eval-expr (:object expr) bindings)]
-      (if (or (nil? s) (error? s) (nil? p) (error? p) (nil? o) (error? o))
+      ;; RDF 1.2: the subject is an IRI or blank node (not a triple term),
+      ;; the predicate an IRI.
+      (if (or (nil? s) (error? s) (nil? p) (error? p) (nil? o) (error? o)
+              (not (string? s)) (not (#{:iri :bnode} (:kind (parse-term s))))
+              (not (string? p)) (not= :iri (:kind (parse-term p))))
         ::error
         (str "<< " s " " p " " o " >>")))
 
@@ -1029,7 +1067,8 @@
 (defn sparql-ebv
   "SPARQL Effective Boolean Value. Returns true, false, or ::error.
    Rules per SPARQL 17.2.2:
-   - boolean → itself; xsd:boolean literal → its value (invalid lexical → false)
+   - boolean → itself; xsd:boolean literal → its value (invalid lexical →
+     type error, as in SPARQL 1.2; SPARQL 1.1 made it false)
    - numeric literal → false for 0/NaN (invalid lexical → false)
    - simple/xsd:string literal → false for empty string
    - unbound, error, IRI, bnode, other → type error"
@@ -1048,7 +1087,8 @@
             (= xsd-boolean datatype)
             (case lexical
               ("true" "1") true
-              false)
+              ("false" "0") false
+              ::error)
 
             (and (nil? lang) (or (nil? datatype) (= xsd-string datatype)))
             (not= "" lexical)

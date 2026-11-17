@@ -8,6 +8,7 @@
             [clojure.java.io :as io]
             [clojure.pprint :as pprint]
             [clojure.test :refer [deftest is testing]]
+            [rama-sail.bulk :as bulk]
             [rama-sail.sail.serialization :as ser])
   (:import (clojure.lang Reflector)
            (java.io StringReader)
@@ -16,11 +17,12 @@
            (org.eclipse.rdf4j.query.algebra Var)
            (org.eclipse.rdf4j.query.algebra.helpers AbstractQueryModelVisitor)
            (org.eclipse.rdf4j.query.parser.sparql SPARQLParser)
-           (org.eclipse.rdf4j.rio RDFFormat Rio)))
+           (org.eclipse.rdf4j.rio RDFFormat)
+           (org.eclipse.rdf4j.rio.helpers StatementCollector)))
 
 (def golden-path "test/resources/serialization-golden.edn")
 
-(def ^:private VF (SimpleValueFactory/getInstance))
+(def ^:private ^SimpleValueFactory VF (SimpleValueFactory/getInstance))
 
 (defn- iri [s] (.createIRI VF s))
 
@@ -59,8 +61,14 @@
    ex:s ex:p \"plain\", \"lang\"@en-GB, \"LANG\"@DE, 1, 1.0, 1.0e0, true, \"2026-11-16\"^^xsd:date,
           \"multi\\nline\", '''long \"quoted\"''', _:x, <http://ex/café> .")
 
-(defn- parsed-turtle []
-  (let [stmts (Rio/parse (StringReader. turtle) "" RDFFormat/TURTLE (make-array org.eclipse.rdf4j.model.Resource 0))]
+(defn- parsed-turtle
+  "Parsed as bulk/load-file! parses."
+  []
+  (let [collector (StatementCollector.)
+        _ (doto (bulk/create-parser RDFFormat/TURTLE)
+            (.setRDFHandler collector)
+            (.parse (StringReader. turtle) ""))
+        stmts (.getStatements collector)]
     (for [^Statement st stmts
           :let [o (.getObject st)]]
       ["turtle" (if (instance? org.eclipse.rdf4j.model.BNode o) (.createBNode VF "x") o)])))

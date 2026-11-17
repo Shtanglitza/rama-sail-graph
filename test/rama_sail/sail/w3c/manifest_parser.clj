@@ -3,7 +3,6 @@
    Uses RDF4J Rio to parse the Turtle manifest and extract test entries."
   (:require [clojure.java.io :as io])
   (:import [org.eclipse.rdf4j.rio Rio RDFFormat]
-           [org.eclipse.rdf4j.rio.turtlestar TurtleStarParser]
            [org.eclipse.rdf4j.rio.helpers StatementCollector]
            [org.eclipse.rdf4j.model.util Models Values]
            [org.eclipse.rdf4j.model.vocabulary RDF]
@@ -30,6 +29,7 @@
 (def ^:private qt-graphData (iri QT-NS "graphData"))
 (def ^:private ut-request (iri UT-NS "request"))
 (def ^:private ut-data (iri UT-NS "data"))
+(def ^:private mf-assumedTestBase (iri MF-NS "assumedTestBase"))
 
 (defn- get-object
   "Get the single object for (subject, predicate) in model, or nil."
@@ -101,7 +101,7 @@
         _ (when-not url (throw (ex-info "Manifest not found on classpath" {:path resource-path})))
         base-uri (.toString url)
         ^org.eclipse.rdf4j.model.Model model
-        (let [parser (TurtleStarParser.)
+        (let [parser (Rio/createParser RDFFormat/TURTLE)
               collector (StatementCollector.)]
           (.setRDFHandler parser collector)
           (with-open [in (.openStream url)]
@@ -129,6 +129,15 @@
                  (parse-update-test model test-iri)
 
                  :else
+                 ;; Syntax, format-evaluation and C14N tests: mf:action is the
+                 ;; input file, mf:result the expected output (if any).
                  {:iri (value->str test-iri)
-                  :name "unknown"
-                  :type :unknown})))))))
+                  :name (value->str (get-object model test-iri mf-name))
+                  :type (some->> types
+                                 (map #(.getLocalName ^IRI %))
+                                 (filter #(re-find #"Test|C14N" %))
+                                 first
+                                 keyword)
+                  :action-file (iri->filename (get-object model test-iri mf-action))
+                  :result-file (iri->filename (get-object model test-iri mf-result))
+                  :assumed-base (value->str (get-object model manifest-subj mf-assumedTestBase))})))))))

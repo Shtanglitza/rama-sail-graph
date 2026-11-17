@@ -6,7 +6,7 @@
             [rama-sail.module.queries :as queries])
   (:import [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.model.vocabulary XSD]
-           [org.eclipse.rdf4j.model Literal Triple]
+           [org.eclipse.rdf4j.model Literal TripleTerm]
            [org.eclipse.rdf4j.query.algebra ArbitraryLengthPath EmptySet Join LeftJoin Projection ProjectionElem ProjectionElemList SingletonSet Slice StatementPattern Var ZeroLengthPath]))
 
 (def ^:private ^org.eclipse.rdf4j.model.ValueFactory VF (SimpleValueFactory/getInstance))
@@ -727,7 +727,7 @@
     (is (= [] (assign-commit-tx-times [] 7)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; RDF-star Triple Term Serialization Tests
+;;; Triple Term Serialization Tests
 ;;; ---------------------------------------------------------------------------
 
 (deftest test-triple-term-serialization
@@ -735,71 +735,75 @@
     (let [s (.createIRI VF "http://ex/alice")
           p (.createIRI VF "http://ex/knows")
           o (.createIRI VF "http://ex/bob")
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       (is (= "<< <http://ex/alice> <http://ex/knows> <http://ex/bob> >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (= s (.getSubject ^Triple parsed)))
-        (is (= p (.getPredicate ^Triple parsed)))
-        (is (= o (.getObject ^Triple parsed))))))
+        (is (instance? TripleTerm parsed))
+        (is (= s (.getSubject ^TripleTerm parsed)))
+        (is (= p (.getPredicate ^TripleTerm parsed)))
+        (is (= o (.getObject ^TripleTerm parsed))))))
 
   (testing "Triple term with literal object"
     (let [s (.createIRI VF "http://ex/alice")
           p (.createIRI VF "http://ex/age")
           o (.createLiteral VF "30" XSD/INTEGER)
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       (is (= "<< <http://ex/alice> <http://ex/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (= o (.getObject ^Triple parsed))))))
+        (is (instance? TripleTerm parsed))
+        (is (= o (.getObject ^TripleTerm parsed))))))
 
   (testing "Triple term with language-tagged literal"
     (let [s (.createIRI VF "http://ex/alice")
           p (.createIRI VF "http://ex/name")
           o (.createLiteral VF "Alice" "en")
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       (is (= "<< <http://ex/alice> <http://ex/name> \"Alice\"@en >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (= o (.getObject ^Triple parsed))))))
+        (is (instance? TripleTerm parsed))
+        (is (= o (.getObject ^TripleTerm parsed))))))
 
   (testing "Triple term with BNode subject"
     (let [s (.createBNode VF "node1")
           p (.createIRI VF "http://ex/knows")
           o (.createIRI VF "http://ex/bob")
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       (is (= "<< _:node1 <http://ex/knows> <http://ex/bob> >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (= s (.getSubject ^Triple parsed))))))
+        (is (instance? TripleTerm parsed))
+        (is (= s (.getSubject ^TripleTerm parsed))))))
 
-  (testing "Nested triple term"
+  (testing "Nested triple term (object position)"
     (let [inner-s (.createIRI VF "http://ex/alice")
           inner-p (.createIRI VF "http://ex/knows")
           inner-o (.createIRI VF "http://ex/bob")
-          inner (.createTriple VF inner-s inner-p inner-o)
-          outer-p (.createIRI VF "http://ex/confidence")
-          outer-o (.createLiteral VF "0.95" XSD/DOUBLE)
-          outer (.createTriple VF inner outer-p outer-o)
+          inner (.createTripleTerm VF inner-s inner-p inner-o)
+          outer-s (.createIRI VF "http://ex/carol")
+          outer-p (.createIRI VF "http://ex/claims")
+          outer (.createTripleTerm VF outer-s outer-p inner)
           serialized (val->str outer)]
-      (is (= "<< << <http://ex/alice> <http://ex/knows> <http://ex/bob> >> <http://ex/confidence> \"0.95\"^^<http://www.w3.org/2001/XMLSchema#double> >>" serialized))
+      (is (= "<< <http://ex/carol> <http://ex/claims> << <http://ex/alice> <http://ex/knows> <http://ex/bob> >> >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (instance? Triple (.getSubject ^Triple parsed)))
-        (let [inner-parsed (.getSubject ^Triple parsed)]
-          (is (= inner-s (.getSubject ^Triple inner-parsed)))
-          (is (= inner-o (.getObject ^Triple inner-parsed))))))))
+        (is (instance? TripleTerm parsed))
+        (is (instance? TripleTerm (.getObject ^TripleTerm parsed)))
+        (let [inner-parsed (.getObject ^TripleTerm parsed)]
+          (is (= inner-s (.getSubject ^TripleTerm inner-parsed)))
+          (is (= inner-o (.getObject ^TripleTerm inner-parsed)))))))
+
+  (testing "A triple term in subject position (stored before RDF 1.2) names the migration"
+    (let [stored "<< << <http://ex/alice> <http://ex/knows> <http://ex/bob> >> <http://ex/confidence> \"0.95\"^^<http://www.w3.org/2001/XMLSchema#double> >>"]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"rama-sail\.migrate" (str->val stored))))))
 
 (deftest test-triple-term-as-quad-value
   (testing "Triple term can be used as object in a quad tuple"
     (let [s (.createIRI VF "http://ex/alice")
           p (.createIRI VF "http://ex/knows")
           o (.createIRI VF "http://ex/bob")
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       ;; The serialized triple term is just a string — it can go into any position
       (is (string? serialized))

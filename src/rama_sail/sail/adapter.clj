@@ -18,11 +18,9 @@
            (org.eclipse.rdf4j.query.algebra.evaluation.impl DefaultEvaluationStrategyFactory)
            (org.eclipse.rdf4j.collection.factory.impl DefaultCollectionFactory)
            [org.eclipse.rdf4j.sail.helpers AbstractSail AbstractSailConnection]
-           [org.eclipse.rdf4j.sail UpdateContext]
            [org.eclipse.rdf4j.model Value Resource Statement IRI ValueFactory Namespace]
            [org.eclipse.rdf4j.model.impl SimpleNamespace]
            [org.eclipse.rdf4j.query.algebra TupleExpr]
-           [org.eclipse.rdf4j.model Triple]
            [org.eclipse.rdf4j.sail SailException]
            [org.eclipse.rdf4j.query BindingSet Dataset QueryEvaluationException]
            [org.eclipse.rdf4j.common.iteration CloseableIteration CloseableIteratorIteration]))
@@ -295,11 +293,11 @@
   "Convert a quad tuple to an RDF4J Statement."
   [[qs qp qo qc]]
   (.createStatement VF
-                    (str->val qs)
-                    (str->val qp)
+                    (ser/str->resource qs)
+                    ^IRI (str->val qp)
                     (str->val qo)
                     (when (and qc (not= qc DEFAULT-CONTEXT-VAL))
-                      (str->val qc))))
+                      (ser/str->resource qc))))
 
 (defn- statement->quad
   "Convert an RDF4J Statement to a quad tuple."
@@ -321,7 +319,7 @@
               :pattern {:s s-val :p p-val :o o-val :c plan-c}}
         rama-results (invoke-query-with-timeout query-qt timeout-ms plan)]
     (map (fn [binding]
-           (let [rs (if s s (str->val (get binding "?s")))
+           (let [rs (if s s (ser/str->resource (get binding "?s")))
                  rp (if p p (str->val (get binding "?p")))
                  ro (if o o (str->val (get binding "?o")))
                  rc (if (some? c-val)
@@ -397,19 +395,6 @@
                                        empty-stats)))))))))]
     (proxy [AbstractSailConnection] [parent-sail]
 
-      ;; Override addStatement to validate that contexts don't contain Triple instances.
-      ;; The actual addStatementInternal is called later during flush/commit via
-      ;; bulkAddStatementsInternal, so we must validate here at the public API level.
-      (addStatement [^UpdateContext op ^Resource s ^IRI p ^Value o ^"[Lorg.eclipse.rdf4j.model.Resource;" contexts]
-        ;; Validate: context cannot be a Triple (RDF-star embedded triples as context)
-        (doseq [c contexts]
-          (when (instance? Triple c)
-            (throw (SailException.
-                    (str "context argument can not be of type Triple: " c)))))
-        ;; Reflection warning unavoidable here — proxy-super cannot resolve overloaded
-        ;; methods in Clojure (CLJ-1433). Not a performance concern: called once per statement.
-        (proxy-super addStatement op s p o contexts))
-
       (addStatementInternal [^Resource s ^IRI p ^Value o ^"[Lorg.eclipse.rdf4j.model.Resource;" contexts]
         ;; RDF4J semantics: If contexts array is empty, add to Default Graph (nil).
         ;; If not empty, add statement to EVERY context specified.
@@ -470,7 +455,10 @@
       (evaluateInternal [^TupleExpr tuple-expr ^Dataset dataset ^BindingSet bindings include-inferred]
         ;; Helper to use RDF4J fallback strategy (goes through getStatementsInternal)
         (letfn [(use-fallback-strategy []
-                  (let [tuple-expr (triple-refs/pair-triple-refs tuple-expr)
+                  ;; Evaluate a copy, as RDF4J's own SAIL connections do: the
+                  ;; strategy rewrites the tree (Vars to constants), and the
+                  ;; parser builds some nodes (StrLangDir, ...) on immutable lists.
+                  (let [tuple-expr (triple-refs/pair-triple-refs (.clone ^TupleExpr tuple-expr))
                         _ (when (triple-refs/unpaired? tuple-expr)
                             ;; RDF4J would evaluate a leftover TripleRef as
                             ;; reification (rdf:Statement quads): silently empty

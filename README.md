@@ -14,7 +14,7 @@ rama-sail-graph integrates the [Rama](https://redplanetlabs.com/rama) distribute
 
 - **Quad Storage**: Four index PStates (SPOC, POSC, OSPC, CSPO) for efficient lookups across any access pattern
 - **SPARQL Query Engine**: Server-side query execution via Rama topologies — joins, filters, aggregates, ORDER BY, OPTIONAL, UNION, BIND, VALUES, ASK
-- **RDF-Star / SPARQL 1.2 Triple Terms**: Store and query triple terms (`<< s p o >>`) as subjects and objects — enables provenance, confidence, and temporal annotations
+- **RDF 1.2 / SPARQL 1.2 triple terms and reified triples**: Store triple terms (`<<( s p o )>>`) and query statements about statements (`<< s p o >> :source ?x`, `~ ?reifier`, `{| ... |}` annotations), for provenance, confidence and temporal annotations
 - **Query Optimization**: Cardinality-based join ordering, self-join optimization, colocated subject joins, batch property lookups, materialized type views
 - **Statistics**: Per-predicate and global cardinality tracking for adaptive query planning
 - **Physical Deletes**: Idempotent add/delete with physical index removal
@@ -34,7 +34,7 @@ rama-sail-graph integrates the [Rama](https://redplanetlabs.com/rama) distribute
 
 ### Prerequisites
 
-- Java 17+
+- Java 25+ (RDF4J 6 requires it). The Rama workers run the module, which does not load RDF4J, so they need only what Rama requires
 - [Leiningen](https://leiningen.org/)
 - Rama 1.10.0 or later (see [Rama installation](https://redplanetlabs.com/docs)); the module jar carries Ring 1.15 / Jetty 12 classes, which match Rama 1.10 and not earlier releases
 
@@ -89,8 +89,8 @@ lein test :only rama-sail.sail.compliance-test
 # Run RDF-star / triple term integration tests
 lein test :only rama-sail.sail.rdf-star-test
 
-# Run W3C SPARQL 1.2 eval-triple-terms conformance suite
-lein test :only rama-sail.sail.w3c.sparql12-test
+# Run the W3C conformance suites (SPARQL 1.2, RDF 1.2 formats, SPARQL 1.1 property paths)
+lein test :w3c
 
 # Run W3C SPARQL 1.1 property path conformance suite
 lein test :only rama-sail.sail.w3c.sparql11-property-path-test
@@ -195,33 +195,37 @@ Ingest speed is set by three things, which a profile of the indexer identified (
 - **The apply budget** for queued commits, `commit-ops-per-microbatch` (default 10,000). `(core/set-indexer-option! depot :commit-ops-per-microbatch n)` changes it at runtime, and `:commit-ops-per-microbatch` on a bulk load raises it for that load. One microbatch must finish well inside Rama's microbatch phase timeout, or it is retried forever, so raise it only on a cluster where you have measured how long a microbatch takes.
 - **Disk sync cost.** Every microbatch ends with RocksDB writes and fsyncs. The figures below are from a laptop running macOS, where fsync is slow.
 
-### Triple Terms (RDF-Star / SPARQL 1.2)
+### Triple Terms and Reified Triples (RDF 1.2 / SPARQL 1.2)
 
-Triple terms allow statements about statements — attach provenance, confidence scores, or temporal metadata directly to triples:
-
-```clojure
-;; Store a triple with a confidence annotation
-(rama/foreign-append! depot [:add ["<< <alice> <knows> <bob> >>" "<confidence>" "\"0.95\"^^<http://www.w3.org/2001/XMLSchema#double>" "::rama-internal::default-graph"]])
-```
+A triple term `<<( s p o )>>` is a value that denotes a triple; RDF 1.2 allows it as an object. Statements about a triple go through a reifier, a resource that `rdf:reifies` the triple term, and SPARQL 1.2 reads `<< s p o >>` as such a reifier:
 
 ```sparql
-# Find all annotations on a specific triple
+# Data: a reifier of <alice knows bob>, with a confidence and a source
+INSERT DATA {
+  <http://ex/alice> <http://ex/knows> <http://ex/bob> ~ <http://ex/r1>
+      {| <http://ex/confidence> 0.95 ; <http://ex/source> <http://ex/hr> |} .
+}
+
+# All statements about the triple (including the reifier's rdf:reifies)
 SELECT ?pred ?val WHERE {
   << <http://ex/alice> <http://ex/knows> <http://ex/bob> >> ?pred ?val .
 }
 
-# Extract components from annotated triples
+# Decompose: which triples have a confidence above 0.8
 SELECT ?s ?p ?o ?confidence WHERE {
   << ?s ?p ?o >> <http://ex/confidence> ?confidence .
   FILTER(?confidence > 0.8)
 }
 
-# Provenance tracking via SPARQL UPDATE
-INSERT { << ?s ?p ?o >> <http://ex/source> ?g }
-WHERE { GRAPH ?g { ?s ?p ?o } }
+# The reifier itself, and triple terms as plain values
+SELECT ?r ?t WHERE {
+  << <http://ex/alice> <http://ex/knows> <http://ex/bob> ~ ?r >> <http://ex/source> <http://ex/hr> .
+  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t .
+  FILTER(isTRIPLE(?t) && SUBJECT(?t) = <http://ex/alice>)
+}
 ```
 
-Triple terms are stored as first-class values in all four quad indexes, using `<< <s> <p> <o> >>` canonical serialization. Nested triple terms are supported to arbitrary depth.
+Triple terms are stored as values in all four quad indexes, using the canonical string `<< <s> <p> <o> >>`, and may nest (in object position). A constant triple term is an index lookup; `<< s p o >>` with a selective annotation such as `:source :hr` starts from that annotation and looks up `rdf:reifies` per reifier.
 
 **Before upgrading to RDF4J 6 (RDF 1.2).** RDF 1.2 allows a triple term only as an object; statements about a triple go through a reifier (`_:r rdf:reifies <<( s p o )>>` and `_:r :source :hr`), and RDF 1.2 SPARQL reads `<< s p o >> :source ?x` that way. A store that has triple terms in subject position must be rewritten while it still runs an RDF4J 5 version. Each `<< s p o >> :x :y g` becomes `R rdf:reifies << s p o >> g` plus `R :x :y g`, with one blank-node reifier per distinct triple term (`_:reif-` + a hash of the term), so all statements about one triple stay on one node and running it again changes nothing. A triple term in the subject position of another triple term is reified the same way, innermost first; `:nested` counts those quads, whose rewrite changes what the outer term denotes.
 
@@ -293,14 +297,14 @@ Triple terms (`<< s p o >>`) are handled across the stack:
 
 | Layer | What | How |
 |-------|------|-----|
-| **Storage** | Triple terms in S/O positions | Stored as canonical strings in all 4 indexes, O(1) hash lookups |
-| **Compilation** | `TripleRef` algebra nodes | Rewritten to filter+bind plans with component extraction |
-| **Expressions** | `:triple-subject/predicate/object` | Extract components from bound triple term values |
-| **Serialization** | RDF4J `Triple` <-> string | `val->str` / `str->val` with nested term support |
+| **Storage** | Triple terms in object position | Stored as canonical strings in all 4 indexes, O(1) hash lookups |
+| **Compilation** | `TripleRef`, `ReifiedTripleRef`, `AnnotationTripleRef` algebra nodes | Paired with the pattern that binds the term (`rama-sail.sail.triple-refs`): a constant term becomes that pattern's constant, a term with variables becomes filter+bind over it |
+| **Expressions** | `isTRIPLE`, `SUBJECT`/`PREDICATE`/`OBJECT`, `TRIPLE()` | Evaluated on canonical strings in the module |
+| **Serialization** | RDF4J `TripleTerm` <-> string | `val->str` / `str->val`; a triple term in subject position (data written before RDF 1.2) is an error naming `rama-sail.migrate` |
 
 ### RDF4J SAIL Compliance
 
-RamaSail passes 40 of 40 tests in the RDF4J **RDFStoreTest** compliance suite (`rdf4j-sail-testsuite` 5.2.0), which validates:
+RamaSail passes 41 of 41 tests in the RDF4J **RDFStoreTest** compliance suite (`rdf4j-sail-testsuite` 6.1.0), which validates:
 
 - Statement CRUD (add, remove, get, has) with pattern matching and wildcards
 - Value round-trips (IRIs, BNodes, typed literals, decimals, timezones, long URIs/literals)
@@ -319,53 +323,53 @@ RamaSail passes 40 of 40 tests in the RDF4J **RDFStoreTest** compliance suite (`
 | Supported | Falls Back To RDF4J Local Evaluation | Explicitly Unsupported / Not Yet Working |
 |-----------|--------------------------------------|------------------------------------------|
 | SELECT, ASK, DESCRIBE, CONSTRUCT | MINUS | SERVICE (federated queries) |
-| JOIN, LEFT JOIN (OPTIONAL), UNION | | RDF 1.2 `rdf:reifies` semantics |
-| FILTER (comparisons, logic, regex, IN) | | RDF 1.2 `<<( )>>` syntax (needs RDF4J upgrade) |
-| GROUP BY, HAVING, aggregates | | SPARQL 1.2 `{| |}` annotation syntax |
+| JOIN, LEFT JOIN (OPTIONAL), UNION | | |
+| FILTER (comparisons, logic, regex, IN) | | |
+| GROUP BY, HAVING, aggregates | | |
 | ORDER BY, DISTINCT, REDUCED, LIMIT/OFFSET | | |
 | BIND, VALUES, COALESCE, IF | | |
 | STR, LANG, DATATYPE, LANGMATCHES | | |
 | ISIRI, ISBNODE, ISLITERAL, ISNUMERIC | | |
 | SAMETERM, REGEX | | |
 | Property paths (`+`, `*`, `?`, `/`, `\|`, `^`) | | |
-| Triple term patterns (`<< s p o >> ?p ?o`) | | |
-| TripleRef decomposition (`<< ?s ?p ?o >>`) | | |
+| Triple terms (`<<( s p o )>>`), reified triples (`<< s p o >>`, `~ ?r`, `{| |}`) | | |
+| `isTRIPLE`, `SUBJECT`, `PREDICATE`, `OBJECT`, `TRIPLE()` | | |
 
 Some unsupported operators are automatically handled by falling back to RDF4J's `DefaultEvaluationStrategy`, which evaluates locally via `getStatements`. This ensures correct results but without distributed execution benefits. `SERVICE` is a special case and is currently rejected explicitly rather than evaluated through fallback.
 
 REPL verification showed that basic nested `SELECT` subqueries can compile into Rama plans and run server-side, so subquery support is at least partial and should not be described as fallback-only.
 
-### W3C SPARQL 1.2 Conformance
+### W3C RDF 1.2 and SPARQL 1.2 Conformance
 
-The project includes a vendored copy of the W3C [eval-triple-terms](https://github.com/w3c/rdf-tests/tree/main/sparql/sparql12/eval-triple-terms) test suite (41 tests) in `test/resources/w3c/sparql12/eval-triple-terms/`.
+The project includes vendored copies of the W3C [rdf-tests](https://github.com/w3c/rdf-tests) suites
+for SPARQL 1.2 and the RDF 1.2 formats (`test/resources/w3c/`, source commit in
+`test/resources/w3c/SOURCE.md`). Every test runs through the store: the data is loaded into RamaSail
+and the query runs there, or, for the format suites, the parsed input is stored and read back.
 
-| Result | Count | Details |
-|--------|-------|---------|
-| **Pass** | 5 | `basic-4`, `basic-5`, `basic-6`, `pattern-9`, `update-1` |
-| **Quarantined** | 36 | Blocked on RDF4J parser limits (30) or missing `rdf:reifies` (6) |
-| **Unexpected failures** | 0 | |
+| Suites | Tests | Pass | Expected failures |
+|--------|-------|------|-------------------|
+| SPARQL 1.2: triple terms (evaluation, syntax), codepoint escapes, expressions, grouping, language direction, version, syntax | 271 | 260 | 11 |
+| RDF 1.2: Turtle, TriG, N-Triples, N-Quads (syntax, evaluation, C14N), RDF/XML | 351 | 328 | 23 |
 
-Quarantine breakdown:
+Expected failures are listed by test id with their reason in `sparql12_test.clj` and `rdf12_test.clj`;
+the run fails if one of them passes. Their causes:
 
-| Category | Count | Blocked on |
-|----------|-------|------------|
-| `<<( s p o )>>` triple term syntax in data | 10 | RDF4J 5.2.x parser (no released RDF 1.2 support) |
-| `~ :reifier` syntax in data | 9 | RDF4J 5.2.x parser |
-| SPARQL 1.2 query syntax (`{| |}`, `TRIPLE()`) | 7 | RDF4J 5.2.x SPARQL parser |
-| Mixed data + query syntax | 4 | Both parser limitations |
-| `rdf:reifies` semantics | 6 | Not yet implemented in RamaSail |
+| Cause | Tests |
+|-------|-------|
+| RDF4J 6.1's parsers: invalid language tags, surrogates, escapes or `@base` accepted, two valid codepoint escapes rejected, two RDF/XML annotations read differently (RDF4J's MemoryStore fails the same tests) | 30 |
+| Numeric literals stored in canonical form (Known Limitations): `"001"^^xsd:integer` groups with `"1"`, `1.0` reads back as `1` | 3 |
+| Language tags matched case-sensitively in graph patterns (Known Limitations) | 1 |
 
-The quarantined tests will become unblocked as RDF4J ships RDF 1.2 parser support (no released version exists as of April 2026) and as `rdf:reifies` semantics are implemented.
+Not included: the RDF 1.2 semantics (entailment) suites.
 
 ### W3C SPARQL 1.1 Property Path Conformance
 
-The project includes a vendored copy of the W3C [property-path](https://github.com/w3c/rdf-tests/tree/main/sparql/sparql11/property-path) test suite (33 tests) in `test/resources/w3c/sparql11/property-path/`.
+The project includes a vendored copy of the W3C [property-path](https://github.com/w3c/rdf-tests/tree/main/sparql/sparql11/property-path) test suite (33 tests) in `test/resources/w3c/sparql11/property-path/`, run like the suites above.
 
 | Result | Count | Details |
 |--------|-------|---------|
-| **Pass** | 29 | Sequence, alternative, inverse, transitive (`+`/`*`), zero-or-one (`?`), cycles, diamonds, negated property sets, operator precedence |
-| **Quarantined** | 4 | 3 named graph tests, 1 nested star `(*)*` |
-| **Unexpected failures** | 0 | |
+| **Pass** | 31 | Sequence, alternative, inverse, transitive (`+`/`*`), zero-or-one (`?`), cycles, diamonds, negated property sets, operator precedence, paths inside `GRAPH` |
+| **Expected failures** | 2 | `pp35` (a zero-length match lost in `GRAPH ?g { ?s :p1* ?t }`), `pp37` (nested star `(*)*`) |
 
 ### Observability
 
@@ -637,8 +641,9 @@ The following optimizations are applied automatically during query planning:
 ## Known Limitations
 
 - **Query fallback**: Some unsupported SPARQL operators fall back to RDF4J's local evaluation strategy, which may not scale for large datasets; `SERVICE` is explicitly unsupported
-- **RDF 1.2 partial**: Triple terms work via RDF-star (`<< s p o >>`), but RDF 1.2 `<<( s p o )>>` syntax, `~ :reifier` syntax, `{| |}` annotations, and `rdf:reifies` semantics are not yet supported. 5/41 W3C SPARQL 1.2 conformance tests pass; 36 are quarantined
-- **Triple term decomposition is client-side**: Extracting subject/predicate/object from triple terms uses string parsing on the SAIL client, not distributed Rama topologies. Constant triple-term lookups are O(1) distributed, but variable decomposition and component filtering are post-fetch
+- **Triple terms with variables are filtered, not indexed**: a constant triple term is an index lookup, but `<< ?s :p ?o >>` reads every triple term in that position (every `rdf:reifies` statement, or every object of the pattern) and filters by its parts, unless another pattern in the query is more selective
+- **Numeric and boolean literals are stored in canonical form**: `"1.0"^^xsd:decimal` reads back as `"1"^^xsd:decimal`, `"1e0"^^xsd:double` as `"1.0"^^xsd:double`, `"TRUE"^^xsd:boolean` as `"true"^^xsd:boolean`. The value is kept, the lexical form is not, so equal values match each other in queries, but a graph read back is not always identical to the one loaded
+- **Language tags match case-sensitively in graph patterns**: a pattern with `"abc"@EN` does not find a stored `"abc"@en` (RDF treats the two as the same literal). Filters with `=` and `LANGMATCHES` compare tags case-insensitively. The bulk loader stores tags as written
 - **`ORDER BY ... LIMIT` and `DISTINCT ... LIMIT`**: Over a large intermediate result these compute every row before the limit applies; there is no distributed top-N yet
 - **Query timeout**: Cancellation is best-effort; Rama cluster queries may continue after client timeout
 - **SPARQL endpoint**: Read-only by default; SPARQL UPDATE must be enabled explicitly and can require a Bearer token. There is no TLS, rate limiting or request size limit, and results are buffered in memory, so put it behind a reverse proxy outside development

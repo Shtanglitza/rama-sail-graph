@@ -3,7 +3,7 @@
             [rama-sail.terms :as terms])
   (:import (java.util Locale)
            (org.eclipse.rdf4j.model.vocabulary XSD)
-           [org.eclipse.rdf4j.model Value Resource IRI Literal BNode Triple ValueFactory]
+           [org.eclipse.rdf4j.model Value Resource IRI Literal Literal$BaseDirection BNode TripleTerm ValueFactory]
            [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.query.impl MapBindingSet SimpleBinding]))
 
@@ -95,9 +95,9 @@
     (instance? BNode v)
     (str "_:" (.getID ^BNode v))
 
-    ;; Triple term (RDF-star): << s p o >>
-    (instance? Triple v)
-    (let [^Triple t v]
+    ;; Triple term: << s p o >>
+    (instance? TripleTerm v)
+    (let [^TripleTerm t v]
       (str "<< " (val->str (.getSubject t)) " "
            (val->str (.getPredicate t)) " "
            (val->str (.getObject t)) " >>"))
@@ -110,9 +110,14 @@
           lang (.orElse lang-opt nil)
           dtype (.getDatatype lit)]
       (cond
-        ;; Language-tagged literal: "text"@en
+        ;; Language-tagged literal: "text"@en, with a base direction
+        ;; (RDF 1.2) as in N-Triples 1.2: "text"@ar--rtl
         lang
-        (str "\"" (escape-str label) "\"@" lang)
+        (str "\"" (escape-str label) "\"@" lang
+             (condp = (.getBaseDirection lit)
+               Literal$BaseDirection/LTR "--ltr"
+               Literal$BaseDirection/RTL "--rtl"
+               ""))
 
         ;; Typed literal (non-string): "value"^^<datatype>
         (and dtype (not= dtype XSD/STRING))
@@ -260,24 +265,46 @@
     (let [parts (parse-triple-term-parts (subs s 3 (- (count s) 3)))]
       (when (= 3 (count parts)) parts))))
 
+(defn subject-triple-term-error
+  "The error for a triple term stored in subject position: RDF 1.2 allows a
+   triple term only as an object, and rama-sail.migrate rewrites such data."
+  [^String s]
+  (ex-info (str "A triple term is stored in subject position, which RDF 1.2 (RDF4J 6) does not "
+                "allow: " s ". Rewrite the store with rama-sail.migrate (see the README, "
+                "\"Before upgrading to RDF4J 6\") on the previous release.")
+           {:type ::subject-triple-term :term s}))
+
+(declare str->val)
+
+(defn str->resource
+  "str->val for a subject or graph position, where a triple term cannot be."
+  ^Resource [^String s]
+  (if (and s (.startsWith s "<< "))
+    (throw (subject-triple-term-error s))
+    (str->val s)))
+
 (defn str->val
   "Parse an N-Triples formatted string into an RDF4J Value.
-   Throws IllegalArgumentException for malformed input."
+   Throws IllegalArgumentException for malformed input, and
+   subject-triple-term-error for a triple term with a triple term as its
+   subject."
   [^String s]
   (cond
     (nil? s) nil
 
-    ;; Triple term (RDF-star): << s p o >>
+    ;; Triple term: << s p o >>
     (.startsWith s "<< ")
     (let [inner (subs s 3 (- (count s) 3))  ;; strip "<< " and " >>"
           ;; Parse three N-Triples terms from the inner string.
-          ;; Terms are: IRI (<...>), BNode (_:...), Literal ("..."), or nested Triple (<< ... >>)
+          ;; Terms are: IRI (<...>), BNode (_:...), Literal ("..."), or nested triple term (<< ... >>)
           parts (parse-triple-term-parts inner)]
       (when (= 3 (count parts))
-        (.createTriple VF
-                       ^Resource (str->val (nth parts 0))
-                       ^IRI (str->val (nth parts 1))
-                       (str->val (nth parts 2)))))
+        (when (.startsWith ^String (nth parts 0) "<< ")
+          (throw (subject-triple-term-error s)))
+        (.createTripleTerm VF
+                           ^Resource (str->val (nth parts 0))
+                           ^IRI (str->val (nth parts 1))
+                           (str->val (nth parts 2)))))
 
     ;; IRI: <...>
     (.startsWith s "<")
@@ -304,9 +331,18 @@
         (let [suffix (subs s (inc last-quote))
               ^String label (unescape-str (subs s 1 last-quote))]
           (cond
-            ;; Lang: "foo"@en
+            ;; Lang: "foo"@en, or with a base direction: "foo"@en--ltr
             (.startsWith suffix "@")
-            (.createLiteral VF label ^String (subs suffix 1))
+            (let [tag (subs suffix 1)
+                  dir (.lastIndexOf tag "--")]
+              (if (neg? dir)
+                (.createLiteral VF label ^String tag)
+                (.createLiteral VF label ^String (subs tag 0 dir)
+                                (case (subs tag (+ dir 2))
+                                  "ltr" Literal$BaseDirection/LTR
+                                  "rtl" Literal$BaseDirection/RTL
+                                  (throw (IllegalArgumentException.
+                                          (str "Malformed base direction: " s)))))))
 
             ;; Typed: "foo"^^<...>
             (.startsWith suffix "^^<")

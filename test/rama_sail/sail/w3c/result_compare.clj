@@ -5,53 +5,31 @@
             [clojure.string :as str])
   (:import [org.eclipse.rdf4j.rio Rio RDFFormat]
            [org.eclipse.rdf4j.rio.helpers StatementCollector]
-           [org.eclipse.rdf4j.rio.turtlestar TurtleStarParser]
-           [org.eclipse.rdf4j.rio.trigstar TriGStarParser]
            [org.eclipse.rdf4j.model Resource]
            [org.eclipse.rdf4j.model.impl LinkedHashModel]
            [org.eclipse.rdf4j.model.util Models]
-           [org.eclipse.rdf4j.query QueryResults]
+           [org.eclipse.rdf4j.query QueryLanguage QueryResults]
            [org.eclipse.rdf4j.query.impl MutableTupleQueryResult]
            [org.eclipse.rdf4j.query.resultio.helpers QueryResultCollector]
-           [org.eclipse.rdf4j.query.resultio.sparqljson SPARQLStarResultsJSONParser]
+           [org.eclipse.rdf4j.query.resultio.sparqljson SPARQLResultsJSONParser]
            [org.eclipse.rdf4j.query.resultio.sparqlxml SPARQLResultsXMLParser]))
 
 (defn- detect-rdf-format
   "Detect RDF format from file extension."
   [filename]
   (cond
-    (str/ends-with? filename ".ttl") RDFFormat/TURTLESTAR
-    (str/ends-with? filename ".trig") RDFFormat/TRIGSTAR
+    (str/ends-with? filename ".ttl") RDFFormat/TURTLE
+    (str/ends-with? filename ".trig") RDFFormat/TRIG
     (str/ends-with? filename ".nq") RDFFormat/NQUADS
     (str/ends-with? filename ".nt") RDFFormat/NTRIPLES
     :else (throw (ex-info "Unknown RDF format" {:file filename}))))
 
-(defn load-data!
-  "Load RDF data from a classpath resource into an RDF4J connection.
-   Handles Turtle, TriG, N-Quads, and N-Triples formats.
-   Skips empty files (like empty.nq)."
-  [conn resource-path]
-  (let [url (io/resource resource-path)]
-    (when-not url (throw (ex-info "Data file not found" {:path resource-path})))
-    (let [content (slurp url)]
-      (when-not (str/blank? content)
-        (let [format (detect-rdf-format resource-path)
-              base-uri (.toString url)]
-          (.begin conn)
-          (with-open [in (.openStream url)]
-            (.add conn in base-uri format (into-array Resource [])))
-          (.commit conn))))))
-
 (defn- parse-expected-graph
-  "Parse an expected graph result (.ttl or .trig) into a Model.
-   Uses Star parsers to handle << >> triple term syntax."
+  "Parse an expected graph result (.ttl, .trig, .nt, .nq; RDF 1.2) into a Model."
   [resource-path]
   (let [url (io/resource resource-path)
         collector (StatementCollector.)
-        parser (cond
-                 (str/ends-with? resource-path ".trig") (TriGStarParser.)
-                 (str/ends-with? resource-path ".ttl") (TurtleStarParser.)
-                 :else (Rio/createParser (detect-rdf-format resource-path)))]
+        parser (Rio/createParser (detect-rdf-format resource-path))]
     (.setRDFHandler parser collector)
     (with-open [in (.openStream url)]
       (.parse parser in (.toString url)))
@@ -73,7 +51,7 @@
         collector (QueryResultCollector.)
         parser (if (str/ends-with? resource-path ".srx")
                  (SPARQLResultsXMLParser.)
-                 (SPARQLStarResultsJSONParser.))]
+                 (SPARQLResultsJSONParser.))]
     (.setQueryResultHandler parser collector)
     (with-open [in (.openStream url)]
       (.parseQueryResult parser in))
@@ -82,9 +60,9 @@
 (defn run-select-test
   "Run a SELECT query test. Returns {:pass? bool :message str}.
    Compares actual results to expected .srj/.srx file using QueryResults/equals."
-  [conn query-string expected-resource-path]
+  [conn query-string base expected-resource-path]
   (try
-    (let [actual-result (.evaluate (.prepareTupleQuery conn query-string))
+    (let [actual-result (.evaluate (.prepareTupleQuery conn QueryLanguage/SPARQL query-string base))
           ;; Collect actual results for debug before consuming
           actual-list (vec (iterator-seq actual-result))
           actual-mutable (MutableTupleQueryResult. (.getBindingNames actual-result) actual-list)
@@ -109,12 +87,12 @@
 (defn run-construct-test
   "Run a CONSTRUCT query test. Returns {:pass? bool :message str}.
    Compares actual graph to expected .ttl file using Models/isomorphic."
-  [conn query-string expected-resource-path]
+  [conn query-string base expected-resource-path]
   (try
     (let [actual-model (LinkedHashModel.)
-          _ (with-open [iter (.evaluate (.prepareGraphQuery conn query-string))]
-              (doseq [^org.eclipse.rdf4j.model.Statement stmt (iterator-seq iter)]
-                (.add actual-model ^org.eclipse.rdf4j.model.Statement stmt (into-array Resource []))))
+          _ (with-open [iter (.evaluate (.prepareGraphQuery conn QueryLanguage/SPARQL query-string base))]
+              (doseq [stmt (iterator-seq iter)]
+                (.add ^java.util.Collection actual-model stmt)))
           expected-model (parse-expected-graph expected-resource-path)
           iso? (Models/isomorphic actual-model expected-model)]
       {:pass? iso?
@@ -130,10 +108,10 @@
 (defn run-update-test
   "Run an UPDATE test. Returns {:pass? bool :message str}.
    Executes the update, then compares the resulting graph to expected .trig."
-  [conn update-string expected-resource-path]
+  [conn update-string base expected-resource-path]
   (try
     (.begin conn)
-    (.execute (.prepareUpdate conn update-string))
+    (.execute (.prepareUpdate conn QueryLanguage/SPARQL update-string base))
     (.commit conn)
     (let [actual-model (get-actual-model conn)
           expected-model (parse-expected-graph expected-resource-path)
@@ -149,21 +127,21 @@
        :error e})))
 
 (defn- parse-expected-boolean
-  "Parse expected ASK result (.srx) to extract the boolean value."
+  "Parse expected ASK result (.srx or .srj) to extract the boolean value."
   [resource-path]
   (let [url (io/resource resource-path)
         content (slurp url)]
     (cond
-      (str/includes? content "<boolean>true</boolean>") true
-      (str/includes? content "<boolean>false</boolean>") false
+      (re-find #"<boolean>\s*true\s*</boolean>|\"boolean\"\s*:\s*true" content) true
+      (re-find #"<boolean>\s*false\s*</boolean>|\"boolean\"\s*:\s*false" content) false
       :else (throw (ex-info "Cannot parse boolean result" {:path resource-path})))))
 
 (defn run-ask-test
   "Run an ASK query test. Returns {:pass? bool :message str}.
    Compares actual boolean result to expected .srx file."
-  [conn query-string expected-resource-path]
+  [conn query-string base expected-resource-path]
   (try
-    (let [actual (.evaluate (.prepareBooleanQuery conn query-string))
+    (let [actual (.evaluate (.prepareBooleanQuery conn QueryLanguage/SPARQL query-string base))
           expected (parse-expected-boolean expected-resource-path)]
       {:pass? (= actual expected)
        :message (when (not= actual expected)

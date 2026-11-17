@@ -7,11 +7,11 @@
              "-Xms6g"
              "-Xmx6g"]
   :dependencies [[com.rpl/rama-helpers "0.10.0" :exclusions [org.clojure/clojure]]
-                 [org.eclipse.rdf4j/rdf4j-sail-api "5.2.2"
+                 [org.eclipse.rdf4j/rdf4j-sail-api "6.1.0"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
-                 [org.eclipse.rdf4j/rdf4j-queryparser-sparql "5.2.2"
+                 [org.eclipse.rdf4j/rdf4j-queryparser-sparql "6.1.0"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
-                 [org.eclipse.rdf4j/rdf4j-repository-sail "5.2.2"
+                 [org.eclipse.rdf4j/rdf4j-repository-sail "6.1.0"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
                  ;; Prometheus metrics for observability
                  [io.prometheus/simpleclient "0.16.0"]
@@ -23,20 +23,22 @@
                  ;; jetty-server itself comes from Rama (provided), so the whole Jetty
                  ;; stack is the one Rama ships.
                  [ring/ring-jetty-adapter "1.15.5" :exclusions [org.eclipse.jetty/jetty-server]]
-                 ;; RDF4J result serializers for SPARQL Protocol HTTP endpoint.
-                 ;; jackson-core comes from Rama (provided): RDF4J's older one would shadow
-                 ;; it and break Rama's jackson-databind.
-                 [org.eclipse.rdf4j/rdf4j-queryresultio-sparqljson "5.2.2"
-                  :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple
-                               com.fasterxml.jackson.core/jackson-core]]
-                 [org.eclipse.rdf4j/rdf4j-queryresultio-sparqlxml "5.2.2"
+                 ;; RDF4J result serializers for SPARQL Protocol HTTP endpoint. RDF4J 6 uses
+                 ;; Jackson 3 (tools.jackson packages), separate from Rama's Jackson 2.
+                 [org.eclipse.rdf4j/rdf4j-queryresultio-sparqljson "6.1.0"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
-                 [org.eclipse.rdf4j/rdf4j-queryresultio-text "5.2.2"
+                 [org.eclipse.rdf4j/rdf4j-queryresultio-sparqlxml "6.1.0"
+                  :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
+                 [org.eclipse.rdf4j/rdf4j-queryresultio-text "6.1.0"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
                  ;; RDF writers for CONSTRUCT/DESCRIBE results
-                 [org.eclipse.rdf4j/rdf4j-rio-turtle "5.2.2"
+                 [org.eclipse.rdf4j/rdf4j-rio-turtle "6.1.0"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
-                 [org.eclipse.rdf4j/rdf4j-rio-rdfxml "5.2.2"
+                 [org.eclipse.rdf4j/rdf4j-rio-rdfxml "6.1.0"
+                  :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
+                 ;; N-Quads for bulk/load-file! and the SPARQL server's writers (TriG and
+                 ;; N-Triples come with rdf4j-rio-turtle)
+                 [org.eclipse.rdf4j/rdf4j-rio-nquads "6.1.0"
                   :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic org.slf4j/slf4j-simple]]
                  ;; Ring utilities for request parsing
                  [ring/ring-core "1.15.5"]]
@@ -91,7 +93,8 @@
                                                      "rama-sail.migrate-test"}
                                                    (str (:ns m))))
                    :w3c (fn [m] (contains? #{"rama-sail.sail.w3c.sparql11-property-path-test"
-                                             "rama-sail.sail.w3c.sparql12-test"}
+                                             "rama-sail.sail.w3c.sparql12-test"
+                                             "rama-sail.sail.w3c.rdf12-test"}
                                            (str (:ns m))))
                    :default (fn [m] (not (or (:perf m) (:scale m)
                                              (and (:ns m) (re-find #"bench" (str (:ns m)))))))
@@ -102,11 +105,11 @@
   :aot [rama-sail.core]
   :profiles {:dev      {:resource-paths ["test/resources/"]
                         :java-source-paths ["test-java"]
-                        :dependencies [[org.eclipse.rdf4j/rdf4j-sail-testsuite "5.2.2"
+                        :dependencies [[org.eclipse.rdf4j/rdf4j-sail-testsuite "6.1.0"
                                         :exclusions [org.slf4j/slf4j-api ch.qos.logback/logback-classic]]
                                        ;; Reference store for differential (oracle) tests
-                                       [org.eclipse.rdf4j/rdf4j-sail-memory "5.2.2"]
-                                       [org.junit.platform/junit-platform-console-standalone "1.10.0"]]}
+                                       [org.eclipse.rdf4j/rdf4j-sail-memory "6.1.0"]
+                                       [org.junit.platform/junit-platform-console-standalone "6.1.1"]]}
              :provided {:dependencies [[com.rpl/rama "1.10.0"]
                                        [org.clojure/clojure "1.12.6"]]}
              :scale    {:jvm-opts ["-Xss8m" "-Xms12g" "-Xmx12g"]}

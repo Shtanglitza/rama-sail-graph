@@ -148,7 +148,7 @@
    labels contain '<<' or '>>', which now round-trip after parse-triple-term-parts
    was fixed to skip string literals when scanning for the closing '>>'."
   ^Value [^Random rnd object-gen]
-  (.createTriple VF
+  (.createTripleTerm VF
                  (if (zero? (.nextInt rnd 2)) (gen-iri rnd) (gen-bnode rnd))
                  (gen-iri rnd)
                  ^Value (object-gen rnd)))
@@ -213,11 +213,11 @@
 
 (deftest test-explicit-nested-triple-roundtrip
   (testing "a hand-built triple-in-triple round-trips"
-    (let [inner (.createTriple VF
+    (let [inner (.createTripleTerm VF
                                (.createIRI VF "http://ex/s2")
                                (.createIRI VF "http://ex/p2")
                                (.createLiteral VF "inner \"label\"\nwith@stuff^^<x>" "en-US"))
-          outer (.createTriple VF
+          outer (.createTripleTerm VF
                                (.createBNode VF "outer")
                                (.createIRI VF "http://ex/π#p")
                                inner)]
@@ -266,21 +266,21 @@
   ;; string literals, so a nested literal containing >> or << threw
   ;; StringIndexOutOfBounds. The end-finder now skips literals.
   (testing "a nested triple whose inner literal contains << or >> round-trips"
-    (let [inner (.createTriple VF
+    (let [inner (.createTripleTerm VF
                                (.createIRI VF "http://ex/s2")
                                (.createIRI VF "http://ex/p2")
                                (.createLiteral VF "has << and >> inside"))
-          outer (.createTriple VF
+          outer (.createTripleTerm VF
                                (.createIRI VF "http://ex/s1")
                                (.createIRI VF "http://ex/p1")
                                inner)]
       (assert-roundtrip! outer)))
   (testing "a nested literal that looks exactly like a triple term round-trips"
-    (let [inner (.createTriple VF
+    (let [inner (.createTripleTerm VF
                                (.createIRI VF "http://ex/s2")
                                (.createIRI VF "http://ex/p2")
                                (.createLiteral VF "<< <s> <p> <o> >>"))
-          outer (.createTriple VF
+          outer (.createTripleTerm VF
                                (.createBNode VF "outer")
                                (.createIRI VF "http://ex/p1")
                                inner)]
