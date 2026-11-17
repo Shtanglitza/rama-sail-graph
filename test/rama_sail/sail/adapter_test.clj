@@ -156,6 +156,28 @@
       (is (= 0 (:offset plan)))
       (is (= 3 (:limit plan))))))
 
+(deftest test-path-step-keeps-path-order
+  ;; The module reads a path step's start from its leftmost pattern and its
+  ;; end from its rightmost. A join swapped by cardinality made
+  ;; ex:a (ex:p1/ex:p2/ex:p3)* ?x walk from the p3 pattern's subject to the
+  ;; p1 pattern's object: wrong results whenever the statistics made p3 look
+  ;; cheaper (W3C property-path pp02, flaky with the statistics).
+  (let [q "SELECT * WHERE { <http://ex/a> (<http://ex/p1>/<http://ex/p2>/<http://ex/p3>)* ?x }"
+        stats (fn [counts] (into {} (for [[p n] counts]
+                                      [(str "<http://ex/" p ">")
+                                       {:count n :distinct-subjects n :distinct-objects n}])))]
+    (doseq [predicate-stats [nil
+                             (stats {"p1" 1000 "p2" 1000 "p3" 1})
+                             (stats {"p1" 1 "p2" 1000 "p3" 1000})]]
+      (binding [rama-sail.sail.optimization/*predicate-stats* predicate-stats]
+        (let [alp (->> (sparql->plan q) (tree-seq map? vals) (filter #(= :arbitrary-length-path (:op %))) first)
+              step (:step-plan alp)
+              leaves (fn leaves [p] (if (= :join (:op p)) (concat (leaves (:left p)) (leaves (:right p))) [p]))]
+          (testing (str "statistics " predicate-stats)
+            (is (= ["<http://ex/p1>" "<http://ex/p2>" "<http://ex/p3>"]
+                   (map #(get-in % [:pattern :p]) (leaves step))))
+            (is (= ["<http://ex/a>" "?x"] (#'queries/find-plan-endpoints step)))))))))
+
 (deftest test-escape-unescape-strings
   (testing "Basic string - no special characters"
     (is (= "hello world" (unescape-str (escape-str "hello world"))))

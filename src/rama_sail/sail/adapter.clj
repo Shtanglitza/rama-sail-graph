@@ -10,11 +10,13 @@
             [rama-sail.sail.serialization :as ser :refer [val->str str->val DEFAULT-CONTEXT-VAL VF]]
             [rama-sail.sail.triple-refs :as triple-refs])
   (:import (java.util Iterator)
+           (java.util.function Supplier)
            (org.eclipse.rdf4j.common.transaction IsolationLevels)
            (org.eclipse.rdf4j.query QueryInterruptedException)
            (org.eclipse.rdf4j.query.algebra.evaluation EvaluationStrategy TripleSource)
            (org.eclipse.rdf4j.query.algebra.evaluation.federation FederatedServiceResolver)
            (org.eclipse.rdf4j.query.algebra.evaluation.impl DefaultEvaluationStrategyFactory)
+           (org.eclipse.rdf4j.collection.factory.impl DefaultCollectionFactory)
            [org.eclipse.rdf4j.sail.helpers AbstractSail AbstractSailConnection]
            [org.eclipse.rdf4j.sail UpdateContext]
            [org.eclipse.rdf4j.model Value Resource Statement IRI ValueFactory Namespace]
@@ -482,7 +484,12 @@
                         service-resolver (reify FederatedServiceResolver
                                            (getService [_ serviceUrl]
                                              (throw (UnsupportedOperationException. "SERVICE not supported"))))
-                        ^DefaultEvaluationStrategyFactory factory (DefaultEvaluationStrategyFactory. service-resolver)
+                        ;; The factory hands its collection factory to the strategy:
+                        ;; null unless set (RDF4J's own SAILs set theirs), and
+                        ;; property paths, DISTINCT, ... need one.
+                        ^DefaultEvaluationStrategyFactory factory
+                        (doto (DefaultEvaluationStrategyFactory. service-resolver)
+                          (.setCollectionFactory (reify Supplier (get [_] (DefaultCollectionFactory.)))))
                         ^EvaluationStrategy strategy (.createEvaluationStrategy factory dataset triple-source nil)]
                     (-> strategy
                         (.precompile tuple-expr)

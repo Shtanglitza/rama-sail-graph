@@ -158,6 +158,15 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- **A sequence inside `*` or `+` could return wrong results.** For
+  `:a (:p1/:p2/:p3)* ?x` the compiler ordered the step's patterns by estimated cardinality, and the
+  module reads a step's start from its first pattern and its end from its last. When the statistics
+  made `:p3` look cheaper, the path walked from `:p3`'s subject to `:p1`'s object (`[:a :b]`
+  instead of `[:a :c]` on the W3C `pp02` data), so the answer changed with the store's statistics.
+  A path's step is now compiled in path order. Client-side change.
+- **Queries falling back to RDF4J's evaluation failed when they needed a collection factory**
+  (a property path inside `GRAPH`, ...) with a `NullPointerException`: RDF4J's strategy factory
+  passes on a collection factory only when the SAIL sets one, and RamaSail did not.
 - **Triple-term patterns joined with other patterns returned wrong results.** RDF4J places the
   part of `<< s p o >>` that builds or takes apart the triple term before the pattern that uses the
   term, and joins it with whatever precedes it in the group. The compiler paired it with that
