@@ -8,7 +8,8 @@
             Order OrderElem
             Group GroupElem Count Sum Avg Min Max
             If Regex In ListMemberOperator IsURI IsBNode IsLiteral IsNumeric Lang LangMatches Datatype SameTerm
-            TripleRef ValueExprTripleRef StatementPattern$Scope]
+            TripleRef ValueExprTripleRef StatementPattern$Scope
+            IsTriple TripleComponent TripleComponent$Role]
            [org.eclipse.rdf4j.query BindingSet]))
 
 ;;; -----------------------------------------------------------------------------
@@ -114,13 +115,19 @@
                      (rest filters))}
       bgp)))
 
+(def ^:private ^:dynamic *keep-join-order*
+  "True while compiling a property path's step: the module reads the step's
+   start from its leftmost pattern and its end from its rightmost, so a join
+   there must keep the path's order (see arbitrary-length-path-query-topology)."
+  false)
+
 (defmethod tuple-expr->plan Join [^Join j]
   (let [left-plan (tuple-expr->plan (.getLeftArg j))
         right-plan (tuple-expr->plan (.getRightArg j))
         join-vars (compute-join-vars (.getLeftArg j) (.getRightArg j))
-        left-card (estimate-plan-cardinality left-plan)
-        right-card (estimate-plan-cardinality right-plan)
-        should-swap? (< left-card right-card)]
+        should-swap? (and (not *keep-join-order*)
+                          (< (estimate-plan-cardinality left-plan)
+                             (estimate-plan-cardinality right-plan)))]
     (if should-swap?
       {:op :join
        :left right-plan
@@ -240,7 +247,10 @@
         ;; Extract the predicate from the path expression (usually a StatementPattern)
         path-expr (.getPathExpression alp)
         _ (reject-graph-scoped-path! (.getContextVar alp))
-        step-plan (tuple-expr->plan path-expr)]
+        ;; In path order: a swapped join made (:p1/:p2/:p3)* walk from the
+        ;; :p3 pattern's subject to the :p1 pattern's object, whenever the
+        ;; statistics made :p3 look cheaper.
+        step-plan (binding [*keep-join-order* true] (tuple-expr->plan path-expr))]
     ;; Same repeated-variable limitation as ZeroLengthPath (see above).
     (when (and (is-variable? s-val) (= s-val o-val))
       (throw (UnsupportedOperationException.
@@ -431,7 +441,19 @@
      :arg (value-expr->plan (first args))
      :set (mapv value-expr->plan (rest args))}))
 
-;;; --- RDF-star Triple Term Support ---
+;;; --- Triple terms ---
+
+(defmethod value-expr->plan IsTriple [^IsTriple expr]
+  ;; isTRIPLE(x)
+  {:type :is-triple :arg (value-expr->plan (.getArg expr))})
+
+(defmethod value-expr->plan TripleComponent [^TripleComponent expr]
+  ;; SUBJECT(t), PREDICATE(t), OBJECT(t)
+  {:type (condp = (.getRole expr)
+           TripleComponent$Role/SUBJECT :triple-subject
+           TripleComponent$Role/PREDICATE :triple-predicate
+           TripleComponent$Role/OBJECT :triple-object)
+   :arg (value-expr->plan (.getTripleRefVar expr))})
 
 (defmethod value-expr->plan ValueExprTripleRef [^ValueExprTripleRef expr]
   ;; TRIPLE(?s, ?p, ?o) constructor — builds a triple term from components

@@ -751,17 +751,52 @@
                  (not (is-variable? (:c pattern))))
         s))))
 
-(defn- strip-filters
-  "[inner exprs]: `plan` without the :filter operators wrapping it, and their
-   expressions, outermost first."
+(defn- strip-wrappers
+  "[inner wrappers]: `plan` without the :filter and :bind operators wrapping it,
+   and those operators without their :sub-plan, outermost first."
   [plan]
-  (loop [plan plan exprs []]
-    (if (= :filter (:op plan))
-      (recur (:sub-plan plan) (conj exprs (:expr plan)))
-      [plan exprs])))
+  (loop [plan plan wrappers []]
+    (if (#{:filter :bind} (:op plan))
+      (recur (:sub-plan plan) (conj wrappers (dissoc plan :sub-plan)))
+      [plan wrappers])))
 
-(defn- wrap-filters [plan exprs]
-  (reduce (fn [p e] {:op :filter :sub-plan p :expr e}) plan (rseq (vec exprs))))
+(defn- rewrap [plan wrappers]
+  (reduce (fn [p w] (assoc w :sub-plan p)) plan (rseq (vec wrappers))))
+
+(defn- join-compatible-bind?
+  "?v := IF(BOUND(?v), ?v, e): keeps a ?v the input already has (a filter
+   above then compares it with e), so it gives the join's rows whether or not
+   the input binds ?v. rama-sail.sail.triple-refs binds a triple term's parts
+   this way."
+  [{:keys [var expr]}]
+  (and (= :if (:type expr))
+       (= {:type :bound :var var} (:condition expr))
+       (= {:type :var :name var} (:then expr))))
+
+(defn- movable-wrappers?
+  "True when the filters and binds around a lookup BGP give the same rows
+   applied after a batch-enrich of `scope`'s input as on the BGP before the
+   join: each uses only the BGP's variables and those bound by binds below
+   it, and each bind either is join-compatible or binds a variable the input
+   never binds."
+  [wrappers lookup-vars scope]
+  (loop [allowed lookup-vars
+         [w & more] (rseq (vec wrappers))]
+    (cond
+      (nil? w) true
+
+      (= :filter (:op w))
+      (and (set/subset? (extract-expr-vars (:expr w)) allowed)
+           (recur allowed more))
+
+      :else
+      (and (every? (fn [{:keys [var expr] :as b}]
+                     (if (join-compatible-bind? b)
+                       (set/subset? (extract-expr-vars (:else expr)) allowed)
+                       (and (set/subset? (extract-expr-vars expr) allowed)
+                            (not (may-bind? scope var)))))
+                   (:bindings w))
+           (recur (into allowed (map :var (:bindings w))) more)))))
 
 (defn- batch-enrich-node
   "A batch-enrich of `sub-plan` with the property-lookup BGP `lookup`, or nil
@@ -778,13 +813,14 @@
      merge assoc's it, silently overwriting (instead of equality-checking) an
      existing binding, e.g. one coming from an OPTIONAL.
 
-   `lookup` may be wrapped in filters over its own two variables (filters
-   pushed onto the BGP): they are applied after the batch-enrich, where both
+   `lookup` may be wrapped in filters and binds over its own two variables
+   (filters pushed onto the BGP; a triple-term pattern's checks and parts, see
+   movable-wrappers?): they are applied after the batch-enrich, where both
    variables have the values the BGP row had. Not with `optional?`: a failing
    filter must keep the row unextended, not drop it."
   ([sub-plan lookup] (batch-enrich-node sub-plan lookup false))
   ([sub-plan lookup optional?]
-   (let [[bgp exprs] (strip-filters lookup)
+   (let [[bgp wrappers] (strip-wrappers lookup)
          s-var (is-property-lookup-bgp? bgp)
          o-var (get-in bgp [:pattern :o])
          scope (plan-var-scope sub-plan)
@@ -795,19 +831,19 @@
                 (not (:unknown? scope))
                 ;; ?var p ?var: object and lookup var coincide; keep the join
                 (not= s-var o-var)
-                (or (empty? exprs)
+                (or (empty? wrappers)
                     (and (not optional?)
-                         (every? #(set/subset? (extract-expr-vars %) #{s-var o-var}) exprs))))
+                         (movable-wrappers? wrappers #{s-var o-var} scope))))
        (when-let [key (cond (key-ok? s-var o-var) :subject
                             (key-ok? o-var s-var) :object)]
-         (wrap-filters (cond-> {:op :batch-enrich
+         (rewrap (cond-> {:op :batch-enrich
                                 :sub-plan sub-plan
                                 :predicate (get-in bgp [:pattern :p])
                                 :subject-var s-var
                                 :object-var o-var
                                 :context (get-in bgp [:pattern :c])}
                          (= key :object) (assoc :by-object? true))
-                       exprs))))))
+                 wrappers))))))
 
 (defn- transform-to-batch-enrich
   "Transform a join with property lookup into batch-enrich.
@@ -818,18 +854,18 @@
 
 (defn- lookup-no-larger?
   "True when `input` is estimated to have no more rows than the property-lookup
-   BGP `lookup` (filters around it ignored: a scan reads them all) has triples.
+   BGP `lookup` (filters and binds around it ignored: a scan reads them all) has triples.
    Hash-joining scans every triple of the predicate; batch-enrich does one
    lookup per input row, so this is when it wins."
   [input lookup]
-  (<= (estimate-plan-cardinality input) (estimate-plan-cardinality (first (strip-filters lookup)))))
+  (<= (estimate-plan-cardinality input) (estimate-plan-cardinality (first (strip-wrappers lookup)))))
 
 (defn- commuted-batch-enrich
   "batch-enrich for a join whose property-lookup BGP is on the LEFT. Join
    ordering puts the larger input on the left (the right is the hash table),
    so a scan-sized BGP probed by a few rows usually lands here."
   [{:keys [left right]}]
-  (when (and (is-property-lookup-bgp? (first (strip-filters left))) (lookup-no-larger? right left))
+  (when (and (is-property-lookup-bgp? (first (strip-wrappers left))) (lookup-no-larger? right left))
     (batch-enrich-node right left)))
 
 (defn- optional-batch-enrich

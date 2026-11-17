@@ -79,7 +79,7 @@
    "\"nested\"@en"                          ;; looks like a lang-tagged N-Triples literal
    "\"nested\"^^<http://ex/dt>"             ;; looks like a typed N-Triples literal
    "_:looks-like-a-bnode"
-   "<< <s> <p> <o> >>"                      ;; looks like an RDF-star triple term
+   "<< <s> <p> <o> >>"                      ;; looks like a triple term
    "  surrounding whitespace  "
    ;; A label containing the NUL character U+0000 now round-trips: unescape-str
    ;; scans in a single pass instead of using U+0000 as an internal placeholder,
@@ -133,7 +133,7 @@
   (.createBNode VF ^String (pick rnd bnode-ids)))
 
 (defn- gen-simple-value
-  "A value that may appear inside an RDF-star triple term."
+  "A value that may appear inside a triple term."
   ^Value [^Random rnd]
   (case (.nextInt rnd 5)
     0 (gen-iri rnd)
@@ -143,12 +143,12 @@
     4 (gen-bnode rnd)))
 
 (defn- gen-triple-term
-  "RDF-star triple value. Subject is a Resource (IRI/BNode), predicate an IRI,
+  "A triple term. Subject is a Resource (IRI/BNode), predicate an IRI,
    object any simple value — including nested triple terms and literals whose
    labels contain '<<' or '>>', which now round-trip after parse-triple-term-parts
    was fixed to skip string literals when scanning for the closing '>>'."
   ^Value [^Random rnd object-gen]
-  (.createTriple VF
+  (.createTripleTerm VF
                  (if (zero? (.nextInt rnd 2)) (gen-iri rnd) (gen-bnode rnd))
                  (gen-iri rnd)
                  ^Value (object-gen rnd)))
@@ -213,11 +213,11 @@
 
 (deftest test-explicit-nested-triple-roundtrip
   (testing "a hand-built triple-in-triple round-trips"
-    (let [inner (.createTriple VF
+    (let [inner (.createTripleTerm VF
                                (.createIRI VF "http://ex/s2")
                                (.createIRI VF "http://ex/p2")
                                (.createLiteral VF "inner \"label\"\nwith@stuff^^<x>" "en-US"))
-          outer (.createTriple VF
+          outer (.createTripleTerm VF
                                (.createBNode VF "outer")
                                (.createIRI VF "http://ex/π#p")
                                inner)]
@@ -266,21 +266,21 @@
   ;; string literals, so a nested literal containing >> or << threw
   ;; StringIndexOutOfBounds. The end-finder now skips literals.
   (testing "a nested triple whose inner literal contains << or >> round-trips"
-    (let [inner (.createTriple VF
+    (let [inner (.createTripleTerm VF
                                (.createIRI VF "http://ex/s2")
                                (.createIRI VF "http://ex/p2")
                                (.createLiteral VF "has << and >> inside"))
-          outer (.createTriple VF
+          outer (.createTripleTerm VF
                                (.createIRI VF "http://ex/s1")
                                (.createIRI VF "http://ex/p1")
                                inner)]
       (assert-roundtrip! outer)))
   (testing "a nested literal that looks exactly like a triple term round-trips"
-    (let [inner (.createTriple VF
+    (let [inner (.createTripleTerm VF
                                (.createIRI VF "http://ex/s2")
                                (.createIRI VF "http://ex/p2")
                                (.createLiteral VF "<< <s> <p> <o> >>"))
-          outer (.createTriple VF
+          outer (.createTripleTerm VF
                                (.createBNode VF "outer")
                                (.createIRI VF "http://ex/p1")
                                inner)]

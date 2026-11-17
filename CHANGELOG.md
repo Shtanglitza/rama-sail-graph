@@ -19,6 +19,16 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an optional `--auth-token` (Bearer) gate, and a configurable `--cors-origin`.
 
 ### Added
+- **W3C RDF 1.2 and SPARQL 1.2 test suites** (`lein test :w3c`), vendored from w3c/rdf-tests
+  (`test/resources/w3c/SOURCE.md`): every SPARQL 1.2 suite (triple terms, codepoint escapes,
+  expressions, grouping, language direction, version, syntax) and the Turtle, TriG, N-Triples,
+  N-Quads and RDF/XML 1.2 suites, each test run through the store. Expected failures are listed by
+  test id with their reason, and the run fails when one of them passes.
+- The SPARQL 1.1 property-path suite runs on the same W3C runner: its named-graph tests (`pp07`,
+  `pp34`) now load their graphs and pass. Queries are parsed with their file as base IRI, as the
+  W3C suites expect.
+- N-Quads loading (`rdf4j-rio-nquads`): the bulk loader and SAIL `add` read `.nq` files, which
+  failed before for want of the parser.
 - **`rama-sail.migrate`: rewrite subject-position triple terms before the RDF4J 6 upgrade.** RDF 1.2
   allows a triple term only as an object. `migrate!` moves every `<< s p o >> :x :y g` to a reifier
   (`R rdf:reifies << s p o >> g`, `R :x :y g`; one deterministic blank node per distinct triple
@@ -86,6 +96,39 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are shrunk to a minimal query. `RANDOM_QUERY_SEED` / `RANDOM_QUERY_COUNT` override the run.
 
 ### Changed
+- **Breaking: RDF4J 6.1.0 (from 5.2.2), RDF 1.2 and SPARQL 1.2; Java 25.** RDF4J 6 replaces RDF-star
+  with RDF 1.2: a triple term (`<<( s p o )>>`, RDF4J `TripleTerm`) is a value allowed only as an
+  object, and SPARQL `<< s p o >> :source ?x` reads the triple's reifiers
+  (`?r rdf:reifies <<( s p o )>> ; :source ?x`). `~ ?r` (the reifier) and `{| ... |}` (annotations)
+  work in queries and data. **A store with triple terms in subject position must be migrated with
+  `rama-sail.migrate` on the previous (RDF4J 5) release before upgrading** (README, "Before upgrading
+  to RDF4J 6"); reading such data now fails with an error naming `rama-sail.migrate`. Stored
+  canonical strings are unchanged (checked against strings recorded on RDF4J 5.2.2), so migrated
+  data is found as before. Clients and the SPARQL server need Java 25 (RDF4J 6 is compiled for it;
+  CI and releases build on 25). The module no longer loads RDF4J classes (`DEFAULT-CONTEXT-VAL`
+  moved to the new `rama-sail.terms`), so Rama workers stay on the Java they run. Related changes:
+  - Language-tagged literals with a base direction (`"text"@ar--rtl`) are stored as
+    `"text"@ar--rtl`.
+  - The bulk loader keeps language tags as written; RDF4J 6's parsers lowercase them by default,
+    which would no longer match data stored earlier and SPARQL constants.
+  - `TRIPLE(s, p, o)` is an error unless `s` is an IRI or blank node and `p` an IRI (a triple term
+    as subject was allowed before). Module-side change: redeploy the module.
+  - `isTRIPLE`, `SUBJECT`, `PREDICATE` and `OBJECT` (RDF4J 6's `IsTriple` / `TripleComponent`)
+    compile to native plans.
+  - `<< s :p ?o >> :source :hr` starts from the selective pattern: a `batch-enrich` may now carry
+    the triple-term checks and the binding of its parts above it, so `rdf:reifies` is looked up
+    per reifier instead of scanned.
+  - SPARQL 1.2 expression semantics, all module-side (redeploy the module): `LANG` of
+    `"x"@en--ltr` is `"en"` and `DATATYPE` is `rdf:dirLangString`, and the direction takes part in
+    `=`; `=` compares triple terms part by part (`<<( :a :b 123 )>> = <<( :a :b 123.0 )>>`) and
+    `ORDER BY` orders them by subject, then predicate, then object; the effective boolean value of
+    an invalid `xsd:boolean` (`"z"^^xsd:boolean`) is a type error instead of false.
+  - A constant triple term used outside its pattern (`CONSTRUCT WHERE { << :a :b :c >> :q :z }`)
+    is bound again after the pattern is rewritten, so the CONSTRUCT template sees it.
+  - RDF4J's SAIL test suite 6.1.0 runs on JUnit 6.1.1 (the 1.10 console launcher could not
+    discover its tests): RDFStoreTest passes 41 of 41, SailIsolationLevelTest 10 of 10.
+  - Queries that fall back to RDF4J's evaluation run on a copy of the query tree. RDF4J 6 builds
+    some nodes (`STRLANGDIR`, ...) on immutable lists, which the evaluation rewrote in place.
 - **Rama 1.10.0 (from 1.9.0), Clojure 1.12.6.** Rama 1.10 fixes yielding selects over two range
   navigators, which the limited index scans (`find-triples-limit`) use, and stalled or failed
   backups. It also bundles Ring 1.15 on Jetty 12 and Jackson 2.22, which collided with versions this
@@ -158,6 +201,16 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- **A sequence inside `*` or `+` could return wrong results.** For
+  `:a (:p1/:p2/:p3)* ?x` the compiler ordered the step's patterns by estimated cardinality, and the
+  module reads a step's start from its first pattern and its end from its last. A reordered step
+  walked from `:p3`'s subject to `:p1`'s object. This did not need skewed statistics: on a chain
+  with equal counts for the three predicates the query returned only its start node (1 row instead
+  of 101), and on the W3C `pp02` data `[:a :b]` instead of `[:a :c]`, depending on the statistics.
+  A path's step is now compiled in path order. Client-side change.
+- **Queries falling back to RDF4J's evaluation failed when they needed a collection factory**
+  (a property path inside `GRAPH`, ...) with a `NullPointerException`: RDF4J's strategy factory
+  passes on a collection factory only when the SAIL sets one, and RamaSail did not.
 - **Triple-term patterns joined with other patterns returned wrong results.** RDF4J places the
   part of `<< s p o >>` that builds or takes apart the triple term before the pattern that uses the
   term, and joins it with whatever precedes it in the group. The compiler paired it with that
@@ -279,6 +332,7 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   12 relations) with planning moved inside the query timeout.
 
 ### Removed
+- The `addStatement` check rejecting a triple term as context: RDF4J 6 cannot pass one.
 - Dead BNode-skolemization machinery and the unused `bnode-map` transaction atom.
 
 ## 0.1.0 — Initial implementation

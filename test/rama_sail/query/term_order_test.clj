@@ -153,6 +153,31 @@
   (testing "ties keep input order (stable)"
     (is (= [(int-lit 1) (lit "1.0" "decimal")] (order-by [(int-lit 1) (lit "1.0" "decimal")])))))
 
+(defn- triple [s p o] (str "<< " s " " p " " o " >>"))
+
+(deftest test-triple-terms-compare-part-by-part
+  ;; SPARQL 1.2: = and ORDER BY look inside triple terms (W3C
+  ;; eval-triple-terms op-2 and order-2)
+  (let [a "<http://ex/a>" b "<http://ex/b>"]
+    (testing "= is true when every part is value-equal"
+      (is (= true (cmp :eq (triple a b (int-lit 123)) (triple a b (lit "123.0" "decimal")))))
+      (is (= true (cmp :eq (triple a "<http://ex/q>" (triple a b (int-lit 123)))
+                       (triple a "<http://ex/q>" (triple a b (lit "123.0" "decimal"))))))
+      (is (= false (cmp :ne (triple a b (int-lit 123)) (triple a b (lit "123.0" "decimal")))))
+      (is (= true (expr/terms-equal (triple a b (int-lit 123)) (triple a b (lit "123.0" "decimal"))))))
+    (testing "= is false when one part differs"
+      (is (= false (cmp :eq (triple a b (int-lit 9)) (triple a b (int-lit 123)))))
+      (is (= false (cmp :eq (triple a b (int-lit 9)) (triple b b (int-lit 9))))))
+    (testing "= is a type error when a part cannot be compared and none differs"
+      (is (= :err (cmp :eq (triple a b (lit "x" "unknownType")) (triple a b (lit "y" "unknownType"))))))
+    (testing "ordering operators stay a type error"
+      (is (= :err (cmp :lt (triple a b (int-lit 1)) (triple a b (int-lit 2))))))
+    (testing "ORDER BY: subject, then predicate, then object, each as ORDER BY"
+      (is (= [(triple a b (int-lit -456)) (triple a b (int-lit 123)) (triple a b (triple a a a))
+              (triple b a (int-lit 999)) (triple b b (int-lit 900))]
+             (order-by [(triple b b (int-lit 900)) (triple a b (triple a a a)) (triple a b (int-lit 123))
+                        (triple b a (int-lit 999)) (triple a b (int-lit -456))]))))))
+
 (deftest test-order-key-agrees-with-ordering-operator
   ;; Wherever < is defined (and not a tie), ORDER BY puts the values in the
   ;; same order. (Exception by design, not covered here: xsd:time values that

@@ -13,7 +13,7 @@
             [rama-sail.query.expr :refer [eval-expr evaluate-filter-cond value->term-string]]
             [rama-sail.query.aggregation :as agg]
             [rama-sail.query.helpers :as qh]
-            [rama-sail.sail.serialization :refer [DEFAULT-CONTEXT-VAL]]))
+            [rama-sail.terms :refer [DEFAULT-CONTEXT-VAL]]))
 
 (defn find-triples-query-topology [topologies]
   (<<query-topology topologies "find-triples"

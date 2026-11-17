@@ -29,10 +29,10 @@
             [rama-sail.module.namespaces :as ns-mod]
             [rama-sail.module.queries :as queries]
             [rama-sail.query.helpers :as qh]
-            [rama-sail.sail.serialization :as ser]))
+            [rama-sail.terms :as terms]))
 
 ;; Re-export constants for backward compatibility with tests and external consumers
-(def ^{:doc "Default context value for the default graph"} DEFAULT-CONTEXT-VAL ser/DEFAULT-CONTEXT-VAL)
+(def ^{:doc "Default context value for the default graph"} DEFAULT-CONTEXT-VAL terms/DEFAULT-CONTEXT-VAL)
 (def ^{:doc "RDF type predicate IRI"} RDF-TYPE-PREDICATE qh/RDF-TYPE-PREDICATE)
 
 (def ^{:doc "True for a *triple-depot record the indexer can apply; it drops anything else.

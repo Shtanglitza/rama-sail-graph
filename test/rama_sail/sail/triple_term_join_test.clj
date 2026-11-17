@@ -1,11 +1,16 @@
 (ns rama-sail.sail.triple-term-join-test
   "Triple-term patterns joined with other patterns, in either order.
 
-   RDF4J parses `<< s p o >>` into a TripleRef that builds the term into an
-   anonymous variable, joined into the group BEFORE the pattern that uses that
-   variable. Each query runs in both pattern orders, natively and through the
-   RDF4J fallback (a pending write in the same transaction), against data with
-   near misses: other triple terms, a non-triple object, a second subject."
+   RDF4J parses a triple term `<<( s p o )>>` into a TripleRef that builds the
+   term into an anonymous variable, joined into the group BEFORE the pattern
+   that uses that variable; a reified triple `<< s p o >>` (RDF 1.2) into
+   `?r rdf:reifies ?t` and a ReifiedTripleRef building ?t. Each query runs in
+   both pattern orders, natively and through the RDF4J fallback (a pending write
+   in the same transaction), against data with near misses: other triple terms,
+   a non-triple object, a second reifier of one triple.
+
+   One reifier per triple, as rama-sail.migrate writes them; _:ra is also used
+   in ex:g, so its annotations from both graphs join in the default graph."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [com.rpl.rama :as rama]
             [com.rpl.rama.test :as rtest]
@@ -28,21 +33,17 @@
   "INSERT DATA {
      ex:alice ex:knows ex:bob .
      ex:dave ex:knows ex:bob .
-     << ex:alice ex:knows ex:bob >> ex:source ex:hr .
-     << ex:dave ex:knows ex:bob >> ex:source ex:crm .
-     << ex:alice ex:knows ex:bob >> ex:confidence \"0.9\" .
-     << ex:dave ex:knows ex:bob >> ex:confidence \"0.5\" .
-     ex:carol ex:claims << ex:alice ex:knows ex:bob >> .
-     ex:carol ex:claims << ex:erin ex:likes ex:bob >> .
-     ex:carol ex:claims << ex:bob ex:knows ex:bob >> .
+     _:ra rdf:reifies <<( ex:alice ex:knows ex:bob )>> ; ex:source ex:hr ; ex:confidence \"0.9\" .
+     _:rd rdf:reifies <<( ex:dave ex:knows ex:bob )>> ; ex:source ex:crm ; ex:confidence \"0.5\" .
+     _:rd2 rdf:reifies <<( ex:dave ex:knows ex:bob )>> ; ex:source ex:hr .
+     ex:carol ex:claims <<( ex:alice ex:knows ex:bob )>> .
+     ex:carol ex:claims <<( ex:erin ex:likes ex:bob )>> .
+     ex:carol ex:claims <<( ex:bob ex:knows ex:bob )>> .
      ex:carol ex:claims ex:x .
-     << << ex:alice ex:knows ex:bob >> ex:source ex:hr >> ex:certainty \"high\" .
-     << << ex:dave ex:knows ex:bob >> ex:source ex:crm >> ex:certainty \"low\" .
-     _:r1 rdf:reifies << ex:alice ex:knows ex:bob >> ; ex:source ex:hr .
-     _:r2 rdf:reifies << _:r1 ex:source ex:hr >> ; ex:certainty \"high\" .
-     _:r3 rdf:reifies << ex:dave ex:knows ex:bob >> ; ex:source ex:hr .
+     _:ca rdf:reifies <<( _:ra ex:source ex:hr )>> ; ex:certainty \"high\" .
+     _:cd rdf:reifies <<( _:rd ex:source ex:crm )>> ; ex:certainty \"low\" .
      GRAPH ex:g { ex:alice ex:knows ex:bob .
-                  << ex:alice ex:knows ex:bob >> ex:source ex:wiki . } }")
+                  _:ra rdf:reifies <<( ex:alice ex:knows ex:bob )>> ; ex:source ex:wiki . } }")
 
 (use-fixtures :once
   (fn [f]
@@ -94,27 +95,47 @@
 
 (deftest test-term-with-variables-after-another-pattern
   (check #{{"a" alice}}
-         "SELECT ?a WHERE { ?a ex:knows ex:bob . ex:carol ex:claims << ?a ex:knows ex:bob >> }"
-         "SELECT ?a WHERE { ex:carol ex:claims << ?a ex:knows ex:bob >> . ?a ex:knows ex:bob }"))
+         "SELECT ?a WHERE { ?a ex:knows ex:bob . ex:carol ex:claims <<( ?a ex:knows ex:bob )>> }"
+         "SELECT ?a WHERE { ex:carol ex:claims <<( ?a ex:knows ex:bob )>> . ?a ex:knows ex:bob }"))
 
 (deftest test-constant-term-after-another-pattern
   (testing "the term is claimed: every ?a"
     (check #{{"a" alice} {"a" dave}}
-           "SELECT ?a WHERE { ?a ex:knows ex:bob . ex:carol ex:claims << ex:alice ex:knows ex:bob >> }"
-           "SELECT ?a WHERE { ex:carol ex:claims << ex:alice ex:knows ex:bob >> . ?a ex:knows ex:bob }"))
+           "SELECT ?a WHERE { ?a ex:knows ex:bob . ex:carol ex:claims <<( ex:alice ex:knows ex:bob )>> }"
+           "SELECT ?a WHERE { ex:carol ex:claims <<( ex:alice ex:knows ex:bob )>> . ?a ex:knows ex:bob }"))
   (testing "the term is not claimed: nothing"
     (check #{}
-           "SELECT ?a WHERE { ?a ex:knows ex:bob . ex:carol ex:claims << ex:dave ex:knows ex:bob >> }"
-           "SELECT ?a WHERE { ex:carol ex:claims << ex:dave ex:knows ex:bob >> . ?a ex:knows ex:bob }")))
+           "SELECT ?a WHERE { ?a ex:knows ex:bob . ex:carol ex:claims <<( ex:dave ex:knows ex:bob )>> }"
+           "SELECT ?a WHERE { ex:carol ex:claims <<( ex:dave ex:knows ex:bob )>> . ?a ex:knows ex:bob }")))
 
 (deftest test-only-triple-terms-decompose
   (check #{{"s" alice "p" "http://ex/knows" "o" bob}
            {"s" "http://ex/erin" "p" "http://ex/likes" "o" bob}
            {"s" bob "p" "http://ex/knows" "o" bob}}
-         "SELECT ?s ?p ?o WHERE { ex:carol ex:claims << ?s ?p ?o >> }")
+         "SELECT ?s ?p ?o WHERE { ex:carol ex:claims <<( ?s ?p ?o )>> }")
   (testing "a variable repeated inside the term"
     (check #{{"x" bob}}
-           "SELECT ?x WHERE { ex:carol ex:claims << ?x ex:knows ?x >> }")))
+           "SELECT ?x WHERE { ex:carol ex:claims <<( ?x ex:knows ?x )>> }")))
+
+(deftest test-reified-triple
+  (testing "a constant triple: its reifiers' annotations"
+    (check #{{"s" "http://ex/hr"} {"s" "http://ex/wiki"}}
+           "SELECT ?s WHERE { << ex:alice ex:knows ex:bob >> ex:source ?s }"))
+  (testing "a selective annotation picks the triple"
+    (check #{{"a" dave}}
+           "SELECT ?a WHERE { << ?a ex:knows ex:bob >> ex:source ex:crm }")
+    (check #{{"a" alice} {"a" dave}}
+           "SELECT ?a WHERE { << ?a ex:knows ex:bob >> ex:source ex:hr }"))
+  (testing "the reifier, named with ~"
+    (check #{{"s" "http://ex/crm"}}
+           "SELECT ?s WHERE { << ex:dave ex:knows ex:bob ~ ?r >> ex:source ?s . ?r ex:confidence \"0.5\" }"
+           "SELECT ?s WHERE { ?r ex:confidence \"0.5\" . << ex:dave ex:knows ex:bob ~ ?r >> ex:source ?s }"))
+  (testing "annotation syntax: the triple is asserted and reified"
+    (check #{{"a" alice "s" "http://ex/hr"} {"a" alice "s" "http://ex/wiki"}
+             {"a" dave "s" "http://ex/crm"} {"a" dave "s" "http://ex/hr"}}
+           "SELECT ?a ?s WHERE { ?a ex:knows ex:bob {| ex:source ?s |} }"))
+  (testing "a triple term no reifier reifies (only claimed): nothing"
+    (check #{} "SELECT ?s WHERE { << ex:erin ex:likes ex:bob >> ?p ?s }")))
 
 (deftest test-nested-terms
   (check #{{"a" alice "b" bob "s" "http://ex/hr" "c" "high"}
@@ -128,8 +149,8 @@
 
 (deftest test-reifier-chain
   (check #{{"c" "high"}}
-         "SELECT ?c WHERE { ?r2 rdf:reifies << ?x ex:source ex:hr >> ; ex:certainty ?c . ?x rdf:reifies << ex:alice ex:knows ex:bob >> }"
-         "SELECT ?c WHERE { ?x rdf:reifies << ex:alice ex:knows ex:bob >> . ?r2 rdf:reifies << ?x ex:source ex:hr >> ; ex:certainty ?c }"))
+         "SELECT ?c WHERE { ?r2 rdf:reifies <<( ?x ex:source ex:hr )>> ; ex:certainty ?c . ?x rdf:reifies <<( ex:alice ex:knows ex:bob )>> }"
+         "SELECT ?c WHERE { ?x rdf:reifies <<( ex:alice ex:knows ex:bob )>> . ?r2 rdf:reifies <<( ?x ex:source ex:hr )>> ; ex:certainty ?c }"))
 
 (deftest test-term-inside-graph
   (check #{{"a" alice "s" "http://ex/wiki"}}
@@ -174,10 +195,10 @@
                 (with-open [it (.evaluate q)]
                   (set (map #(.stringValue (.getValue % "s")) (iterator-seq it))))))]
     (with-open [conn (.getConnection *repo*)]
-      (is (= #{"http://ex/crm"} (run conn)) "native"))
+      (is (= #{"http://ex/crm" "http://ex/hr"} (run conn)) "native"))
     (with-open [conn (.getConnection *repo*)]
       (.begin conn)
       (.add conn (.createIRI vf "http://ex/unrelated") (.createIRI vf "http://ex/p") (.createIRI vf "http://ex/o")
             (into-array Resource []))
-      (try (is (= #{"http://ex/crm"} (run conn)) "fallback")
+      (try (is (= #{"http://ex/crm" "http://ex/hr"} (run conn)) "fallback")
            (finally (.rollback conn))))))

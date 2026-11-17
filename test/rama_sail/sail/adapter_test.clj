@@ -6,7 +6,7 @@
             [rama-sail.module.queries :as queries])
   (:import [org.eclipse.rdf4j.model.impl SimpleValueFactory]
            [org.eclipse.rdf4j.model.vocabulary XSD]
-           [org.eclipse.rdf4j.model Literal Triple]
+           [org.eclipse.rdf4j.model Literal TripleTerm]
            [org.eclipse.rdf4j.query.algebra ArbitraryLengthPath EmptySet Join LeftJoin Projection ProjectionElem ProjectionElemList SingletonSet Slice StatementPattern Var ZeroLengthPath]))
 
 (def ^:private ^org.eclipse.rdf4j.model.ValueFactory VF (SimpleValueFactory/getInstance))
@@ -155,6 +155,28 @@
 
       (is (= 0 (:offset plan)))
       (is (= 3 (:limit plan))))))
+
+(deftest test-path-step-keeps-path-order
+  ;; The module reads a path step's start from its leftmost pattern and its
+  ;; end from its rightmost. A join swapped by cardinality made
+  ;; ex:a (ex:p1/ex:p2/ex:p3)* ?x walk from the p3 pattern's subject to the
+  ;; p1 pattern's object: wrong results whenever the statistics made p3 look
+  ;; cheaper (W3C property-path pp02, flaky with the statistics).
+  (let [q "SELECT * WHERE { <http://ex/a> (<http://ex/p1>/<http://ex/p2>/<http://ex/p3>)* ?x }"
+        stats (fn [counts] (into {} (for [[p n] counts]
+                                      [(str "<http://ex/" p ">")
+                                       {:count n :distinct-subjects n :distinct-objects n}])))]
+    (doseq [predicate-stats [nil
+                             (stats {"p1" 1000 "p2" 1000 "p3" 1})
+                             (stats {"p1" 1 "p2" 1000 "p3" 1000})]]
+      (binding [rama-sail.sail.optimization/*predicate-stats* predicate-stats]
+        (let [alp (->> (sparql->plan q) (tree-seq map? vals) (filter #(= :arbitrary-length-path (:op %))) first)
+              step (:step-plan alp)
+              leaves (fn leaves [p] (if (= :join (:op p)) (concat (leaves (:left p)) (leaves (:right p))) [p]))]
+          (testing (str "statistics " predicate-stats)
+            (is (= ["<http://ex/p1>" "<http://ex/p2>" "<http://ex/p3>"]
+                   (map #(get-in % [:pattern :p]) (leaves step))))
+            (is (= ["<http://ex/a>" "?x"] (#'queries/find-plan-endpoints step)))))))))
 
 (deftest test-escape-unescape-strings
   (testing "Basic string - no special characters"
@@ -705,7 +727,7 @@
     (is (= [] (assign-commit-tx-times [] 7)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; RDF-star Triple Term Serialization Tests
+;;; Triple Term Serialization Tests
 ;;; ---------------------------------------------------------------------------
 
 (deftest test-triple-term-serialization
@@ -713,71 +735,75 @@
     (let [s (.createIRI VF "http://ex/alice")
           p (.createIRI VF "http://ex/knows")
           o (.createIRI VF "http://ex/bob")
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       (is (= "<< <http://ex/alice> <http://ex/knows> <http://ex/bob> >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (= s (.getSubject ^Triple parsed)))
-        (is (= p (.getPredicate ^Triple parsed)))
-        (is (= o (.getObject ^Triple parsed))))))
+        (is (instance? TripleTerm parsed))
+        (is (= s (.getSubject ^TripleTerm parsed)))
+        (is (= p (.getPredicate ^TripleTerm parsed)))
+        (is (= o (.getObject ^TripleTerm parsed))))))
 
   (testing "Triple term with literal object"
     (let [s (.createIRI VF "http://ex/alice")
           p (.createIRI VF "http://ex/age")
           o (.createLiteral VF "30" XSD/INTEGER)
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       (is (= "<< <http://ex/alice> <http://ex/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (= o (.getObject ^Triple parsed))))))
+        (is (instance? TripleTerm parsed))
+        (is (= o (.getObject ^TripleTerm parsed))))))
 
   (testing "Triple term with language-tagged literal"
     (let [s (.createIRI VF "http://ex/alice")
           p (.createIRI VF "http://ex/name")
           o (.createLiteral VF "Alice" "en")
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       (is (= "<< <http://ex/alice> <http://ex/name> \"Alice\"@en >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (= o (.getObject ^Triple parsed))))))
+        (is (instance? TripleTerm parsed))
+        (is (= o (.getObject ^TripleTerm parsed))))))
 
   (testing "Triple term with BNode subject"
     (let [s (.createBNode VF "node1")
           p (.createIRI VF "http://ex/knows")
           o (.createIRI VF "http://ex/bob")
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       (is (= "<< _:node1 <http://ex/knows> <http://ex/bob> >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (= s (.getSubject ^Triple parsed))))))
+        (is (instance? TripleTerm parsed))
+        (is (= s (.getSubject ^TripleTerm parsed))))))
 
-  (testing "Nested triple term"
+  (testing "Nested triple term (object position)"
     (let [inner-s (.createIRI VF "http://ex/alice")
           inner-p (.createIRI VF "http://ex/knows")
           inner-o (.createIRI VF "http://ex/bob")
-          inner (.createTriple VF inner-s inner-p inner-o)
-          outer-p (.createIRI VF "http://ex/confidence")
-          outer-o (.createLiteral VF "0.95" XSD/DOUBLE)
-          outer (.createTriple VF inner outer-p outer-o)
+          inner (.createTripleTerm VF inner-s inner-p inner-o)
+          outer-s (.createIRI VF "http://ex/carol")
+          outer-p (.createIRI VF "http://ex/claims")
+          outer (.createTripleTerm VF outer-s outer-p inner)
           serialized (val->str outer)]
-      (is (= "<< << <http://ex/alice> <http://ex/knows> <http://ex/bob> >> <http://ex/confidence> \"0.95\"^^<http://www.w3.org/2001/XMLSchema#double> >>" serialized))
+      (is (= "<< <http://ex/carol> <http://ex/claims> << <http://ex/alice> <http://ex/knows> <http://ex/bob> >> >>" serialized))
       (let [parsed (str->val serialized)]
-        (is (instance? Triple parsed))
-        (is (instance? Triple (.getSubject ^Triple parsed)))
-        (let [inner-parsed (.getSubject ^Triple parsed)]
-          (is (= inner-s (.getSubject ^Triple inner-parsed)))
-          (is (= inner-o (.getObject ^Triple inner-parsed))))))))
+        (is (instance? TripleTerm parsed))
+        (is (instance? TripleTerm (.getObject ^TripleTerm parsed)))
+        (let [inner-parsed (.getObject ^TripleTerm parsed)]
+          (is (= inner-s (.getSubject ^TripleTerm inner-parsed)))
+          (is (= inner-o (.getObject ^TripleTerm inner-parsed)))))))
+
+  (testing "A triple term in subject position (stored before RDF 1.2) names the migration"
+    (let [stored "<< << <http://ex/alice> <http://ex/knows> <http://ex/bob> >> <http://ex/confidence> \"0.95\"^^<http://www.w3.org/2001/XMLSchema#double> >>"]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"rama-sail\.migrate" (str->val stored))))))
 
 (deftest test-triple-term-as-quad-value
   (testing "Triple term can be used as object in a quad tuple"
     (let [s (.createIRI VF "http://ex/alice")
           p (.createIRI VF "http://ex/knows")
           o (.createIRI VF "http://ex/bob")
-          triple (.createTriple VF s p o)
+          triple (.createTripleTerm VF s p o)
           serialized (val->str triple)]
       ;; The serialized triple term is just a string — it can go into any position
       (is (string? serialized))

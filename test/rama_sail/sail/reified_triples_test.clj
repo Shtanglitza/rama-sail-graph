@@ -1,7 +1,8 @@
-(ns rama-sail.sail.rdf-star-test
-  "Integration tests for RDF-star / RDF 1.2 triple term support.
-   Tests SPARQL-star queries with triple term patterns (<< ?s ?p ?o >>)
-   for provenance, confidence, and temporal annotation use cases."
+(ns rama-sail.sail.reified-triples-test
+  "Integration tests for RDF 1.2 triple terms and reified triples, added
+   through the RDF4J API: a reifier `r rdf:reifies <<( s p o )>>` carries the
+   annotations, and SPARQL `<< s p o >>` finds them (provenance and confidence
+   use cases)."
   (:require [clojure.test :refer :all]
             [com.rpl.rama :as rama]
             [com.rpl.rama.test :as rtest]
@@ -14,6 +15,16 @@
 
 (def VF (SimpleValueFactory/getInstance))
 
+(def ^:private reifies (.createIRI VF "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies"))
+
+(defn- reify!
+  "Adds a reifier of `triple-term` with the [predicate object] annotations."
+  [conn triple-term & annotations]
+  (let [r (.createBNode VF)]
+    (.add conn r reifies triple-term (into-array Resource []))
+    (doseq [[p o] (partition 2 annotations)]
+      (.add conn r p o (into-array Resource [])))))
+
 (defn- query-results
   "Execute a SPARQL query and return results as a vector of maps."
   [conn sparql]
@@ -25,7 +36,7 @@
                             :when v]
                         [name (.stringValue v)])))))))
 
-(deftest test-rdf-star-store-and-query-annotations
+(deftest test-store-and-query-annotations
   (with-open [ipc (rtest/create-ipc)]
     (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
     (let [module-name (rama/get-module-name RdfStorageModule)
@@ -39,26 +50,25 @@
             confidence (.createIRI VF "http://ex/confidence")
             asserted-by (.createIRI VF "http://ex/assertedBy")
             carol (.createIRI VF "http://ex/carol")
-            triple-term (.createTriple VF alice knows bob)]
+            triple-term (.createTripleTerm VF alice knows bob)]
 
         ;; Store base triple + 2 annotation triples
         (.begin conn)
         (.add conn alice knows bob (into-array Resource []))
-        (.add conn triple-term confidence
-              (.createLiteral VF "0.95" (.createIRI VF "http://www.w3.org/2001/XMLSchema#double"))
-              (into-array Resource []))
-        (.add conn triple-term asserted-by carol (into-array Resource []))
+        (reify! conn triple-term
+                confidence (.createLiteral VF "0.95" (.createIRI VF "http://www.w3.org/2001/XMLSchema#double"))
+                asserted-by carol)
         (.commit conn)
-        ;; 3 depot appends (1 base + 2 annotations)
         (th/wait-indexed! ipc module-name)
 
-        (testing "Query annotation by known triple term subject"
+        (testing "Query annotation by known reified triple"
           (let [sparql "SELECT ?pred ?val WHERE {
                           << <http://ex/alice> <http://ex/knows> <http://ex/bob> >> ?pred ?val .
                         }"
                 results (query-results conn sparql)]
-            (is (= 2 (count results)) "Should find confidence and assertedBy annotations")
+            (is (= 3 (count results)) "confidence, assertedBy, and the reifier's own rdf:reifies")
             (let [by-pred (group-by #(get % "pred") results)]
+              (is (some? (get by-pred "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies")))
               (is (some? (get by-pred "http://ex/confidence")))
               (is (some? (get by-pred "http://ex/assertedBy"))))))
 
@@ -76,7 +86,7 @@
 
         (.close conn)))))
 
-(deftest test-rdf-star-provenance-query
+(deftest test-provenance-query
   (with-open [ipc (rtest/create-ipc)]
     (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
     (let [module-name (rama/get-module-name RdfStorageModule)
@@ -92,18 +102,17 @@
             source (.createIRI VF "http://ex/source")
             hr-system (.createIRI VF "http://ex/hr-system")
             linkedin (.createIRI VF "http://ex/linkedin")
-            fact1 (.createTriple VF alice works-at acme)
-            fact2 (.createTriple VF bob works-at globex)]
+            fact1 (.createTripleTerm VF alice works-at acme)
+            fact2 (.createTripleTerm VF bob works-at globex)]
 
         (.begin conn)
         ;; Base triples
         (.add conn alice works-at acme (into-array Resource []))
         (.add conn bob works-at globex (into-array Resource []))
         ;; Provenance annotations
-        (.add conn fact1 source hr-system (into-array Resource []))
-        (.add conn fact2 source linkedin (into-array Resource []))
+        (reify! conn fact1 source hr-system)
+        (reify! conn fact2 source linkedin)
         (.commit conn)
-        ;; 4 depot appends
         (th/wait-indexed! ipc module-name)
 
         (testing "Find all facts from a specific source"
@@ -125,7 +134,7 @@
 
         (.close conn)))))
 
-(deftest test-rdf-star-confidence-filter
+(deftest test-confidence-filter
   (with-open [ipc (rtest/create-ipc)]
     (rtest/launch-module! ipc RdfStorageModule {:tasks 4 :threads 2})
     (let [module-name (rama/get-module-name RdfStorageModule)
@@ -146,15 +155,12 @@
 
         (.begin conn)
         (doseq [[s o conf-val] facts]
-          (let [triple (.createTriple VF s knows o)]
+          (let [triple (.createTripleTerm VF s knows o)]
             ;; Base triple
             (.add conn s knows o (into-array Resource []))
             ;; Confidence annotation
-            (.add conn triple confidence
-                  (.createLiteral VF conf-val xsd-double)
-                  (into-array Resource []))))
+            (reify! conn triple confidence (.createLiteral VF conf-val xsd-double))))
         (.commit conn)
-        ;; 6 depot appends (3 base + 3 annotations)
         (th/wait-indexed! ipc module-name)
 
         (testing "Filter by confidence > 0.8"
@@ -172,4 +178,4 @@
         (.close conn)))))
 
 (comment
-  (run-tests 'rama-sail.sail.rdf-star-test))
+  (run-tests 'rama-sail.sail.reified-triples-test))
