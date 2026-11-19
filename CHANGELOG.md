@@ -206,6 +206,16 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- **`rama-sail.server.connection/stop!` closes the RepositoryConnection.** It cast the connection
+  to `java.io.Closeable`, which a RepositoryConnection is not (only `AutoCloseable`); the cast
+  failed inside an empty `catch`, so the connection stayed open.
+- **Rama query errors reach the error mapping unwrapped.** Queries run in a `future`, whose `deref`
+  wraps the query's exception in `ExecutionException`; `errors/wrap-rama-exception` therefore never
+  recognised QueryTopologyInvokeFailed, TopologyDoesNotExist or network errors, and
+  `getStatements` / `hasStatement` could throw the wrapper. The cause is now rethrown.
+- **Filter selectivity for `sameTerm`, the type checks and `isTRIPLE`.** The cost model keyed these
+  on an expression type nothing produces, so they were all estimated at the 0.3 default; `sameTerm`
+  is now 0.05 and the type checks 0.8, as documented. Join orders can change for queries using them.
 - **Aggregates and comparisons that disagreed with SPARQL 1.2 / XPath.** Checked against RDF4J's
   MemoryStore, and against the spec where RDF4J deviates:
   - `AVG` of no values returns `"0"^^xsd:integer` (was unbound).
@@ -366,6 +376,12 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   12 relations) with planning moved inside the query timeout.
 
 ### Removed
+- Dead code (Nov 19, 2026 analysis): `expr/compare-order-keys`, `query.helpers/colocated-join-local`,
+  `serialization/triple->tuple` (no callers), the module's `:triple-ref` plan case (compilation
+  throws on a TripleRef first), the duplicate `+vec-union-combiner` (same as `+vec-concat-combiner`),
+  unreachable `nil` checks in the type-view topologies and `batch-lookup`, the optimizer's 2-plan
+  branch in DP join ordering, and unused requires, imports, refers and parameters. Module-side
+  change: redeploy the module.
 - The `addStatement` check rejecting a triple term as context: RDF4J 6 cannot pass one.
 - Dead BNode-skolemization machinery and the unused `bnode-map` transaction atom.
 

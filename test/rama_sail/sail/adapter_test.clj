@@ -1,5 +1,6 @@
 (ns rama-sail.sail.adapter-test
   (:require [clojure.test :refer :all]
+            [com.rpl.rama :as rama]
             [rama-sail.sail.adapter :as sail]
             [rama-sail.sail.serialization :as ser]
             [rama-sail.sail.compilation :as comp]
@@ -1032,3 +1033,11 @@
                (pattern-of "SELECT * WHERE { ?s ?p ?o }"))))
     (is (nil? (:named-graphs-only
                (pattern-of "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }"))))))
+
+(deftest test-query-error-reaches-the-caller-unwrapped
+  (testing "a failing query throws its own exception, not the future's ExecutionException"
+    ;; errors/wrap-rama-exception dispatches on the exception class, so a
+    ;; wrapper would hide QueryTopologyInvokeFailed and friends from it
+    (with-redefs [rama/foreign-invoke-query (fn [& _] (throw (IllegalStateException. "boom")))]
+      (is (thrown-with-msg? IllegalStateException #"boom"
+                            (sail/invoke-query-with-timeout nil 5000 :plan))))))

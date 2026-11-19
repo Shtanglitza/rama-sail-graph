@@ -1,11 +1,11 @@
 (ns rama-sail.sail.adapter
   (:require [clojure.set :as set]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [clojure.walk :as walk]
             [com.rpl.rama :as rama]
             [rama-sail.errors :as errors]
             [rama-sail.metrics :as metrics]
-            [rama-sail.sail.compilation :as comp :refer [tuple-expr->plan apply-initial-bindings]]
+            [rama-sail.sail.compilation :refer [tuple-expr->plan apply-initial-bindings]]
             [rama-sail.sail.optimization :as opt :refer [*predicate-stats* *global-stats* optimize-plan]]
             [rama-sail.sail.serialization :as ser :refer [val->str str->val DEFAULT-CONTEXT-VAL VF]]
             [rama-sail.sail.triple-refs :as triple-refs])
@@ -18,10 +18,9 @@
            (org.eclipse.rdf4j.query.algebra.evaluation.impl DefaultEvaluationStrategyFactory EvaluationStatistics)
            (org.eclipse.rdf4j.collection.factory.impl DefaultCollectionFactory)
            [org.eclipse.rdf4j.sail.helpers AbstractSail AbstractSailConnection]
-           [org.eclipse.rdf4j.model Value Resource Statement IRI ValueFactory Namespace]
+           [org.eclipse.rdf4j.model Value Resource Statement IRI Namespace]
            [org.eclipse.rdf4j.model.impl SimpleNamespace]
            [org.eclipse.rdf4j.query.algebra TupleExpr]
-           [org.eclipse.rdf4j.sail SailException]
            [org.eclipse.rdf4j.query BindingSet Dataset QueryEvaluationException]
            [org.eclipse.rdf4j.common.iteration CloseableIteration CloseableIteratorIteration]))
 
@@ -32,20 +31,8 @@
   "Estimate query complexity by counting operators in the plan.
    Returns a map with :joins, :bgps, :optionals counts for complexity assessment."
   [plan]
-  (let [join-count (atom 0)
-        bgp-count (atom 0)
-        optional-count (atom 0)]
-    (walk/prewalk
-     (fn [node]
-       (when (map? node)
-         (case (:op node)
-           :join (swap! join-count inc)
-           :left-join (swap! optional-count inc)
-           :bgp (swap! bgp-count inc)
-           nil))
-       node)
-     plan)
-    {:joins @join-count :bgps @bgp-count :optionals @optional-count}))
+  (let [ops (frequencies (keep #(when (map? %) (:op %)) (tree-seq coll? seq plan)))]
+    {:joins (get ops :join 0) :bgps (get ops :bgp 0) :optionals (get ops :left-join 0)}))
 
 (defn- warn-complex-query
   "Log warning for potentially slow queries based on complexity and timeout.
@@ -85,7 +72,12 @@
   [query-qt timeout-ms & args]
   (let [start-time (System/currentTimeMillis)
         result-future (future (apply rama/foreign-invoke-query query-qt args))
-        result (deref result-future timeout-ms ::timeout)]
+        result (try
+                 (deref result-future timeout-ms ::timeout)
+                 (catch java.util.concurrent.ExecutionException e
+                   ;; deref wraps the query's own exception: rethrow that, so
+                   ;; errors/wrap-rama-exception sees the Rama exception class
+                   (throw (or (.getCause e) e))))]
     (if (= result ::timeout)
       (do
         ;; Attempt to cancel. Returns true if cancellation was requested successfully,
@@ -301,7 +293,7 @@
 
 (defn- statement->quad
   "Convert an RDF4J Statement to a quad tuple."
-  [^org.eclipse.rdf4j.model.Statement st]
+  [^Statement st]
   [(val->str (.getSubject st))
    (val->str (.getPredicate st))
    (val->str (.getObject st))
@@ -470,7 +462,7 @@
                                           (.getStatements ^AbstractSailConnection connection-ref s p o include-inferred contexts))
                                         (getValueFactory [_] VF))
                         service-resolver (reify FederatedServiceResolver
-                                           (getService [_ serviceUrl]
+                                           (getService [_ _service-url]
                                              (throw (UnsupportedOperationException. "SERVICE not supported"))))
                         ;; The factory hands its collection factory to the strategy:
                         ;; null unless set (RDF4J's own SAILs set theirs), and
@@ -643,7 +635,7 @@
               ;; Filter out committed statements from cleared contexts
               filtered-committed (if (empty? cleared-contexts)
                                    committed-statements
-                                   (remove (fn [^org.eclipse.rdf4j.model.Statement st]
+                                   (remove (fn [^Statement st]
                                              (let [ctx (.getContext st)
                                                    ctx-str (if ctx (val->str ctx) DEFAULT-CONTEXT-VAL)]
                                                (contains? cleared-contexts ctx-str)))
@@ -965,7 +957,7 @@
                           sync-commits false
                           commit-chunk-size DEFAULT-COMMIT-CHUNK-SIZE}}]
    {:pre [(some? ipc)
-          (and (string? module-name) (not (clojure.string/blank? module-name)))
+          (and (string? module-name) (not (str/blank? module-name)))
           (and (number? query-timeout-ms) (pos? query-timeout-ms))
           (pos-int? commit-chunk-size)]}
    (log/info "Creating RamaSail for module:" module-name "with timeout:" query-timeout-ms "ms"

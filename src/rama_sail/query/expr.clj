@@ -759,11 +759,6 @@
                   [3 0 2 0 (str v) ""]
                   [3 2 0 (:datatype t) (:lex t) ""])))))
 
-(defn compare-order-keys
-  "Compare two order-key vectors (ascending)."
-  [a b]
-  (compare a b))
-
 (defn- string-literal-text
   "Unescaped text of a string or language-tagged literal (REGEX, LANGMATCHES
    arguments), or nil for any other term."

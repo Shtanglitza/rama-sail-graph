@@ -1109,3 +1109,11 @@
                                                      :right (w7-bgp "?t" "<big>" "?b")}
                                                     10)}]
       (is (nil? (:attempts (limited plan))) why))))
+
+(deftest test-filter-selectivity-by-emitted-expression-type
+  (testing "the selectivity arms match the expression types compilation emits"
+    (is (= 0.05 (opt/estimate-filter-selectivity {:type :same-term})))
+    (is (= 0.8 (opt/estimate-filter-selectivity {:type :type-check :check :is-iri})))
+    (is (= 0.8 (opt/estimate-filter-selectivity {:type :is-triple})))
+    (is (= 0.3 (opt/estimate-filter-selectivity {:type :langmatches})))
+    (is (= 0.3 (opt/estimate-filter-selectivity {:type :unknown})))))

@@ -1,6 +1,5 @@
 (ns ^:no-doc rama-sail.query.helpers
   (:require [clojure.string :as str]
-            [clojure.tools.logging :as log]
             [rama-sail.query.expr :refer [eval-expr error error? evaluate-filter-cond
                                           terms-equal compare-terms order-key
                                           order-comparable?]]))
@@ -116,7 +115,7 @@
    (`expr/terms-equal`); < <= > >= use `expr/compare-terms`, under which
    subjects (IRIs, blank nodes, triple terms) are never order-comparable —
    a type error, i.e. the pair is dropped."
-  [s1 s2 filter-spec left-subject right-subject]
+  [s1 s2 filter-spec left-subject]
   (if (nil? filter-spec)
     true  ;; No filter - all pairs valid
     (let [op (:op filter-spec)
@@ -186,7 +185,7 @@
                       j (range n)
                       :let [s1 (subject-vec i)
                             s2 (subject-vec j)]
-                      :when (apply-inequality-filter s1 s2 filter-spec left-subject right-subject)]
+                      :when (apply-inequality-filter s1 s2 filter-spec left-subject)]
                   {left-subject s1
                    right-subject s2
                    join-var join-value}))]
@@ -361,20 +360,6 @@
         (cond-> {s subj}
           p-var? (assoc p pred)
           o-var? (assoc o obj))))))
-
-(defn colocated-join-local
-  "Perform local hash join on two sets of bindings.
-   join-vars specifies which variables to join on."
-  [left-bindings right-bindings join-vars]
-  (if (empty? join-vars)
-    ;; Cross product (compatibility-checked: sides may still share variables)
-    (for [l left-bindings
-          r right-bindings
-          :when (compatible-bindings? l r)]
-      (merge l r))
-    ;; Hash join
-    (let [right-idx (build-hash-index right-bindings join-vars)]
-      (mapcat #(probe-hash-index right-idx % join-vars) left-bindings))))
 
 (defn join-subject-locally
   "Join two patterns for a single subject.

@@ -171,15 +171,15 @@
                                            :when (pairable? u tr)]
                                        [tr i]))]
                 (recur (assoc units i (pair (nth units i) tr)) (remove-node pending tr))
-                [units pending]))]
-        (let [group ^TupleExpr (reduce #(Join. %1 %2) (into units pending))]
-          (.replaceWith root group)
-          ;; A folded term's variable is no longer bound; bind it again where
-          ;; the rest of the query still uses it.
-          (when-let [elems (seq (for [[ext t] folded :when (referenced? holder ext)]
-                                  (ExtensionElem. (ValueConstant. t) ^String ext)))]
-            (.replaceWith group (Extension. (.clone group) ^"[Lorg.eclipse.rdf4j.query.algebra.ExtensionElem;"
-                                            (into-array ExtensionElem elems)))))))))
+                [units pending]))
+            group ^TupleExpr (reduce #(Join. %1 %2) (into units pending))]
+        (.replaceWith root group)
+        ;; A folded term's variable is no longer bound; bind it again where
+        ;; the rest of the query still uses it.
+        (when-let [elems (seq (for [[ext t] folded :when (referenced? holder ext)]
+                                (ExtensionElem. (ValueConstant. t) ^String ext)))]
+          (.replaceWith group (Extension. (.clone group) ^"[Lorg.eclipse.rdf4j.query.algebra.ExtensionElem;"
+                                          (into-array ExtensionElem elems))))))))
 
 (defn pair-triple-refs
   "`tuple-expr` with its triple-term patterns rewritten (see the namespace

@@ -1016,7 +1016,7 @@
                (conj base-plans (:right current)))
         ;; Reached a non-join node - this is the leftmost base plan
         (let [all-plans (conj base-plans current)]
-          ;; Only optimize chains of 3+ joins (4+ relations)
+          ;; Only optimize chains of 3+ relations (2+ joins)
           (when (>= (count all-plans) 3)
             (vec (reverse all-plans))))))))
 
@@ -1099,15 +1099,8 @@
                      dp-join-relation-limit "- using greedy ordering")
           (greedy-join-order base-plans))
 
-      (<= n 2)
-      ;; For 2 or fewer plans, just do simple ordering
-      (if (= n 2)
-        (build-join-node (first base-plans) (second base-plans))
-        (first base-plans))
-
       :else
-
-      ;; DP for 3+ plans
+      ;; DP; extract-join-chain only hands over chains of 3+ plans
       ;; Key: bit mask representing which plans are included
       ;; Value: {:plan <best-plan> :cost <cumulative-cost>}
       (let [plans-vec (vec base-plans)
@@ -1670,8 +1663,10 @@
    - AND: product of children selectivities
    - OR: sum minus product (union of independent events)
    - NOT: 1 - child selectivity
-   - BOUND/ISIRI/etc: passes most rows (0.8)
-   - REGEX: low selectivity (0.1)"
+   - BOUND, ISIRI and the other type checks, isTRIPLE: passes most rows (0.8)
+   - sameTerm: very selective (0.05)
+   - REGEX: low selectivity (0.1)
+   - LANGMATCHES and anything else: 0.3"
   [expr]
   (case (:type expr)
     :cmp (case (:op expr)
@@ -1690,11 +1685,9 @@
              0.3)
     :regex 0.1
     :bound 0.8
-    :func-call (case (:name expr)
-                 ("isIRI" "isURI" "isBlank" "isLiteral" "isNumeric") 0.8
-                 ("sameTerm") 0.05
-                 ("langMatches") 0.3
-                 0.3)
+    (:type-check :is-triple) 0.8
+    :same-term 0.05
+    :langmatches 0.3
     ;; Default
     0.3))
 

@@ -101,6 +101,7 @@
                                               "rama-sail.sail.bulk-load-test"
                                               "rama-sail.sail.serialization-roundtrip-test"
                                               "rama-sail.metrics-test"
+                                              "rama-sail.server.connection-test"
                                               "rama-sail.ci-gate-test"}
                                             (str (:ns m))))
                    ;; :integration is both halves of `integration-namespaces`; CI runs the
