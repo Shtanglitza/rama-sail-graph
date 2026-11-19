@@ -29,7 +29,9 @@
            [io.prometheus.client.exporter.common TextFormat]
            [java.io StringWriter]))
 
-;; Initialize JVM metrics (memory, GC, threads, etc.)
+;; Initialize JVM metrics (memory, GC, threads, etc.). Never read: loading the
+;; namespace registers them once.
+#_{:clj-kondo/ignore [:unused-private-var]}
 (defonce ^:private init-hotspot
   (do (DefaultExports/initialize) true))
 

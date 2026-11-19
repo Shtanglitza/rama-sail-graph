@@ -210,7 +210,7 @@
   ;; so an ordering FILTER keeps no pair (BSBM QJ4's ?product1 < ?product2
   ;; returns no rows, as in RDF4J). != is RDFterm-equal.
   (let [f (fn [op] {:op op :left "?a" :right "?b"})
-        ok? (fn [op s1 s2] (qh/apply-inequality-filter s1 s2 (f op) "?a" "?b"))]
+        ok? (fn [op s1 s2] (qh/apply-inequality-filter s1 s2 (f op) "?a"))]
     (testing "IRIs, blank nodes and triple terms never satisfy an ordering"
       (doseq [op [:lt :le :gt :ge]
               [s1 s2] [["<http://ex/a>" "<http://ex/b>"] ["<http://ex/a>" "<http://ex/a>"]

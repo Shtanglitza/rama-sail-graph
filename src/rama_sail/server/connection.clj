@@ -61,7 +61,8 @@
   "Shut down all resources in a connection state map."
   [{:keys [conn repo ipc manager]}]
   (when conn
-    (try (.close ^java.io.Closeable conn) (catch Exception _)))
+    ;; a RepositoryConnection is AutoCloseable, not java.io.Closeable
+    (try (.close ^java.lang.AutoCloseable conn) (catch Exception _)))
   (when repo
     (try (.shutDown ^SailRepository repo) (catch Exception _)))
   (when ipc

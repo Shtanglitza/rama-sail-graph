@@ -180,8 +180,8 @@
   [v1 v2]
   (into (if (vector? v1) v1 (vec v1)) v2))
 
-;; Combiner for union - merges two vectors for distributed bag-union aggregation
-(def +vec-union-combiner
+;; Combiner that concatenates result vectors (bag union, ordered results)
+(def +vec-concat-combiner
   (combiner bag-concat :init-fn (fn [] [])))
 
 ;; --- Batch Lookup ---
@@ -194,7 +194,6 @@
                     (|hash *subj)
                     (local-select> [(keypath *subj *predicate) ALL (collect-one FIRST) LAST ALL]
                                    $$spoc {:allow-yield? true} :> [*obj *ctx])
-                    (filter> (some? *obj))
                     (<<if (some? *context)
                           (filter> (= *ctx *context))
                           (else>)
@@ -282,11 +281,7 @@
                     (|shuffle)
                     (invoke-query "execute-plan" *plan :> *res)
                     (|origin)
-                    (+vec-union-combiner *res :> *results)))
-
-;; Combiner for ordered results - preserves insertion order
-(def +vec-concat-combiner
-  (combiner bag-concat :init-fn (fn [] [])))
+                    (+vec-concat-combiner *res :> *results)))
 
 (defn project-query-topology [topologies]
   (<<query-topology topologies "project" [*sub-plan *proj-vars :> *results]
@@ -531,21 +526,14 @@
 (defn get-subjects-by-type-query-topology [topologies]
   (<<query-topology topologies "get-subjects-by-type" [*type :> *subjects]
                     (|hash *type)
-                    (local-select> [(keypath *type) (view vec)] $$type-subjects :> *data)
-                    (<<if (nil? *data)
-                          (identity [] :> *subjects)
-                          (else>)
-                          (identity *data :> *subjects))
+                    ;; a missing type navigates to nil, and (vec nil) is []
+                    (local-select> [(keypath *type) (view vec)] $$type-subjects :> *subjects)
                     (|origin)))
 
 (defn get-types-of-subject-query-topology [topologies]
   (<<query-topology topologies "get-types-of-subject" [*subject :> *types]
                     (|hash *subject)
-                    (local-select> [(keypath *subject) (view vec)] $$subject-types :> *data)
-                    (<<if (nil? *data)
-                          (identity [] :> *types)
-                          (else>)
-                          (identity *data :> *types))
+                    (local-select> [(keypath *subject) (view vec)] $$subject-types :> *types)
                     (|origin)))
 
 ;; --- GROUP BY / Aggregates ---
@@ -948,11 +936,6 @@
 
                               (case> :values)
                               (get *plan :bindings :> *results)
-
-                              ;; TripleRef should be rewritten to :bind during compilation.
-                              ;; If it reaches execution, return empty (no standalone enumeration).
-                              (case> :triple-ref)
-                              (identity [] :> *results)
 
                               (case> :batch-enrich)
                               (identity *plan :> {*sub-plan :sub-plan *predicate :predicate

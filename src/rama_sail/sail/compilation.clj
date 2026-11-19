@@ -1,8 +1,8 @@
 (ns ^:no-doc rama-sail.sail.compilation
   (:require [clojure.set :as set]
             [clojure.string :as str]
-            [rama-sail.sail.serialization :refer [val->str DEFAULT-CONTEXT-VAL]]
-            [rama-sail.sail.optimization :refer [is-variable? extract-expr-vars estimate-plan-cardinality optimize-plan get-plan-vars]])
+            [rama-sail.sail.serialization :refer [val->str]]
+            [rama-sail.sail.optimization :refer [is-variable? estimate-plan-cardinality]])
   (:import [org.eclipse.rdf4j.query.algebra And ArbitraryLengthPath BindingSetAssignment Compare Compare$CompareOp Distinct EmptySet Reduced Filter LeftJoin Not Or TupleExpr StatementPattern Join Projection SingletonSet Union ValueConstant ValueExpr Var QueryRoot Slice ZeroLengthPath
             Extension ExtensionElem MathExpr MathExpr$MathOp Str Coalesce Bound FunctionCall
             Order OrderElem
@@ -427,7 +427,7 @@
    :left (value-expr->plan (.getLeftArg expr))
    :right (value-expr->plan (.getRightArg expr))})
 
-(defmethod value-expr->plan In [^In expr]
+(defmethod value-expr->plan In [^In _expr]
   ;; In is a subquery-based IN operator (not list-based; SPARQL's
   ;; FILTER(?x IN (...)) is parsed as ListMemberOperator). Embedding the live
   ;; RDF4J TupleExpr sub-query in the plan cannot serialize to Rama workers

@@ -357,9 +357,6 @@
     ;; Fallback (should generally not happen with valid data)
     :else (.createLiteral VF ^String s)))
 
-(defn triple->tuple [^Resource s ^IRI p ^Value o]
-  [(val->str s) (val->str p) (val->str o)])
-
 (defn quad->tuple [^Resource s ^IRI p ^Value o ^Resource c]
   [(val->str s) (val->str p) (val->str o) (if c (val->str c) DEFAULT-CONTEXT-VAL)])
 

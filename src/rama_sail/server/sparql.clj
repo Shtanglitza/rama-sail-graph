@@ -448,7 +448,7 @@
 
 (defn -main [& args]
   (let [config (parse-args args)
-        _ (println (str "Rama Sail SPARQL Endpoint"))
+        _ (println "Rama Sail SPARQL Endpoint")
         _ (println (str "Mode: " (:mode config) ", Port: " (:port config)))
         conn-state (case (:mode config)
                      "ipc" (do
