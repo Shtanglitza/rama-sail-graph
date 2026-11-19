@@ -206,6 +206,9 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     IRIs and custom datatypes are a type error), as in SPARQL, RDF4J and Jena.
 
 ### Fixed
+- **`deps.edn` matches `project.clj` again.** It still pinned RDF4J 5.2.2 and Ring 1.10.0, lacked
+  `rdf4j-rio-nquads`, the `jetty-server` exclusion and the `commons-io` pin, so a `deps.edn`
+  (git dependency) consumer could not load the library (`Literal$BaseDirection` is RDF4J 6).
 - **`rama-sail.server.connection/stop!` closes the RepositoryConnection.** It cast the connection
   to `java.io.Closeable`, which a RepositoryConnection is not (only `AutoCloseable`); the cast
   failed inside an empty `catch`, so the connection stayed open.

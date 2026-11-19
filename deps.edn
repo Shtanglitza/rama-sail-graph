@@ -1,41 +1,42 @@
 {:paths ["src"]
+ ;; Mirrors :dependencies in project.clj (com.rpl/rama and Clojure are provided: the
+ ;; consumer adds them). Keep the two files in step when bumping a version.
  :deps {com.rpl/rama-helpers {:mvn/version "0.10.0"
                               :exclusions [org.clojure/clojure]}
-        org.eclipse.rdf4j/rdf4j-sail-api {:mvn/version "5.2.2"
-                                          :exclusions [org.slf4j/slf4j-api
-                                                       ch.qos.logback/logback-classic
-                                                       org.slf4j/slf4j-simple]}
-        org.eclipse.rdf4j/rdf4j-queryparser-sparql {:mvn/version "5.2.2"
-                                                    :exclusions [org.slf4j/slf4j-api
-                                                                 ch.qos.logback/logback-classic
-                                                                 org.slf4j/slf4j-simple]}
-        org.eclipse.rdf4j/rdf4j-repository-sail {:mvn/version "5.2.2"
-                                                 :exclusions [org.slf4j/slf4j-api
-                                                              ch.qos.logback/logback-classic
-                                                              org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-sail-api {:mvn/version "6.1.0" :exclusions [org.slf4j/slf4j-api
+                                                                            ch.qos.logback/logback-classic
+                                                                            org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-queryparser-sparql {:mvn/version "6.1.0" :exclusions [org.slf4j/slf4j-api
+                                                                                      ch.qos.logback/logback-classic
+                                                                                      org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-repository-sail {:mvn/version "6.1.0" :exclusions [org.slf4j/slf4j-api
+                                                                                   ch.qos.logback/logback-classic
+                                                                                   org.slf4j/slf4j-simple]}
         io.prometheus/simpleclient {:mvn/version "0.16.0"}
         io.prometheus/simpleclient_hotspot {:mvn/version "0.16.0"}
         io.prometheus/simpleclient_common {:mvn/version "0.16.0"}
-        ring/ring-jetty-adapter {:mvn/version "1.10.0"}
-        org.eclipse.rdf4j/rdf4j-queryresultio-sparqljson {:mvn/version "5.2.2"
-                                                          :exclusions [org.slf4j/slf4j-api
-                                                                       ch.qos.logback/logback-classic
-                                                                       org.slf4j/slf4j-simple]}
-        org.eclipse.rdf4j/rdf4j-queryresultio-sparqlxml {:mvn/version "5.2.2"
-                                                         :exclusions [org.slf4j/slf4j-api
-                                                                      ch.qos.logback/logback-classic
-                                                                      org.slf4j/slf4j-simple]}
-        org.eclipse.rdf4j/rdf4j-queryresultio-text {:mvn/version "5.2.2"
-                                                    :exclusions [org.slf4j/slf4j-api
-                                                                 ch.qos.logback/logback-classic
-                                                                 org.slf4j/slf4j-simple]}
-        org.eclipse.rdf4j/rdf4j-rio-turtle {:mvn/version "5.2.2"
-                                            :exclusions [org.slf4j/slf4j-api
-                                                         ch.qos.logback/logback-classic
-                                                         org.slf4j/slf4j-simple]}
-        org.eclipse.rdf4j/rdf4j-rio-rdfxml {:mvn/version "5.2.2"
-                                            :exclusions [org.slf4j/slf4j-api
-                                                         ch.qos.logback/logback-classic
-                                                         org.slf4j/slf4j-simple]}
-        ring/ring-core {:mvn/version "1.10.0"}}
+        ;; Ring at the version Rama 1.10 bundles; jetty-server comes from Rama (Jetty 12)
+        ring/ring-jetty-adapter {:mvn/version "1.15.5"
+                                 :exclusions [org.eclipse.jetty/jetty-server]}
+        org.eclipse.rdf4j/rdf4j-queryresultio-sparqljson {:mvn/version "6.1.0" :exclusions [org.slf4j/slf4j-api
+                                                                                            ch.qos.logback/logback-classic
+                                                                                            org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-queryresultio-sparqlxml {:mvn/version "6.1.0" :exclusions [org.slf4j/slf4j-api
+                                                                                           ch.qos.logback/logback-classic
+                                                                                           org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-queryresultio-text {:mvn/version "6.1.0" :exclusions [org.slf4j/slf4j-api
+                                                                                      ch.qos.logback/logback-classic
+                                                                                      org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-rio-turtle {:mvn/version "6.1.0" :exclusions [org.slf4j/slf4j-api
+                                                                              ch.qos.logback/logback-classic
+                                                                              org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-rio-rdfxml {:mvn/version "6.1.0" :exclusions [org.slf4j/slf4j-api
+                                                                              ch.qos.logback/logback-classic
+                                                                              org.slf4j/slf4j-simple]}
+        org.eclipse.rdf4j/rdf4j-rio-nquads {:mvn/version "6.1.0" :exclusions [org.slf4j/slf4j-api
+                                                                              ch.qos.logback/logback-classic
+                                                                              org.slf4j/slf4j-simple]}
+        ring/ring-core {:mvn/version "1.15.5"}
+        ;; Rama 1.10 bundles commons-io 2.22.0; RDF4J and Ring ask for older ones
+        commons-io/commons-io {:mvn/version "2.22.0"}}
  :mvn/repos {"releases" {:url "https://nexus.redplanetlabs.com/repository/maven-public-releases"}}}
